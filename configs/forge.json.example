@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "default_provider": "ollama",
+  "providers": {
+    "ollama": {
+      "kind": "openai-compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": ["qwen2.5-coder:7b"]
+    }
+  },
+  "storage": {
+    "path": "~/.forge/forge.db"
+  },
+  "network": {
+    "allowed_hosts": ["127.0.0.1", "localhost"]
+  },
+  "logging": {
+    "level": "info",
+    "file": ""
+  }
+}
