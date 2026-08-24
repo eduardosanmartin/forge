@@ -1,0 +1,40 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build output
+/bin/
+/dist/
+/build/
+
+# Test & coverage
+*.prof
+coverage.txt
+coverage.html
+
+# Local env & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# forge runtime data (sessions, memory, runs)
+.forge/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editors & OS junk
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Logs
+*.log

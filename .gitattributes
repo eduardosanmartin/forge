@@ -1,0 +1,10 @@
+# Normalize line endings: LF in repo for code/docs, CRLF only where Windows requires it
+* text=auto
+*.go text eol=lf
+*.md text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
