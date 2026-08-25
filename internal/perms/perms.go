@@ -43,6 +43,17 @@ type Request struct {
 	Args       []string // shell.exec: command arguments (never affect the decision)
 	Subcommand string   // git: e.g. "push"
 	GitArgs    []string // git: arguments after the subcommand
+
+	// Tool execution parameters (not used by permission engine)
+	Offset     int64  // fs.read: byte offset to start reading from
+	Limit      int64  // fs.read: max bytes to read (-1 = all)
+	Content    string // fs.write: content to write
+	Encoding   string // fs.write: "utf8" or "base64"
+	CreateDirs bool   // fs.write: create parent directories
+	Recursive  bool   // fs.list: recursive listing
+	Pattern    string // fs.list: doublestar glob pattern
+	TimeoutSec int    // shell.exec: timeout in seconds (default 120, max 300)
+	Workdir    string // shell.exec, git: working directory
 }
 
 // Decision is the outcome of one permission check.
