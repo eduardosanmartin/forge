@@ -28,6 +28,8 @@ var baseRedactPatterns = []redactPattern{
 	{regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`), redactedPlaceholder},
 	// GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_ prefixes).
 	{regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,}`), redactedPlaceholder},
+	// Passwords in URLs (user:pass@host).
+	{regexp.MustCompile(`(://[^:/\s]+):([^@/\s]{8,})@`), `${1}:` + redactedPlaceholder + `@`},
 	// Generic key=value / key: value assignments for common secret names;
 	// the key name is preserved, only the value is redacted. Case-insensitive.
 	{
