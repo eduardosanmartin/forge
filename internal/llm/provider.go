@@ -7,25 +7,29 @@ import (
 )
 
 // Message represents a single message in a chat conversation.
+// JSON tags cover both directions: requests serialize through
+// buildRequestBody today, but responses decode directly into these
+// structs, so every wire-facing field MUST carry its OpenAI-compatible
+// snake_case tag.
 type Message struct {
-	Role       string // "system" | "user" | "assistant" | "tool"
-	Content    string
-	ToolCalls  []ToolCall // assistant->tool
-	ToolCallID string     // tool->result
-	Name       string     // tool name for tool messages
+	Role       string     `json:"role"` // "system" | "user" | "assistant" | "tool"
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant->tool
+	ToolCallID string     `json:"tool_call_id,omitempty"` // tool->result
+	Name       string     `json:"name,omitempty"`         // tool name for tool messages
 }
 
 // ToolCall represents a function call made by the assistant.
 type ToolCall struct {
-	ID       string
-	Type     string // "function"
-	Function ToolCallFunction
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function ToolCallFunction `json:"function"`
 }
 
 // ToolCallFunction holds the function name and JSON-encoded arguments.
 type ToolCallFunction struct {
-	Name      string
-	Arguments string // JSON string
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
 }
 
 // ChatRequest represents a request to the chat completion API.
@@ -54,38 +58,38 @@ type ToolFunctionDef struct {
 
 // ChatResponse represents a non-streaming chat completion response.
 type ChatResponse struct {
-	ID      string
-	Model   string
-	Choices []Choice
-	Usage   *Usage
+	ID      string   `json:"id"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   *Usage   `json:"usage,omitempty"`
 }
 
 // Choice represents a single completion choice.
 type Choice struct {
-	Index        int
-	Message      Message
-	FinishReason string
+	Index        int     `json:"index"`
+	Message      Message `json:"message"`
+	FinishReason string  `json:"finish_reason"`
 }
 
 // Usage holds token usage statistics.
 type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // StreamChunk represents a single chunk in a streaming response.
 type StreamChunk struct {
-	ID      string
-	Model   string
-	Choices []StreamChoice
+	ID      string         `json:"id"`
+	Model   string         `json:"model"`
+	Choices []StreamChoice `json:"choices"`
 }
 
 // StreamChoice represents a choice delta in a streaming chunk.
 type StreamChoice struct {
-	Index        int
-	Delta        Message
-	FinishReason *string
+	Index        int     `json:"index"`
+	Delta        Message `json:"delta"`
+	FinishReason *string `json:"finish_reason,omitempty"`
 }
 
 // Provider is the interface that all LLM providers must implement.

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,7 +56,14 @@ func NewOllamaProvider(baseURL string, allowedHosts []string, logger *slog.Logge
 	}
 
 	client := &http.Client{
-		Timeout: 5 * time.Minute, // streaming requests can be long
+		// Generous end-to-end bound per LLM call. Local 7B-class models on
+		// consumer hardware routinely need several minutes for one cold
+		// non-streaming completion (model load + prefill + long generation);
+		// a tighter cap aborts healthy turns of exactly the kind the spec §6
+		// exit criterion demands. Keep internal/client readIdleTimeout ABOVE
+		// this value so clients never idle out while waiting on a frame that
+		// can legitimately take this long.
+		Timeout: 15 * time.Minute,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
 				Timeout: 30 * time.Second,
@@ -84,29 +92,38 @@ func NewOllamaProvider(baseURL string, allowedHosts []string, logger *slog.Logge
 	return p, nil
 }
 
-// validateAllowlist checks if the baseURL host:port is in the allowedHosts list.
-// Empty allowlist denies all. Exact host:port match required.
+// validateAllowlist checks if the baseURL host is in the allowedHosts list.
+// Empty allowlist denies all (RNF-4.9). Matching rules:
+//   - an entry WITH a port ("127.0.0.1:11434") requires an exact host:port match;
+//   - a portless entry ("127.0.0.1") matches the URL's hostname on any port.
+//
+// This keeps shipped defaults usable (config lists bare hostnames) without
+// weakening the deny-by-default posture: anything not matched is still denied.
 func validateAllowlist(baseURL string, allowedHosts []string) error {
 	parsed, err := url.Parse(baseURL)
 	if err != nil {
 		return fmt.Errorf("invalid base_url for allowlist check: %w", err)
 	}
-	host := parsed.Host
-	if host == "" {
+	hostPort := parsed.Host
+	if hostPort == "" {
 		return errors.New("base_url missing host")
 	}
+	hostname := parsed.Hostname()
 
 	if len(allowedHosts) == 0 {
-		return fmt.Errorf("network egress denied: empty allowlist, host %q not allowed", host)
+		return fmt.Errorf("network egress denied: empty allowlist, host %q not allowed", hostPort)
 	}
 
 	for _, allowed := range allowedHosts {
-		if allowed == host {
+		if allowed == hostPort {
+			return nil
+		}
+		if !strings.Contains(allowed, ":") && allowed == hostname {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("network egress denied: host %q not in allowlist %v", host, allowedHosts)
+	return fmt.Errorf("network egress denied: host %q not in allowlist %v", hostPort, allowedHosts)
 }
 
 // refreshModels fetches models from /models (OpenAI-compatible endpoint).
