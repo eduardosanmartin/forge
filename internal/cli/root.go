@@ -48,10 +48,12 @@ func AppFromContext(ctx context.Context) (*App, bool) {
 // Execute runs the forge CLI and returns the resulting error, if any. Errors
 // are already reported to stderr by cobra (SilenceErrors is false); callers
 // typically translate a non-nil error into a non-zero exit status.
+//
+// It executes the RootCommand singleton so subcommands registered via init()
+// hooks are part of the executable tree.
 func Execute() error {
-	root := NewRootCommand()
-	defer closeApp(root)
-	return root.ExecuteContext(context.Background())
+	defer closeApp(RootCommand)
+	return RootCommand.ExecuteContext(context.Background())
 }
 
 // closeApp releases resources stashed on the root command's context after
@@ -76,6 +78,12 @@ func NewRootCommand() *cobra.Command {
 	root.SilenceUsage = true
 	root.SilenceErrors = false
 
+	// Flag mistakes are usage errors: the entrypoint maps them to exit
+	// code 2 (run.go defines the UsageError contract).
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return &UsageError{Err: err}
+	})
+
 	root.PersistentFlags().String("config", "",
 		"explicit project config path (overrides .forge/config.json)")
 	root.PersistentFlags().String("log-level", "",
@@ -93,6 +101,9 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newVersionCommand())
 	return root
 }
+
+// RootCommand returns the root command for external registration.
+var RootCommand = NewRootCommand()
 
 // buildApp resolves configuration and logging for the invoked command:
 // global config overlaid with the chosen project config, --log-level applied
