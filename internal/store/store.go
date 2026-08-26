@@ -294,10 +294,13 @@ func (s *Store) AppendMessage(ctx context.Context, msg *Message) (int, int64, er
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Determine next seq number atomically within transaction
+	// Determine next seq number atomically within transaction.
+	// Sequences are 1-based: GetMessagesSince(sinceSeq=0) must return the
+	// FULL transcript (the reconnect contract, RF-1.4p), and
+	// session.list derives message counts through that same call.
 	var seq int
 	err = tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = ?`,
+		`SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE session_id = ?`,
 		msg.SessionID).Scan(&seq)
 	if err != nil {
 		return 0, 0, fmt.Errorf("get next seq: %w", err)

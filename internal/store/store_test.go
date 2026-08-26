@@ -327,8 +327,8 @@ func TestAppendAndGetMessages(t *testing.T) {
 		if err != nil {
 			t.Fatalf("AppendMessage %d failed: %v", i, err)
 		}
-		if seq != i {
-			t.Fatalf("message %d: seq = %d, want %d", i, seq, i)
+		if seq != i+1 {
+			t.Fatalf("message %d: seq = %d, want %d", i, seq, i+1)
 		}
 		if id == 0 {
 			t.Fatalf("message %d: ID not set", i)
@@ -350,9 +350,9 @@ func TestAppendAndGetMessages(t *testing.T) {
 		t.Fatalf("expected 4 messages, got %d", len(got))
 	}
 
-	// Verify order (newest first = seq 3, 2, 1, 0)
+	// Verify order (newest first = seq 4, 3, 2, 1)
 	for i, msg := range got {
-		expectedSeq := 3 - i
+		expectedSeq := 4 - i
 		if msg.Seq != expectedSeq {
 			t.Fatalf("message index %d: seq = %d, want %d", i, msg.Seq, expectedSeq)
 		}
@@ -500,20 +500,20 @@ func TestGetMessagesSince(t *testing.T) {
 		}
 	}
 
-	// Get messages since seq 2 (should get seq 3, 4)
+	// Get messages since seq 2 (should get seq 3, 4, 5)
 	got, err := s.GetMessagesSince(ctx, session.ID, 2)
 	if err != nil {
 		t.Fatalf("GetMessagesSince failed: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(got))
+	if len(got) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got))
 	}
-	if got[0].Seq != 3 || got[1].Seq != 4 {
-		t.Fatalf("seqs = [%d, %d], want [3, 4]", got[0].Seq, got[1].Seq)
+	if got[0].Seq != 3 || got[2].Seq != 5 {
+		t.Fatalf("seqs = [%d..%d], want [3..5]", got[0].Seq, got[2].Seq)
 	}
 
-	// Since seq 4 (should get none)
-	got, err = s.GetMessagesSince(ctx, session.ID, 4)
+	// Since seq 5 (should get none)
+	got, err = s.GetMessagesSince(ctx, session.ID, 5)
 	if err != nil {
 		t.Fatalf("GetMessagesSince seq 4 failed: %v", err)
 	}
@@ -593,8 +593,8 @@ func TestConcurrentWriters(t *testing.T) {
 		seen[msg.Seq] = true
 	}
 	for i := 0; i < expected; i++ {
-		if !seen[i] {
-			t.Fatalf("missing seq: %d", i)
+		if !seen[i+1] {
+			t.Fatalf("missing seq: %d", i+1)
 		}
 	}
 }
