@@ -14,7 +14,7 @@ import (
 
 // TestShellExecTool_Basic tests basic shell.exec functionality.
 func TestShellExecTool_Basic(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	// Use PowerShell to output a string
 	req := perms.Request{
@@ -40,7 +40,7 @@ func TestShellExecTool_Basic(t *testing.T) {
 
 // TestShellExecTool_Args tests shell.exec with arguments.
 func TestShellExecTool_Args(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	// Use PowerShell for string formatting
 	req := perms.Request{
@@ -61,7 +61,7 @@ func TestShellExecTool_Args(t *testing.T) {
 
 // TestShellExecTool_Timeout tests shell.exec timeout.
 func TestShellExecTool_Timeout(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	// Use ping to create a long-running command (10 pings ~ 9 seconds)
 	req := perms.Request{
@@ -90,7 +90,7 @@ func TestShellExecTool_Timeout(t *testing.T) {
 
 // TestShellExecTool_NonZeroExit tests non-zero exit code.
 func TestShellExecTool_NonZeroExit(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	// PowerShell exit 1 returns exit code 1
 	req := perms.Request{
@@ -112,7 +112,7 @@ func TestShellExecTool_NonZeroExit(t *testing.T) {
 
 // TestShellExecTool_Truncation tests output truncation at 50KB.
 func TestShellExecTool_Truncation(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	req := perms.Request{
 		Kind:    perms.KindShell,
@@ -132,7 +132,7 @@ func TestShellExecTool_Truncation(t *testing.T) {
 
 // TestShellExecTool_LargeOutput tests truncation with large output.
 func TestShellExecTool_LargeOutput(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	// Generate ~100KB output using PowerShell
 	req := perms.Request{
@@ -157,7 +157,7 @@ func TestShellExecTool_LargeOutput(t *testing.T) {
 
 // TestShellExecTool_Workdir tests shell.exec with workdir.
 func TestShellExecTool_Workdir(t *testing.T) {
-	tool := newShellExecTool()
+	tool := newShellExecTool(nil)
 
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "test.txt")

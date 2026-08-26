@@ -5,16 +5,48 @@ package tools
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"os"
 	"os/exec"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
 // shellExecTool implements the shell.exec tool.
-type shellExecTool struct{}
+//
+// Execution routing (spec RNF-4.7):
+//   - With a non-nil, enabled Isolator: the command runs through forge's own
+//     binary acting as an isolation wrapper child (Landlock + seccomp on
+//     Linux), so OS-level containment bounds the user command while the
+//     daemon itself stays unrestricted.
+//   - Without isolation available: legacy direct exec, with a one-time
+//     debug note that only the permissions model is enforcing (spec §6:
+//     macOS v0 and other non-Linux platforms are permissions-only).
+//   - On Linux with requireIsolation set but isolation unavailable: the
+//     request is refused instead of silently degrading. Non-Linux platforms
+//     ignore require_isolation entirely (documented config behavior).
+type shellExecTool struct {
+	logger           *slog.Logger
+	isolator         Isolator
+	requireIsolation bool
+	legacyNoteOnce   sync.Once
+}
 
-func newShellExecTool() *shellExecTool { return &shellExecTool{} }
+func newShellExecTool(logger *slog.Logger) *shellExecTool {
+	return &shellExecTool{logger: logger}
+}
+
+// setOptions injects registry-owned configuration into this tool instance.
+func (t *shellExecTool) setOptions(logger *slog.Logger, isol Isolator, requireIsolation bool) {
+	if logger != nil {
+		t.logger = logger
+	}
+	t.isolator = isol
+	t.requireIsolation = requireIsolation
+}
 
 func (t *shellExecTool) Name() string { return "shell.exec" }
 func (t *shellExecTool) Description() string {
@@ -40,7 +72,7 @@ func (t *shellExecTool) JSONSchema() map[string]any {
 			},
 			"workdir": map[string]any{
 				"type":        "string",
-				"description": "Working directory for command execution",
+				"description": "Working directory for command execution. OMIT this field entirely to use the workspace root — that is almost always correct. Only set it to a directory path that appeared earlier in this conversation; never invent paths (e.g. /workspace).",
 			},
 		},
 		"required": []string{"command"},
@@ -51,7 +83,6 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 	command := req.Command
 	args := req.Args
 	timeoutSec := req.TimeoutSec
-	workdir := req.Workdir
 
 	// Apply timeout bounds
 	if timeoutSec <= 0 {
@@ -65,10 +96,57 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, command, args...)
-	if workdir != "" {
-		cmd.Dir = workdir
+	// --- Isolation routing (spec RNF-4.7) ---
+	var cmd *exec.Cmd
+	isolated := false
+
+	switch {
+	case t.isolator != nil && t.isolator.Enabled():
+		selfExe, exeErr := os.Executable()
+		if exeErr != nil {
+			return Result{}, &os.PathError{Op: "resolve self executable for isolation", Path: "", Err: exeErr}
+		}
+		wrapped := t.isolator.Wrap(selfExe, command, args)
+		// Rebuild through CommandContext so timeout plumbing matches the
+		// direct path; Wrap output is deterministic (Path/Args/Env only),
+		// so nothing else needs copying.
+		cmd = exec.CommandContext(execCtx, wrapped.Path, wrapped.Args[1:]...)
+		cmd.Env = wrapped.Env
+		isolated = true
+
+	case t.requireIsolation && runtime.GOOS == "linux":
+		return Result{
+			Content:  "DENIED: shell isolation required but unavailable",
+			Metadata: map[string]any{"denied": true},
+		}, nil
+
+	default:
+		if t.logger != nil {
+			t.legacyNoteOnce.Do(func() {
+				t.logger.Debug("os isolation unavailable on this platform; permissions model only")
+			})
+		}
+		cmd = exec.CommandContext(execCtx, command, args...)
 	}
+
+	if workdir := req.Workdir; workdir != "" {
+		resolved, wdErr := validateWorkdir(workdir)
+		if wdErr != nil {
+			return Result{Content: "ERROR: " + wdErr.Error()}, nil
+		}
+		cmd.Dir = resolved
+	}
+
+	// Kill the whole child tree on timeout, not just the direct child:
+	// children run as their own process group (Unix), and Cancel overrides
+	// CommandContext's single-process kill accordingly. WaitDelay guards
+	// against grandchildren holding the output pipes open after the kill.
+	configureProcessGroup(cmd)
+	cmd.Cancel = func() error {
+		_ = killProcessTree(cmd.Process) // best-effort; may race exit
+		return nil
+	}
+	cmd.WaitDelay = 3 * time.Second
 
 	// Capture combined output
 	output, err := cmd.CombinedOutput()
@@ -102,14 +180,13 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 		}
 	}
 
-	durationMs := int64(0)
-	// We don't have precise timing from exec.CommandContext, but we can approximate
-	// For now, we'll leave it as 0 since we don't have start time
-
 	metadata := map[string]any{
 		"exit_code":   exitCode,
-		"duration_ms": durationMs,
+		"duration_ms": int64(0),
 		"truncated":   truncated,
+	}
+	if isolated {
+		metadata["isolated"] = true
 	}
 	if timedOut {
 		metadata["timeout"] = true

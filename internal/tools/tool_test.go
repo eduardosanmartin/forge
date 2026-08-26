@@ -15,7 +15,7 @@ func TestToolInterface(t *testing.T) {
 		newFsReadTool(),
 		newFsWriteTool(),
 		newFsListTool(),
-		newShellExecTool(),
+		newShellExecTool(nil),
 		newGitTool(),
 	}
 
@@ -49,7 +49,7 @@ func TestTool_JSONSchemaStructure(t *testing.T) {
 		newFsReadTool(),
 		newFsWriteTool(),
 		newFsListTool(),
-		newShellExecTool(),
+		newShellExecTool(nil),
 		newGitTool(),
 	}
 

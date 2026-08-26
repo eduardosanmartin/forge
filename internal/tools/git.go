@@ -35,7 +35,7 @@ func (t *gitTool) JSONSchema() map[string]any {
 			},
 			"workdir": map[string]any{
 				"type":        "string",
-				"description": "Working directory for git execution (default: workspace root)",
+				"description": "Working directory for git execution. OMIT this field entirely to use the workspace root — that is almost always correct. Only set it to a directory path that appeared earlier in this conversation; never invent paths (e.g. /workspace).",
 			},
 		},
 		"required": []string{"subcommand"},
@@ -54,7 +54,11 @@ func (t *gitTool) Execute(ctx context.Context, req perms.Request) (Result, error
 	// Build git command: git -C <workdir> <subcommand> <args...>
 	gitArgs := []string{}
 	if workdir != "" {
-		gitArgs = append(gitArgs, "-C", workdir)
+		resolved, wdErr := validateWorkdir(workdir)
+		if wdErr != nil {
+			return Result{Content: "ERROR: " + wdErr.Error()}, nil
+		}
+		gitArgs = append(gitArgs, "-C", resolved)
 	}
 	gitArgs = append(gitArgs, subcommand)
 	gitArgs = append(gitArgs, args...)

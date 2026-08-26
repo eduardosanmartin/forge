@@ -13,9 +13,12 @@ import (
 // Registry holds all registered tools and coordinates execution with the permission engine.
 type Registry struct {
 	tools         map[string]Tool
+	toolOrder     []string // maintains registration order
 	permsEngine   *perms.Engine
 	workspaceRoot string
 	logger        *slog.Logger
+	isolator      Isolator // OS-level shell isolation routing (RNF-4.7); nil = legacy direct exec
+	requireIso    bool     // refuse shell.exec when isolation is required but unavailable (Linux only)
 	mu            sync.RWMutex
 }
 
@@ -23,9 +26,41 @@ type Registry struct {
 func New(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *Registry {
 	return &Registry{
 		tools:         make(map[string]Tool),
+		toolOrder:     make([]string, 0),
 		permsEngine:   permsEngine,
 		workspaceRoot: workspaceRoot,
 		logger:        logger,
+	}
+}
+
+// SetIsolator routes shell children through the OS-isolation wrapper
+// whenever the isolator reports Enabled. Safe to call before or after tool
+// registration; the setting reaches the shell.exec tool either way. A nil
+// isolator restores legacy direct execution.
+func (r *Registry) SetIsolator(isol Isolator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.isolator = isol
+	r.applyShellOptionsLocked()
+}
+
+// SetRequireShellIsolation configures whether shell.exec must refuse to run
+// when isolation is unavailable. Only honored on Linux; other platforms
+// ignore it (documented config behavior).
+func (r *Registry) SetRequireShellIsolation(require bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requireIso = require
+	r.applyShellOptionsLocked()
+}
+
+// applyShellOptionsLocked pushes registry-level shell configuration into the
+// registered shell.exec tool. Caller holds r.mu for writing.
+func (r *Registry) applyShellOptionsLocked() {
+	if t, ok := r.tools["shell.exec"]; ok {
+		if se, ok := t.(*shellExecTool); ok {
+			se.setOptions(r.logger, r.isolator, r.requireIso)
+		}
 	}
 }
 
@@ -34,7 +69,17 @@ func New(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *
 func (r *Registry) Register(tool Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.tools[tool.Name()] = tool
+	name := tool.Name()
+	if _, exists := r.tools[name]; !exists {
+		r.toolOrder = append(r.toolOrder, name)
+	}
+	r.tools[name] = tool
+	if name == "shell.exec" {
+		// Late-registered shell tools still receive the configured routing.
+		if se, ok := tool.(*shellExecTool); ok {
+			se.setOptions(r.logger, r.isolator, r.requireIso)
+		}
+	}
 }
 
 // Get retrieves a tool by name.
@@ -45,13 +90,15 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return tool, ok
 }
 
-// List returns all registered tools.
+// List returns all registered tools in registration order.
 func (r *Registry) List() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	list := make([]Tool, 0, len(r.tools))
-	for _, t := range r.tools {
-		list = append(list, t)
+	list := make([]Tool, 0, len(r.toolOrder))
+	for _, name := range r.toolOrder {
+		if t, ok := r.tools[name]; ok {
+			list = append(list, t)
+		}
 	}
 	return list
 }
@@ -103,12 +150,12 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 }
 
 // defaultRegistryTools returns the standard set of tools for the registry.
-func defaultRegistryTools() []Tool {
+func defaultRegistryTools(logger *slog.Logger) []Tool {
 	return []Tool{
 		newFsReadTool(),
 		newFsWriteTool(),
 		newFsListTool(),
-		newShellExecTool(),
+		newShellExecTool(logger),
 		newGitTool(),
 	}
 }
@@ -116,7 +163,7 @@ func defaultRegistryTools() []Tool {
 // NewDefaultRegistry creates a registry with all standard tools registered.
 func NewDefaultRegistry(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *Registry {
 	r := New(permsEngine, workspaceRoot, logger)
-	for _, tool := range defaultRegistryTools() {
+	for _, tool := range defaultRegistryTools(logger) {
 		r.Register(tool)
 	}
 	return r
