@@ -272,4 +272,51 @@ FORGE_E2E_LIVE=1 go test -count=1 -timeout 1500s -v ./internal/e2e/ -run "TestLi
 
 ---
 
-> **Recordatorio**: la spec es READ-ONLY sin aprobación explícita. Cualquier duda arquitectónica no cubierta → **pausar y consultar** antes de codear.
+---
+
+## 12. Punto de Rollback MVP v0 (Base para v1)
+
+**Commit de referencia**: `b8ef0de` (HEAD, `origin/main`)
+
+Este commit representa el **MVP v0 completo y verificado**:
+
+- Todos los 15 commits están en `main` y pusheados a `origin/main`.
+- Criterio de salida §6 probado **live** contra `qwen2.5-coder:7b`.
+- Stack completo: config v3, perms engine, MCP-shape tools, Ollama adapter, SQLite store, daemon JSON-RPC/WebSocket, agent loop + métricas, REPL + one-shot clients, Landlock+seccomp isolation (validación runtime pendiente en Linux Perfil B).
+- Docs completas: README, GUÍA.md, CONFIGURACIÓN.md, DESARROLLO.md, ERRORES.md, BITÁCORA.md.
+
+### Tag explícito (recomendado)
+
+```bash
+git tag v0.0-mvp-complete
+git push origin v0.0-mvp-complete
+```
+
+### Cómo volver a este punto (Rollback)
+
+Si al desarrollar v1 algo falla y querés volver a este estado exacto:
+
+```bash
+# Opción 1: por commit hash (siempre funciona)
+git checkout b8ef0de
+
+# Opción 2: por tag explícito (si hiciste el push del tag)
+git checkout v0.0-mvp-complete
+```
+
+Desde ahí podés:
+
+```bash
+# Crear rama de experimentación
+git checkout -b v1-experimento
+
+# Hacer ajustes, probar, commitear
+git commit -m "feat: ajustar estrategia v1..."
+
+# Si querés descartar y volver otra vez:
+git checkout b8ef0de
+```
+
+> **Nota**: El commit `b8ef0de` está **pusheado a `origin/main`**. Si hiciste `git tag v0.0-mvp-complete && git push origin v0.0-mvp-complete`, el tag también está en el remoto y cualquiera puede clonar y hacer `git checkout v0.0-mvp-complete` directamente.
+
+> **Importante**: Este es el punto base para v1. Según el principio de bootstrapping (§0 spec), **v1 se construye 100% con forge v0 + modelo local** (sin OpenCode, sin OpenChamber, sin herramientas externas). Si algo no funciona en v1, volvé a `b8ef0de` y ajustá la estrategia antes de seguir.
