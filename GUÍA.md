@@ -242,10 +242,55 @@ El script levanta un daemon efímero, ejecuta prompts de prueba contra `qwen2.5-
 
 ---
 
-## 12. Licencia y Contribución
+## 13. Modelos Recomendados (Alternativas a qwen2.5-coder:7b)
 
-Ver `LICENSE` en el repo. Issues y PRs bienvenidos en `github.com/eduardosanmartin/forge`.
+`qwen2.5-coder:7b` (4.7 GB) es el modelo de referencia del MVP v0, pero hay alternativas **más pequeñas, rápidas y eficientes** que funcionan mejor en hardware limitado o para tareas específicas.
+
+### Tabla comparativa
+
+| Modelo | Tamaño (Q4) | Parámetros | Contexto | Especialidad | RAM Mínima | Velocidad CPU | Tool-Calling / FIM | Mejor Para |
+|--------|-------------|------------|----------|--------------|------------|---------------|-------------------|------------|
+| **qwen2.5-coder:0.5b** | ~1 GB | 0.5B | 32K (8K FIM) | **FIM-optimizado**, chat, code | 2-4 GB | **200-500 tok/s** (GPU), ~50-200 CPU | ✅ FIM nativo, chat | **Completions ultra-rápidas**, laptops, CI, edge |
+| **qwen2.5-coder:1.5b** | ~1.5 GB | 1.5B | 32K | Chat, code, reasoning | 4-8 GB | ~100-200 tok/s CPU | ✅ Tool-calling bueno | **Balance velocidad/calidad** (recomendado principal) |
+| **qwen2.5-coder:3b** | ~2-4 GB | 3B | 32K | Chat, code, reasoning | 6-8 GB | ~50-100 tok/s CPU | ✅ Tool-calling nativo | **Sweet spot** calidad/velocidad |
+| **neolinschen/llama-coding:1b** | ~1.3 GB | 1B | **128K** | Coding-optimizado (Llama 3.2) | 2-4 GB | **Muy rápido** | ⚠️ Limitado | Contexto largo, velocidad extrema |
+| **neolinschen/llama-coding:3b** | ~2 GB | 3B | **128K** | Coding-optimizado (Llama 3.2) | 4-6 GB | Rápido | ⚠️ Limitado | Contexto largo + calidad |
+| **relational/VULCAN (4B)** | ~2.5 GB | 4B | 16K | **Fine-tuned Qwen3 para coding** | 4-6 GB | ~50-80 tok/s | ✅ Tool-calling fuerte | **Mejor calidad coding < 5B** |
+| **qwen2.5-coder:7b** (actual) | **~4.7 GB** | **7B** | **128K** | **Referencia actual** | **8-12 GB** | **~12s/turno** | ✅ **Completo** | **Baseline actual** |
+
+### Recomendaciones por Caso de Uso
+
+| Objetivo | Modelo Recomendado | Comando |
+|----------|-------------------|---------|
+| **Desarrollo diario / velocidad** | `qwen2.5-coder:1.5b` | `ollama pull qwen2.5-coder:1.5b` |
+| **Calidad máxima < 5B (tool-calling fuerte)** | `relational/VULCAN` | `ollama pull relational/VULCAN` |
+| **Contexto largo (128K) + embeddings** | `neolinschen/llama-coding:3b` | `ollama pull neolinschen/llama-coding:3b` |
+| **Testing CI / ultra-rápido** | `qwen2.5-coder:0.5b` | `ollama pull qwen2.5-coder:0.5b` |
+
+### Configuración recomendada para v1 (multi-modelo)
+
+```json
+{
+  "schema_version": 3,
+  "default_provider": "ollama",
+  "providers": {
+    "ollama": {
+      "kind": "openai-compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": [
+        "qwen2.5-coder:1.5b",
+        "neolinschen/llama-coding:3b",
+        "relational/VULCAN",
+        "qwen2.5-coder:0.5b",
+        "qwen2.5-coder:7b"
+      ]
+    }
+  }
+}
+```
+
+> **Nota**: v1 usará **ruteo por costo** (RF-2.4/2.5): modelo pequeño (1.5b/0.5b) para pasos baratos (clasificación, retrieval queries, resúmenes) y modelo mayor (3b/7b/VULCAN) para generación real. El ruteo es configurable por tipo de paso del ciclo (§3.2 spec).
 
 ---
 
-> **Nota**: esta guía cubre el MVP v0. La spec completa vive en `spec-harness-agentic.md` v0.8.
+## 13. Licencia y Contribución

@@ -5,7 +5,14 @@
     "ollama": {
       "kind": "openai-compatible",
       "base_url": "http://127.0.0.1:11434/v1",
-      "models": ["qwen2.5-coder:7b"]
+      "models": [
+        "qwen2.5-coder:7b",
+        "qwen2.5-coder:3b",
+        "qwen2.5-coder:1.5b",
+        "qwen2.5-coder:0.5b",
+        "neolinschen/llama-coding:3b",
+        "relational/VULCAN"
+      ]
     }
   },
   "storage": {
@@ -20,7 +27,7 @@
   },
   "permissions": {
     "fs": { "read": ["./**"], "write": ["./**"] },
-    "shell": { "allow": [], "require_isolation": true },
+    "shell": { "allow": ["go", "git"], "require_isolation": true },
     "git": { "allow": ["status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"] }
   }
 }
