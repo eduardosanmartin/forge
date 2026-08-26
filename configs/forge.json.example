@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "default_provider": "ollama",
   "providers": {
     "ollama": {
@@ -20,7 +20,7 @@
   },
   "permissions": {
     "fs": { "read": ["./**"], "write": ["./**"] },
-    "shell": { "allow": [] },
+    "shell": { "allow": [], "require_isolation": true },
     "git": { "allow": ["status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"] }
   }
 }

@@ -20,11 +20,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/eduardosanmartin/forge/internal/pathmatch"
 )
 
 // CurrentSchemaVersion is the newest configuration schema revision this
-// build understands.
-const CurrentSchemaVersion = 1
+// build understands. Version 2 added the "permissions" section (RNF-4.1).
+// Version 3 added permissions.shell.require_isolation (RNF-4.7), which
+// makes Linux refuse shell.exec when OS-level isolation is unavailable
+// instead of silently degrading; non-Linux platforms ignore it.
+const CurrentSchemaVersion = 3
 
 // Provider describes a single OpenAI-compatible inference endpoint.
 type Provider struct {
@@ -49,6 +54,58 @@ type LoggingConfig struct {
 	File  string `json:"file"`
 }
 
+// FSPermissions bounds filesystem access with glob patterns. Relative
+// patterns match workspace-relative paths; absolute patterns (POSIX-rooted
+// or drive-letter form, forward-slashed) are the documented escape hatch for
+// explicitly authorized out-of-workspace locations.
+type FSPermissions struct {
+	Read  []string `json:"read"`
+	Write []string `json:"write"`
+}
+
+// ShellPermissions allows shell executables by base name (case-insensitive).
+// RequireIsolation (schema v3, RNF-4.7) asks forge to refuse shell
+// execution on Linux when OS-level isolation (Landlock + seccomp wrapper)
+// is unavailable, rather than degrading to permissions-only enforcement.
+// Non-Linux platforms ignore the flag: macOS v0 and Windows are
+// documented as permissions-only per spec §6.
+type ShellPermissions struct {
+	Allow            []string `json:"allow"`
+	RequireIsolation bool     `json:"require_isolation"`
+}
+
+// GitPermissions allows git subcommands (lowercase convention). Destructive
+// invocations stay blocked by the engine's non-configurable safety floor
+// regardless of this list (RNF-8.2).
+type GitPermissions struct {
+	Allow []string `json:"allow"`
+}
+
+// PermissionsPolicy mirrors the "permissions" section of the config
+// document. It is deny-by-default: anything not explicitly allowed is
+// refused by the permission engine (RNF-4.1).
+type PermissionsPolicy struct {
+	FS    FSPermissions    `json:"fs"`
+	Shell ShellPermissions `json:"shell"`
+	Git   GitPermissions   `json:"git"`
+}
+
+// defaultPermissionsPolicy returns the built-in baseline policy:
+// workspace-wide filesystem access under the default deny posture for
+// everything else, an EMPTY shell allowlist (RNF-4.1: nothing runs unless
+// declared) with OS isolation required on capable platforms (RNF-4.7), and
+// a conventional read-only-plus-staging git allowlist.
+func defaultPermissionsPolicy() PermissionsPolicy {
+	return PermissionsPolicy{
+		FS:    FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
+		Shell: ShellPermissions{Allow: []string{}, RequireIsolation: true},
+		Git: GitPermissions{Allow: []string{
+			"status", "add", "commit", "log", "diff", "branch",
+			"switch", "stash", "restore", "show", "remote", "fetch",
+		}},
+	}
+}
+
 // Config is the full forge configuration document.
 type Config struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -57,6 +114,7 @@ type Config struct {
 	Storage         StorageConfig       `json:"storage"`
 	Network         NetworkConfig       `json:"network"`
 	Logging         LoggingConfig       `json:"logging"`
+	Permissions     PermissionsPolicy   `json:"permissions"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -72,9 +130,10 @@ func Defaults() *Config {
 				Models:  []string{"qwen2.5-coder:7b"},
 			},
 		},
-		Storage: StorageConfig{Path: "~/.forge/forge.db"},
-		Network: NetworkConfig{AllowedHosts: []string{"127.0.0.1", "localhost"}},
-		Logging: LoggingConfig{Level: "info", File: ""},
+		Storage:     StorageConfig{Path: "~/.forge/forge.db"},
+		Network:     NetworkConfig{AllowedHosts: []string{"127.0.0.1", "localhost"}},
+		Logging:     LoggingConfig{Level: "info", File: ""},
+		Permissions: defaultPermissionsPolicy(),
 	}
 }
 
@@ -113,6 +172,15 @@ func ProjectConfigPath() (string, error) {
 	return ExpandPath(filepath.Join(".", ".forge", "config.json"))
 }
 
+// filePermissions mirrors PermissionsPolicy with presence-tracking pointers
+// so merging can replace each subsection (fs/shell/git) wholesale only when
+// that subsection is present in an overriding document.
+type filePermissions struct {
+	FS    *FSPermissions    `json:"fs"`
+	Shell *ShellPermissions `json:"shell"`
+	Git   *GitPermissions   `json:"git"`
+}
+
 // fileConfig mirrors Config with presence-tracking pointers so that merging
 // can distinguish "field absent" from "field set to zero value".
 type fileConfig struct {
@@ -122,13 +190,17 @@ type fileConfig struct {
 	Storage         *StorageConfig      `json:"storage"`
 	Network         *NetworkConfig      `json:"network"`
 	Logging         *LoggingConfig      `json:"logging"`
+	Permissions     *filePermissions    `json:"permissions"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
 // later files override earlier values field-group-wise (provider entries are
 // replaced wholesale per named provider; scalar sections are replaced whole
-// whenever present). Missing files are skipped silently; present but invalid
-// files produce an error that names the offending path.
+// whenever present; permissions subsections fs/shell/git each replace whole
+// when present). Missing files are skipped silently; present but invalid
+// files produce an error that names the offending path. Documents older than
+// the current schema version are migrated forward before decoding; the
+// returned Config always describes current-schema semantics.
 func Load(filePaths ...string) (*Config, error) {
 	cfg := Defaults()
 
@@ -141,16 +213,18 @@ func Load(filePaths ...string) (*Config, error) {
 			return nil, fmt.Errorf("read config file %s: %w", path, err)
 		}
 
-		var fc fileConfig
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&fc); err != nil {
+		// Probe the schema version first (with unknown-field rejection, so a
+		// typo still fails fast even before migration).
+		var probe fileConfig
+		probeDec := json.NewDecoder(bytes.NewReader(raw))
+		probeDec.DisallowUnknownFields()
+		if err := probeDec.Decode(&probe); err != nil {
 			return nil, fmt.Errorf("parse config file %s: %w", path, err)
 		}
 
 		version := CurrentSchemaVersion
-		if fc.SchemaVersion != nil {
-			version = *fc.SchemaVersion
+		if probe.SchemaVersion != nil {
+			version = *probe.SchemaVersion
 		}
 		if version < 1 || version > CurrentSchemaVersion {
 			return nil, fmt.Errorf(
@@ -158,13 +232,30 @@ func Load(filePaths ...string) (*Config, error) {
 				path, version, 1, CurrentSchemaVersion,
 			)
 		}
+
+		doc := raw
 		if version != CurrentSchemaVersion {
-			if _, err := Migrate(raw, version); err != nil {
+			migrated, err := Migrate(raw, version)
+			if err != nil {
 				return nil, fmt.Errorf("config file %s: %w", path, err)
 			}
+			doc = migrated
+		}
+
+		var fc fileConfig
+		dec := json.NewDecoder(bytes.NewReader(doc))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&fc); err != nil {
+			return nil, fmt.Errorf("parse config file %s: %w", path, err)
 		}
 
 		mergeInto(cfg, &fc)
+
+		// A migrated document now describes current-schema semantics in
+		// memory (the file on disk is untouched until Save).
+		if version != CurrentSchemaVersion {
+			cfg.SchemaVersion = CurrentSchemaVersion
+		}
 	}
 
 	if err := cfg.expandPaths(); err != nil {
@@ -193,6 +284,21 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	if fc.Logging != nil {
 		dst.Logging = *fc.Logging
 	}
+	if fc.Permissions != nil {
+		// Group-wise merge: each present subsection (fs/shell/git) replaces
+		// the corresponding policy group wholesale, mirroring how scalar
+		// sections behave. Lists inside a present subsection are taken as-is.
+		fp := fc.Permissions
+		if fp.FS != nil {
+			dst.Permissions.FS = *fp.FS
+		}
+		if fp.Shell != nil {
+			dst.Permissions.Shell = *fp.Shell
+		}
+		if fp.Git != nil {
+			dst.Permissions.Git = *fp.Git
+		}
+	}
 }
 
 // expandPaths expands "~" in every path field of c in place.
@@ -212,17 +318,111 @@ func (c *Config) expandPaths() error {
 }
 
 // Migrate forwards raw config JSON from schema version from to the current
-// schema version. It is a forward-migration scaffold: only the current
-// schema exists today, so any other version reports that no migration path
-// is implemented yet.
+// schema version, applying the migration chain one step at a time. The
+// current version returns data unchanged; versions without a migration step
+// report an error naming both versions.
 func Migrate(data []byte, from int) ([]byte, error) {
-	if from == CurrentSchemaVersion {
+	switch from {
+	case CurrentSchemaVersion:
+		return data, nil
+	case 1:
+		// Chain: v1 gains the permissions section (v2), then the shell
+		// isolation flag (v3).
+		v2, err := migrateV1ToV2(data)
+		if err != nil {
+			return nil, err
+		}
+		return migrateV2ToV3(v2)
+	case 2:
+		return migrateV2ToV3(data)
+	default:
+		return nil, fmt.Errorf(
+			"no migration path from schema_version %d to schema_version %d",
+			from, CurrentSchemaVersion,
+		)
+	}
+}
+
+// migrateV1ToV2 upgrades a v1 document to v2 by injecting the built-in
+// permissions policy when the document predates the section (schema v2 added
+// "permissions", RNF-4.1). All other fields are preserved verbatim; a
+// document that already carries a permissions key is left untouched so
+// hand-written forward-looking sections are never clobbered.
+func migrateV1ToV2(data []byte) ([]byte, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("migrate schema v1 -> v2: parse document: %w", err)
+	}
+	if _, exists := doc["permissions"]; exists {
 		return data, nil
 	}
-	return nil, fmt.Errorf(
-		"no migration path from schema_version %d to schema_version %d",
-		from, CurrentSchemaVersion,
-	)
+	def, err := json.Marshal(defaultPermissionsPolicy())
+	if err != nil {
+		return nil, fmt.Errorf("migrate schema v1 -> v2: encode default permissions: %w", err)
+	}
+	doc["permissions"] = json.RawMessage(def)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("migrate schema v1 -> v2: encode migrated document: %w", err)
+	}
+	return out, nil
+}
+
+// migrateV2ToV3 upgrades a v2 document to v3 by ensuring
+// permissions.shell carries require_isolation=true (schema v3 added the
+// flag, RNF-4.7). Absence in a v2 document meant "before the field
+// existed", so it upgrades to the secure default rather than Go's zero
+// value; an explicitly written false is preserved verbatim. Sibling fields
+// (shell.allow, fs, git) and documents without a permissions section at all
+// are left untouched — merging falls back to Defaults(), which already
+// requires isolation.
+func migrateV2ToV3(data []byte) ([]byte, error) {
+	const step = "migrate schema v2 -> v3"
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("%s: parse document: %w", step, err)
+	}
+	permsRaw, exists := doc["permissions"]
+	if !exists {
+		// No permissions section: merge supplies Defaults(), whose shell
+		// policy requires isolation.
+		return data, nil
+	}
+
+	var perms map[string]json.RawMessage
+	if err := json.Unmarshal(permsRaw, &perms); err != nil {
+		return nil, fmt.Errorf("%s: parse permissions section: %w", step, err)
+	}
+
+	var shell map[string]json.RawMessage
+	if shellRaw, exists := perms["shell"]; exists {
+		if err := json.Unmarshal(shellRaw, &shell); err != nil {
+			return nil, fmt.Errorf("%s: parse permissions.shell section: %w", step, err)
+		}
+	} else {
+		shell = make(map[string]json.RawMessage)
+	}
+
+	if _, exists := shell["require_isolation"]; !exists {
+		shell["require_isolation"] = json.RawMessage("true")
+	}
+
+	shellOut, err := json.Marshal(shell)
+	if err != nil {
+		return nil, fmt.Errorf("%s: encode permissions.shell: %w", step, err)
+	}
+	perms["shell"] = json.RawMessage(shellOut)
+	permsOut, err := json.Marshal(perms)
+	if err != nil {
+		return nil, fmt.Errorf("%s: encode permissions: %w", step, err)
+	}
+	doc["permissions"] = json.RawMessage(permsOut)
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("%s: encode migrated document: %w", step, err)
+	}
+	return out, nil
 }
 
 // Validate checks c against all configuration rules and returns an aggregated
@@ -285,7 +485,40 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	violations = append(violations, validatePermissions(c.Permissions)...)
+
 	return errors.Join(violations...)
+}
+
+// validatePermissions checks the permissions section structurally. Glob
+// syntax authority lives in internal/pathmatch (imported here so config and
+// perms can never drift apart); this function only adds section context to
+// every violation it reports.
+func validatePermissions(p PermissionsPolicy) []error {
+	var errs []error
+	for i, pat := range p.FS.Read {
+		if err := pathmatch.ValidatePattern(pat); err != nil {
+			errs = append(errs, fmt.Errorf("permissions.fs.read[%d] %q: %v", i, pat, err))
+		}
+	}
+	for i, pat := range p.FS.Write {
+		if err := pathmatch.ValidatePattern(pat); err != nil {
+			errs = append(errs, fmt.Errorf("permissions.fs.write[%d] %q: %v", i, pat, err))
+		}
+	}
+	for i, entry := range p.Shell.Allow {
+		if strings.TrimSpace(entry) == "" {
+			errs = append(errs, fmt.Errorf(
+				"permissions.shell.allow[%d]: entries must be non-empty command names", i))
+		}
+	}
+	for i, entry := range p.Git.Allow {
+		if strings.TrimSpace(entry) == "" {
+			errs = append(errs, fmt.Errorf(
+				"permissions.git.allow[%d]: entries must be non-empty subcommands", i))
+		}
+	}
+	return errs
 }
 
 // Save writes c to path atomically: the marshaled document (two-space indent

@@ -21,7 +21,7 @@ silently. Documents on older schema versions are migrated forward at load.
 
 ## Fields
 
-- `schema_version`: config schema revision (currently `2`). Older versions
+- `schema_version`: config schema revision (currently `3`). Older versions
   are migrated forward automatically; newer versions are rejected.
 - `default_provider`: provider selected when a task does not pin one.
 - `providers`: map of name to `{kind, base_url, models}`. Only
@@ -44,10 +44,26 @@ silently. Documents on older schema versions are migrated forward at load.
 
         "shell": { "allow": ["go", "npm"] }
 
+  - `permissions.shell.require_isolation`: when `true` (the default since
+    schema v3, RNF-4.7), forge refuses `shell.exec` on **Linux** if OS-level
+    isolation is unavailable instead of silently running with the permission
+    model alone. Shell commands always run through an isolation wrapper on
+    Linux (Landlock filesystem bounds + a default-deny seccomp filter, no
+    networking) regardless of this flag — it only controls whether missing
+    isolation is fatal. On macOS and Windows the flag is ignored: those
+    platforms are permissions-only in v0 per spec §6, and forge logs that
+    at startup.
   - `permissions.git.allow`: allowed git subcommands (lowercase). Destructive
     operations — force-push, `reset --hard`, `clean`, forced branch deletion —
     stay blocked by forge's non-configurable safety floor (RNF-8.2) no matter
     what this list contains.
+
+## Migration
+
+Documents on schema v1 or v2 are migrated forward automatically at load:
+v1 gains the default `permissions` section, and v2 gains
+`permissions.shell.require_isolation: true` (an explicitly written `false`
+is preserved). Files on disk are never rewritten unless you save them.
 
 ## Strictness
 
