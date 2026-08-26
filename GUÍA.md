@@ -293,4 +293,60 @@ El script levanta un daemon efímero, ejecuta prompts de prueba contra `qwen2.5-
 
 ---
 
+## 13. Integración con OpenChamber
+
+`forge` puede ejecutarse dentro de **OpenChamber** como cualquier otro proceso CLI, aprovechando sus capacidades de orquestación:
+
+### Qué SÍ hace OpenChamber con forge
+
+| Capacidad | Cómo usarla |
+|-----------|-------------|
+| **Ejecutar forge** | `session.send` con `forge chat` o `forge run "..."` |
+| **Runs programados** | `schedule.create` con `forge run "..."` recurrente |
+| **Historial completo** | `session.messages` tras cada `session.send` |
+| **Runs paralelos** | Múltiples `session.create` + `session.send` en paralelo |
+
+### Qué **NO** hace OpenChamber
+
+| ❌ No hace | Alternativa |
+|----------|-------------|
+| Monitorear stdout/stderr de daemon externo | `tail -f ~/.forge/daemon.log` o `forge status` |
+| Métricas en tiempo real del daemon | `forge status` o endpoint `/health` |
+| Adjuntar a daemon ya corriendo | `forge attach <session-id>` desde terminal |
+
+### Flujo recomendado para v1 con OpenChamber
+
+```bash
+# 1. En tu terminal local: levantá el daemon forge (una vez)
+forge serve
+
+# 2. En OpenChamber: creá una sesión para v1
+openchamber session.create --prompt "v1 development session"
+
+# 3. Enviá el prompt inicial v1 (usando el prompt de scripts/v1-bootstrap.txt)
+openchamber session.send --session-id <id> --prompt "$(cat scripts/v1-bootstrap-prompt.txt)"
+
+# 4. Leé la respuesta
+openchamber session.messages --session-id <id>
+
+# 4. Para runs automáticos (CI/nocturno):
+openchamber schedule.create \
+  --name "v1-nightly" \
+  --prompt "forge run --json 'implementar siguiente tarea v1'" \
+  --daily "02:00" \
+  --model "nemotron-3-ultra-free"
+```
+
+### Lo que SÍ tenés que seguir haciendo en tu terminal local
+
+```bash
+# 1. Una sola vez por sesión de desarrollo:
+forge serve   # daemon corriendo (daemon.addr, health check, etc.)
+
+# 2. En otra terminal / OpenChamber:
+forge chat    # o forge run, forge attach, etc.
+```
+
+---
+
 ## 13. Licencia y Contribución
