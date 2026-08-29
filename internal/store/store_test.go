@@ -45,8 +45,8 @@ func TestOpenCreatesFileAndWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version failed: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema_version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("schema_version = %d, want 2", version)
 	}
 }
 
@@ -796,7 +796,7 @@ func TestStats(t *testing.T) {
 		t.Fatalf("SessionCount = %d, want 3", stats.SessionCount)
 	}
 	if stats.MessageCount != 15 {
-		t.Fatalf("MessageCount = %d, want 15", stats.MessageCount)
+		t.Fatalf("MessageCount = %d, want 25", stats.MessageCount)
 	}
 	if stats.DBSizeBytes <= 0 {
 		t.Fatalf("DBSizeBytes = %d, want > 0", stats.DBSizeBytes)

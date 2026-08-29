@@ -13,7 +13,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // runMigrations executes all pending migrations in order.
 func runMigrations(ctx context.Context, db *sql.DB) error {
