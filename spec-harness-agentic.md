@@ -49,6 +49,7 @@ Este proyecto no busca ser "mejor en todos los ejes" que herramientas con equipo
 
 ### RF-4. Skills y auto-aprendizaje
 - RF-4.1 Debe soportar la creaciÃ³n, carga e instalaciÃ³n de "skills" (paquetes de instrucciones + scripts reutilizables), similar al patrÃ³n `SKILL.md`.
+- **RF-4.1.1 Debe proporcionar un wizard CLI interactivo (`forge skill new`) que guÃ­e al usuario paso a paso para crear una skill nueva: nombre, descripciÃ³n, categorÃ­a, frontmatter YAML, plantilla de instrucciones, scripts opcionales, y validaciÃ³n del `SKILL.md` resultante.**
 - RF-4.2 Las skills deben cargarse de forma perezosa (lazy-load): solo se inyectan en el contexto cuando son relevantes a la tarea detectada.
 - RF-4.3 El sistema debe poder proponer la creaciÃ³n de una nueva skill a partir de una trayectoria de tarea exitosa repetida (minerÃ­a de patrones).
 - RF-4.4 Debe existir un flujo de aprobaciÃ³n humana antes de que una skill auto-generada quede activa (nunca auto-aprendizaje sin supervisiÃ³n).
@@ -57,12 +58,108 @@ Este proyecto no busca ser "mejor en todos los ejes" que herramientas con equipo
 - RF-5.1 Debe soportar plugins de terceros que aÃ±adan: nuevas herramientas, nuevos proveedores de LLM, nuevos comandos de CLI, o paneles de GUI.
 - RF-5.2 Los plugins deben ejecutarse en un entorno aislado (sandbox) del proceso principal.
 - RF-5.3 Debe existir un manifiesto de plugin (metadatos, permisos solicitados, versiÃ³n, dependencias).
+- **RF-5.3.1 Debe proporcionar un wizard CLI interactivo (`forge plugin new`) que guÃ­e al usuario paso a paso para crear un plugin nuevo: nombre, versiÃ³n, descripciÃ³n, permisos solicitados (FS/shell/git/red), punto de entrada WASM, dependencias, y generaciÃ³n del `manifest.toml` y estructura de directorios inicial.**
 - RF-5.4 El sistema debe permitir habilitar/deshabilitar plugins sin recompilar el binario principal.
 
 ### RF-6. CLI
-- RF-6.1 CLI minimalista con comandos core: iniciar sesiÃ³n, listar sesiones, adjuntar a sesiÃ³n en curso, ejecutar tarea puntual (one-shot), gestionar plugins/skills, gestionar proveedores.
+- RF-6.1 CLI minimalista con comandos core: iniciar sesión, listar sesiones, adjuntar a sesión en curso, ejecutar tarea puntual (one-shot), **gestionar plugins/skills (`forge plugin new`, `forge skill new`, `forge plugin list`, `forge skill list`, `forge plugin enable/disable`, `forge skill enable/disable`)**, gestionar proveedores.
 - RF-6.2 Debe soportar modo interactivo (TUI) y modo no interactivo (scriptable, para CI/CD o cron).
-- RF-6.3 Salida en modo no interactivo debe soportar formato JSON para integraciÃ³n con otras herramientas.
+- RF-6.3 Salida en modo no interactivo debe soportar formato JSON para integración con otras herramientas.
+
+### 3.6 Wizard CLI para creación de plugins y skills
+
+Para reducir la fricción de crear extensiones válidas, forge incluye wizards interactivos:
+
+#### `forge plugin new`
+
+Wizard paso a paso que genera la estructura completa de un plugin:
+
+```
+$ forge plugin new
+? Nombre del plugin: mi-plugin
+? Versión inicial: 0.1.0
+? Descripción: Plugin para integración con API externa
+? Punto de entrada WASM: ./target/wasm32-wasi/release/plugin.wasm
+? Permisos requeridos:
+  [x] fs.read
+  [ ] fs.write
+  [x] shell.exec (comandos: curl, jq)
+  [ ] git
+  [ ] net (hosts: api.ejemplo.com)
+? Dependencias: (opcional, separadas por comas)
+? Directorio destino: ./forge-plugins/mi-plugin
+? Confirmar creación? (Y/n)
+```
+
+**Genera:**
+```
+forge-plugins/mi-plugin/
+├── manifest.toml
+├── src/
+│   └── lib.rs (o main.go, main.py, etc.)
+├── Cargo.toml (o go.mod, pyproject.toml, etc.)
+├── README.md
+└── .gitignore
+```
+
+#### `forge skill new`
+
+Wizard para crear skills siguiendo el patrón `SKILL.md`:
+
+```
+$ forge skill new
+? Nombre de la skill: code-review-style
+? Categoría: review / testing / docs / refactor / custom
+? Descripción breve: Guía de estilo para code reviews
+? Descripción detallada (para embedding/semántico): ...
+? Palabras clave de activación (comma-separated): code review, style, PR
+? Incluir script de validación? (Y/n)
+? Script de validación (opcional): ./scripts/check-style.sh
+? Directorio destino: .forge/skills/code-review-style/
+? Confirmar creación? (Y/n)
+```
+
+**Genera:**
+```
+.forge/skills/code-review-style/
+├── SKILL.md
+├── instructions.md
+├── scripts/
+│   └── check-style.sh
+└── examples/
+    ├── good-example.md
+    └── bad-example.md
+```
+
+#### Validaciones automáticas
+
+Ambos wizards ejecutan validaciones al final:
+- **Plugin:** `manifest.toml` válido (TOML sintáctico, campos requeridos, permisos conocidos, entrypoint existe)
+- **Skill:** `SKILL.md` válido (frontmatter YAML completo, campos requeridos, descripción no vacía)
+- Estructura de directorios creada correctamente
+- Sin conflictos de nombres en el registro local
+
+#### Integración con aprobación (RNF-4.4, RNF-4.6)
+
+- Plugins/skills **creados localmente** se marcan como `source: local` → no requieren firma/checksum para cargarse
+- Plugins/skills **instalados de fuente externa** requieren verificación de checksum/firma antes de primera carga (RNF-4.6)
+- Skills auto-generadas (RF-4.3) pasan por el mismo flujo de aprobación humana (RF-4.4)
+
+#### Complementos CLI relacionados
+
+| Comando | Descripción |
+|---------|-------------|
+| `forge plugin list` | Lista plugins instalados (local + externos) con estado |
+| `forge skill list` | Lista skills disponibles con categoría y estado |
+| `forge plugin enable <name>` | Habilita plugin (agrega a config activo) |
+| `forge plugin disable <name>` | Deshabilita plugin |
+| `forge plugin remove <name>` | Elimina plugin (con confirmación) |
+| `forge skill enable <name>` | Activa skill para lazy-load |
+| `forge skill disable <name>` | Desactiva skill |
+| `forge plugin validate <path>` | Valida manifest.toml y estructura |
+| `forge skill validate <path>` | Valida SKILL.md y estructura |
+
+---
 
 ### RF-7. GUI web (opcional, desacoplada)
 - RF-7.1 Debe existir un modo servidor que exponga una API sobre la cual una GUI web pueda conectarse (local o remota).
@@ -618,17 +715,12 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
 - **Nota de dependencia:** RNF-4.12 (aprobaciÃ³n humana para anclar contenido no confiable) empieza a aplicar aquÃ­ en su mitad de memoria (RF-3.5) â€” la otra mitad (skills, RF-4.3) llega en v2.
 - **Criterio de salida:** el banco de pruebas de RNF-10 confirma el â‰¥40% de reducciÃ³n de tokens sobre el Perfil A real (Â§5) â€” no es un objetivo de diseÃ±o, es un nÃºmero medido. AdemÃ¡s: todo v1 se desarrolla usando v0 como herramienta principal de trabajo â€” primer ejercicio real de bootstrapping, con la herramienta mÃ¡s cruda del ciclo.
 
-### MVP v2 â€” Se extiende sin tocar el core
-**Tema:** extensibilidad real vÃ­a plugins y skills, y el primer adaptador remoto.
+### MVP v2 — Se extiende sin tocar el core
+**Tema:** extensibilidad real vía plugins y skills, y el primer adaptador remoto.
 
-- **RF cubiertos:** RF-4.1-4.4 (skills con lazy-load y aprobaciÃ³n humana), RF-5.1-5.4 (plugins WASM), **RF-2.2 (adaptadores Anthropic/Gemini)** â€” entra aquÃ­, no en v0: el primer adaptador remoto es, en los hechos, el primer "plugin real" que ejercita el sistema de extensibilidad reciÃ©n construido, en vez de ser un caso especial cableado al core.
-- **RNF cubiertos:** RNF-3.2 (extender vÃ­a plugin sin tocar el core â€” ahora se prueba de verdad), RNF-3.3 (tests de integraciÃ³n sobre la API interna), RNF-4.2 (mÃ­nimo privilegio en plugins), RNF-4.6 (procedencia/firma de plugins y skills externos), RNF-4.12 completo (incluye ahora la mitad de skills), RNF-6.2 (grabaciÃ³n/replay de sesiones â€” necesario para que la minerÃ­a de skills tenga de dÃ³nde sacar trayectorias).
-- **Criterio de salida:** instalÃ¡s un plugin de terceros y una skill sin recompilar el binario, y ambos corren aislados con permisos mÃ­nimos declarados. AdemÃ¡s: v2 se desarrolla usando v1.
-
-### MVP v3 â€” Trabaja en equipo consigo mismo
-**Tema:** orquestaciÃ³n multiagente.
-
-- **RF cubiertos:** RF-1.2/1.3 (subagentes con contexto acotado), RF-9.1-9.3 (branching, merge, multi-run).
+- **RF cubiertos:** RF-4.1-4.4 (skills con lazy-load y aprobación humana), RF-5.1-5.4 (plugins WASM), **RF-2.2 (adaptadores Anthropic/Gemini)** — entra aquí, no en v0: el primer adaptador remoto es, en los hechos, el primer "plugin real" que ejercita el sistema de extensibilidad recién construido, en vez de ser un caso especial cableado al core.
+- **RNF cubiertos:** RNF-3.2 (extender vía plugin sin tocar el core — ahora se prueba de verdad), RNF-3.3 (tests de integración sobre la API interna), RNF-4.2 (mínimo privilegio en plugins), RNF-4.6 (procedencia/firma de plugins y skills externos), RNF-4.12 completo (incluye ahora la mitad de skills), RNF-6.2 (grabación/replay de sesiones — necesario para que la minería de skills tenga de dónde sacar trayectorias).
+- **Criterio de salida:** instalás un plugin de terceros y una skill sin recompilar el binario, y ambos corren aislados con permisos mínimos declarados. **Además: el wizard CLI (`forge plugin new`, `forge skill new`) permite crear plugins y skills válidos desde cero sin editar archivos a mano. v2 se desarrolla usando v1.**ertos:** RF-1.2/1.3 (subagentes con contexto acotado), RF-9.1-9.3 (branching, merge, multi-run).
 - **RNF cubiertos:** re-validaciÃ³n de RNF-1.5 con subagentes reales (no solo teÃ³rica como en v1) â€” la cola/scheduler ahora tiene contenciÃ³n de verdad que probar.
 - **Diferido:** RF-10.3 (integraciÃ³n GitHub) es explÃ­citamente "deseable, no v1" â€” entra acÃ¡ o despuÃ©s, sin bloquear nada.
 - **Criterio de salida:** el orquestador delega una tarea real a un subagente con contexto acotado, y el resultado consolidado vuelve sin inflar el contexto del orquestador (medible con el banco de RNF-10). AdemÃ¡s: v3 se desarrolla usando v2 â€” todavÃ­a monoagente; los subagentes que introduce esta versiÃ³n se estrenan construyendo lo que viene despuÃ©s.
