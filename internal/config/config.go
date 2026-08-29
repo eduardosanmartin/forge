@@ -29,13 +29,17 @@ import (
 // Version 3 added permissions.shell.require_isolation (RNF-4.7), which
 // makes Linux refuse shell.exec when OS-level isolation is unavailable
 // instead of silently degrading; non-Linux platforms ignore it.
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 // Provider describes a single OpenAI-compatible inference endpoint.
 type Provider struct {
-	Kind    string   `json:"kind"`
-	BaseURL string   `json:"base_url"`
-	Models  []string `json:"models"`
+	Kind       string            `json:"kind"`
+	BaseURL    string            `json:"base_url"`
+	Models     []string          `json:"models"`
+	ModelRoles map[string]string `json:"model_roles,omitempty"`
+	// APIKey authenticates against remote endpoints. Empty falls back to the
+	// OPENCODE_API_KEY env var so secrets stay out of config files.
+	APIKey string `json:"api_key"`
 }
 
 // StorageConfig locates forge's local database.
@@ -128,6 +132,11 @@ func Defaults() *Config {
 				Kind:    "openai-compatible",
 				BaseURL: "http://127.0.0.1:11434/v1",
 				Models:  []string{"qwen2.5-coder:7b"},
+				ModelRoles: map[string]string{
+					"cheap":      "qwen2.5-coder:1.5b",
+					"generation": "qwen2.5-coder:7b",
+					"reasoning":  "relational/VULCAN",
+				},
 			},
 		},
 		Storage:     StorageConfig{Path: "~/.forge/forge.db"},

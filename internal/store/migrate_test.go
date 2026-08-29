@@ -70,8 +70,8 @@ func TestMigrationV0ToV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version failed: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("schema_version = %d, want 2 after migration", version)
+	if version != 4 {
+		t.Fatalf("schema_version = %d, want 4 after migration", version)
 	}
 
 	// Verify sessions table has metadata column
@@ -96,7 +96,7 @@ func TestMigrationV0ToV1(t *testing.T) {
 				t.Fatalf("metadata column type = %q, want TEXT", ctype)
 			}
 			if notnull != 1 {
-				t.Fatalf("metadata column notnull = %d, want 2", notnull)
+				t.Fatalf("metadata column notnull = %d, want 4", notnull)
 			}
 			if dfltValue.String != "{}" && dfltValue.String != "'{}'" {
 				t.Fatalf("metadata default = %q, want {}", dfltValue.String)
@@ -146,8 +146,8 @@ func TestMigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version failed: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("schema_version = %d, want 2", version)
+	if version != 4 {
+		t.Fatalf("schema_version = %d, want 4", version)
 	}
 }
 
@@ -166,8 +166,8 @@ func TestMigrationStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrationStatus failed: %v", err)
 	}
-	if applied != 2 {
-		t.Fatalf("applied = %d, want 2", applied)
+	if applied != 4 {
+		t.Fatalf("applied = %d, want 4", applied)
 	}
 	if pending {
 		t.Fatal("pending = true, want false for current version")
@@ -211,13 +211,13 @@ func TestSetSchemaVersionForTesting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version after re-open failed: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("version after re-open = %d, want 2", version)
+	if version != 4 {
+		t.Fatalf("version after re-open = %d, want 4", version)
 	}
 }
 
 func TestMigrationVersion(t *testing.T) {
-	if MigrationVersion() != 2 {
-		t.Fatalf("MigrationVersion() = %d, want 2", MigrationVersion())
+	if MigrationVersion() != 4 {
+		t.Fatalf("MigrationVersion() = %d, want 4", MigrationVersion())
 	}
 }

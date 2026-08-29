@@ -133,7 +133,7 @@ func TestLoadSchemaVersionRangeEnforced(t *testing.T) {
 		version int
 	}{
 		{name: "zero below range", doc: `{"schema_version": 0}`, version: 0},
-		{name: "four above current", doc: `{"schema_version": 4}`, version: 4},
+		{name: "four above current", doc: `{"schema_version": 5}`, version: 5},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

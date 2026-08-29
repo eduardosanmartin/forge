@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/eduardosanmartin/forge/internal/config"
+	"github.com/eduardosanmartin/forge/internal/routing"
 )
 
 // ModelInfo describes a model available in the registry.
@@ -24,6 +25,7 @@ type Registry struct {
 	providers       map[string]Provider
 	defaultProvider string
 	defaultModel    string
+	router          *routing.ModelRouter
 	allowedHosts    []string
 	logger          *slog.Logger
 	mu              sync.RWMutex
@@ -69,26 +71,55 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 		return nil, fmt.Errorf("default_provider %q not found in providers", r.defaultProvider)
 	}
 
-	// Set default model to first model of default provider
+	// Build model router from config
+	r.router = r.buildModelRouter(cfg)
+
+	// Set default model: config-declared models take priority, Ollama list as fallback
 	if provider, ok := r.providers[r.defaultProvider]; ok {
-		models, err := provider.ListModels()
-		if err != nil || len(models) == 0 {
-			// Fall back to config-declared models
-			if len(cfg.Providers[r.defaultProvider].Models) > 0 {
-				r.defaultModel = cfg.Providers[r.defaultProvider].Models[0]
-			}
+		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
+			r.defaultModel = cfg.Providers[r.defaultProvider].Models[0]
 		} else {
-			r.defaultModel = models[0]
+			models, err := provider.ListModels()
+			if err == nil && len(models) > 0 {
+				r.defaultModel = models[0]
+			}
 		}
 	}
 
 	return r, nil
 }
 
+func (r *Registry) buildModelRouter(cfg *config.Config) *routing.ModelRouter {
+	roleModels := make(map[routing.ModelRole]string)
+
+	// Collect model roles from all providers
+	for _, p := range cfg.Providers {
+		for role, model := range p.ModelRoles {
+			switch role {
+			case "cheap":
+				roleModels[routing.RoleCheap] = model
+			case "generation":
+				roleModels[routing.RoleGeneration] = model
+			case "reasoning":
+				roleModels[routing.RoleReasoning] = model
+			}
+		}
+	}
+
+	// Fallback to first model in default provider if no roles configured
+	if len(roleModels) == 0 {
+		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
+			roleModels[routing.RoleGeneration] = cfg.Providers[r.defaultProvider].Models[0]
+		}
+	}
+
+	return routing.NewModelRouter(roleModels)
+}
+
 func (r *Registry) createProvider(name string, p config.Provider) (Provider, error) {
 	switch p.Kind {
 	case "openai-compatible":
-		return NewOllamaProvider(p.BaseURL, r.allowedHosts, r.logger)
+		return NewOllamaProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", p.Kind)
 	}
@@ -111,6 +142,25 @@ func (r *Registry) GetDefault() (Provider, string) {
 		return nil, ""
 	}
 	return r.providers[r.defaultProvider], r.defaultModel
+}
+
+// GetModelForStep returns the model name for a given step type.
+// Uses the router to select the appropriate model based on step type.
+func (r *Registry) GetModelForStep(step routing.StepType) string {
+	if r.router != nil {
+		return r.router.ModelForStep(step)
+	}
+	// Fallback to default model
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defaultModel
+}
+
+// GetRouter returns the model router (for testing/inspection).
+func (r *Registry) GetRouter() *routing.ModelRouter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.router
 }
 
 // SetDefault changes the default model (hot-swap).
@@ -202,6 +252,24 @@ func (r *Registry) Chat(ctx context.Context, req ChatRequest) (ChatResponse, err
 	return provider.Chat(ctx, req)
 }
 
+// ChatForStep sends a chat request using the model selected for the given step type.
+func (r *Registry) ChatForStep(ctx context.Context, step routing.StepType, req ChatRequest) (ChatResponse, error) {
+	r.mu.RLock()
+	provider := r.providers[r.defaultProvider]
+	r.mu.RUnlock()
+
+	if provider == nil {
+		return ChatResponse{}, errors.New("no default provider available")
+	}
+
+	model := r.GetModelForStep(step)
+	if req.Model == "" {
+		req.Model = model
+	}
+
+	return provider.Chat(ctx, req)
+}
+
 // ChatStream sends a streaming chat request using the default provider and model.
 func (r *Registry) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
 	r.mu.RLock()
@@ -213,6 +281,24 @@ func (r *Registry) ChatStream(ctx context.Context, req ChatRequest) (<-chan Stre
 		return nil, errors.New("no default provider available")
 	}
 
+	if req.Model == "" {
+		req.Model = model
+	}
+
+	return provider.ChatStream(ctx, req)
+}
+
+// ChatStreamForStep sends a streaming chat request using the model for the given step type.
+func (r *Registry) ChatStreamForStep(ctx context.Context, step routing.StepType, req ChatRequest) (<-chan StreamChunk, error) {
+	r.mu.RLock()
+	provider := r.providers[r.defaultProvider]
+	r.mu.RUnlock()
+
+	if provider == nil {
+		return nil, errors.New("no default provider available")
+	}
+
+	model := r.GetModelForStep(step)
 	if req.Model == "" {
 		req.Model = model
 	}

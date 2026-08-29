@@ -13,7 +13,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 4
 
 // runMigrations executes all pending migrations in order.
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -86,7 +86,33 @@ func runMigration(ctx context.Context, db *sql.DB, version int) error {
 				return fmt.Errorf("add metadata column: %w", err)
 			}
 		}
-
+	case 2:
+		filename := fmt.Sprintf("migrations/%03d.sql", version)
+		sqlBytes, err := migrationFiles.ReadFile(filename)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", filename, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("execute migration: %w", err)
+		}
+	case 3:
+		filename := fmt.Sprintf("migrations/%03d.sql", version)
+		sqlBytes, err := migrationFiles.ReadFile(filename)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", filename, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("execute migration: %w", err)
+		}
+	case 4:
+		filename := fmt.Sprintf("migrations/%03d.sql", version)
+		sqlBytes, err := migrationFiles.ReadFile(filename)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", filename, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("execute migration: %w", err)
+		}
 	default:
 		filename := fmt.Sprintf("migrations/%03d.sql", version)
 		sqlBytes, err := migrationFiles.ReadFile(filename)
