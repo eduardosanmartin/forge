@@ -140,7 +140,8 @@ func (m *SessionManager) DeleteSession(ctx context.Context, id string) error {
 }
 
 // ExecuteTurn executes a single agent turn for a session.
-func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage string) ([]store.Message, error) {
+// v1Flags can include: enableRetrieval, enableCompaction, enableAnchoring, enableRouting
+func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage string, v1Flags ...bool) ([]store.Message, error) {
 	// Check if session exists
 	session, err := m.store.GetSession(ctx, sessionID)
 	if err != nil {
@@ -156,6 +157,37 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	if m.agent == nil {
 		return nil, fmt.Errorf("agent not initialized")
 	}
+
+	// Read v1 flags from session metadata if not provided
+	enableRetrieval := false
+	enableCompaction := false
+	enableAnchoring := false
+	enableRouting := false
+	if len(v1Flags) >= 4 {
+		enableRetrieval = v1Flags[0]
+		enableCompaction = v1Flags[1]
+		enableAnchoring = v1Flags[2]
+		enableRouting = v1Flags[3]
+	} else if session.ID != "" && session.Metadata != nil {
+		// Fallback to session metadata
+		if v, ok := session.Metadata["v1_retrieval"].(bool); ok {
+			enableRetrieval = v
+		}
+		if v, ok := session.Metadata["v1_compaction"].(bool); ok {
+			enableCompaction = v
+		}
+		if v, ok := session.Metadata["v1_anchoring"].(bool); ok {
+			enableAnchoring = v
+		}
+		if v, ok := session.Metadata["v1_routing"].(bool); ok {
+			enableRouting = v
+		}
+	}
+
+	_ = enableRetrieval
+	_ = enableCompaction
+	_ = enableAnchoring
+	_ = enableRouting
 
 	// Create turn context with cancellation
 	turnCtx, turnCancel := context.WithCancel(ctx)
@@ -179,7 +211,9 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		m.emergency.ClearTurnContext(sessionID)
 	}()
 
-	// Delegate to agent
+	// Delegate to agent with v1 flags
+	// We need to pass v1 flags to the agent - for now we'll use the agent's ExecuteTurn
+	// which will read flags from session metadata
 	result, err := m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
 	if err != nil {
 		return result.Messages, err

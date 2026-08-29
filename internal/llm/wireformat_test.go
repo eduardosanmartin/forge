@@ -45,7 +45,7 @@ func TestOllamaProvider_Chat_RealWireFormat(t *testing.T) {
 	mock.SetDefaultResponse(&MockResponse{StatusCode: http.StatusOK, Body: raw})
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

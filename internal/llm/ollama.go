@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 // OllamaProvider implements Provider for OpenAI-compatible endpoints (e.g., Ollama).
 type OllamaProvider struct {
 	baseURL    string
+	apiKey     string
 	httpClient *http.Client
 	logger     *slog.Logger
 	models     []string
@@ -35,9 +37,14 @@ type OllamaProvider struct {
 // NewOllamaProvider creates a new Ollama provider.
 // allowedHosts enforces network egress allowlist (RNF-4.9): baseURL host:port must
 // be in the list (exact match). Empty allowlist = deny all. Returns error if not allowed.
-func NewOllamaProvider(baseURL string, allowedHosts []string, logger *slog.Logger) (*OllamaProvider, error) {
+func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *slog.Logger) (*OllamaProvider, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	// API key: explicit config value wins; fall back to env for secret safety.
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENCODE_API_KEY")
 	}
 
 	// Validate allowlist before creating the provider
@@ -79,6 +86,7 @@ func NewOllamaProvider(baseURL string, allowedHosts []string, logger *slog.Logge
 
 	p := &OllamaProvider{
 		baseURL:    baseURL,
+		apiKey:     apiKey,
 		httpClient: client,
 		logger:     logger,
 	}
@@ -157,6 +165,9 @@ func (p *OllamaProvider) fetchModels(endpoint string) ([]string, error) {
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -221,6 +232,9 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		return ChatResponse{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 
 	p.logger.Debug("chat request", "endpoint", endpoint, "body", logging.Redact(string(body)))
 
@@ -272,6 +286,9 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	p.logger.Debug("chat stream request", "endpoint", endpoint, "body", logging.Redact(string(body)))
@@ -340,7 +357,14 @@ func (p *OllamaProvider) buildRequestBody(req ChatRequest) map[string]any {
 
 	if len(req.Tools) > 0 {
 		body["tools"] = p.toolsToAPI(req.Tools)
-		body["tool_choice"] = req.ToolChoice
+		// An empty tool_choice is invalid for strict OpenAI-compatible endpoints
+		// (e.g. OpenCode Zen / Nemotron) and yields HTTP 400. Default to "auto"
+		// so the model may decide whether to call a tool.
+		if req.ToolChoice != "" {
+			body["tool_choice"] = req.ToolChoice
+		} else {
+			body["tool_choice"] = "auto"
+		}
 	}
 	if req.Temperature != nil {
 		body["temperature"] = *req.Temperature

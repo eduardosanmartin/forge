@@ -1,3 +1,6 @@
+// Package client implements forge's daemon clients: a reconnecting
+// JSON-RPC-over-WebSocket transport, an interactive REPL session runner, and
+// a non-interactive one-shot mode with structured JSON output.
 package client
 
 import (
@@ -13,32 +16,34 @@ import (
 	"github.com/eduardosanmartin/forge/internal/daemon"
 )
 
-// replHistoryReplay is how many recent messages `/attach` renders locally.
-const replHistoryReplay = 10
+const (
+	// replHistoryReplay is how many recent messages `/attach` renders locally.
+	replHistoryReplay = 10
+)
 
-// Streaming choice (v0): assistant output is rendered as ONE complete
-// message taken from the ExecuteTurn response. The daemon does not emit
-// incremental delta notifications during turns yet (its transport broadcast
-// path carries no per-chunk events), so there is no delta source to render
-// inline. When the daemon grows delta streaming, the REPL can switch on
-// message.delta notifications via Client.Events without changing the command
-// surface. Emergency-halt broadcasts ARE surfaced live through that same
-// event stream below.
+// REPLOptions configures REPL behavior.
+type REPLOptions struct {
+	EnableRetrieval  bool
+	EnableCompaction bool
+	EnableAnchoring  bool
+	EnableRouting    bool
+}
 
 // REPL is an interactive line-oriented client for one forge session.
 type REPL struct {
-	client    *Client
-	sessionID string
-	out       io.Writer
-	in        io.Reader
+	client       *Client
+	sessionID    string
+	out          io.Writer
+	in           io.Reader
+	v1Enabled    REPLOptions
 
 	writeMu sync.Mutex // serializes banner/turn output vs async event lines
 }
 
 // NewREPL creates a REPL bound to sessionID. An empty sessionID makes Run
 // create a fresh session on startup.
-func NewREPL(cl *Client, sessionID string, out io.Writer, in io.Reader) *REPL {
-	return &REPL{client: cl, sessionID: sessionID, out: out, in: in}
+func NewREPL(cl *Client, sessionID string, out io.Writer, in io.Reader, opts REPLOptions) *REPL {
+	return &REPL{client: cl, sessionID: sessionID, out: out, in: in, v1Enabled: opts}
 }
 
 // Run drives the read-eval loop until /exit, Ctrl-D (EOF), or context
@@ -58,6 +63,8 @@ func (r *REPL) Run(ctx context.Context) error {
 	go r.drainEvents(eventCh)
 
 	r.writef("forge REPL - session %s\n", r.sessionID)
+	r.writef("V1 features: retrieval=%v compaction=%v anchoring=%v routing=%v\n",
+		r.v1Enabled.EnableRetrieval, r.v1Enabled.EnableCompaction, r.v1Enabled.EnableAnchoring, r.v1Enabled.EnableRouting)
 	r.writef("Type a message, /help for commands, /exit or Ctrl-D to quit.\n")
 
 	scanner := bufio.NewScanner(r.in)
@@ -83,7 +90,6 @@ func (r *REPL) Run(ctx context.Context) error {
 		switch {
 		case line == "/exit":
 			r.writeln("bye.")
-			stopEvents()
 			return nil
 		case line == "/help":
 			r.printHelp()
@@ -154,6 +160,12 @@ func (r *REPL) printHelp() {
 	r.writeln("  /halt [id]      emergency-halt current or given session")
 	r.writeln("  /resume <id>    resume a halted session")
 	r.writeln("  /exit           quit (Ctrl-D works too)")
+	r.writeln("")
+	r.writeln("V1 flags (set at startup):")
+	r.writeln("  --retrieval    Enable selective context retrieval")
+	r.writeln("  --compaction   Enable hierarchical compaction")
+	r.writeln("  --anchoring    Enable persistent anchored facts")
+	r.writeln("  --routing      Enable cost-based model routing")
 }
 
 func (r *REPL) cmdModel(ctx context.Context, line string) {
@@ -272,7 +284,14 @@ func (r *REPL) cmdResume(ctx context.Context, line string) {
 func (r *REPL) cmdTurn(ctx context.Context, line string) {
 	var res daemon.ExecuteTurnResult
 	err := r.client.Call(ctx, daemon.MethodExecuteTurn,
-		daemon.ExecuteTurnParams{SessionID: r.sessionID, UserMessage: line}, &res)
+		daemon.ExecuteTurnParams{
+			SessionID:        r.sessionID,
+			UserMessage:      line,
+			EnableRetrieval:  r.v1Enabled.EnableRetrieval,
+			EnableCompaction: r.v1Enabled.EnableCompaction,
+			EnableAnchoring:  r.v1Enabled.EnableAnchoring,
+			EnableRouting:    r.v1Enabled.EnableRouting,
+		}, &res)
 	if err != nil {
 		if IsCode(err, daemon.ErrCodeSessionHalted) {
 			r.writef("session is halted: %v (use /resume %s)\n", err, r.sessionID)
@@ -290,7 +309,6 @@ func (r *REPL) cmdTurn(ctx context.Context, line string) {
 	}
 }
 
-// renderToolTrace prints compact single lines per executed tool call.
 func renderToolTrace(out io.Writer, trace []daemon.ToolTraceResult) {
 	for _, tc := range trace {
 		fmt.Fprintf(out, "-> %s(%s)\n", tc.Name, FormatToolArgs(tc.Args))
@@ -302,7 +320,6 @@ func renderToolTrace(out io.Writer, trace []daemon.ToolTraceResult) {
 	}
 }
 
-// splitCommandArg splits "/cmd rest" into ("rest", true).
 func splitCommandArg(line string) (string, bool) {
 	fields := strings.SplitN(line, " ", 2)
 	if len(fields) < 2 {
@@ -312,7 +329,6 @@ func splitCommandArg(line string) (string, bool) {
 	return arg, arg != ""
 }
 
-// formatTimestamp renders unix milliseconds as local "2006-01-02 15:04".
 func formatTimestamp(ms int64) string {
 	if ms <= 0 {
 		return "-"
@@ -320,7 +336,6 @@ func formatTimestamp(ms int64) string {
 	return time.UnixMilli(ms).Format("2006-01-02 15:04")
 }
 
-// oneLine collapses a multi-line message into a single display line.
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")

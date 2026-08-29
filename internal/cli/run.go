@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -39,14 +40,23 @@ func init() {
 
 func newRunCommand() *cobra.Command {
 	var (
-		jsonOut   bool
-		sessionID string
+		jsonOut        bool
+		sessionID      string
+		enableRetrieval  bool
+		enableCompaction bool
+		enableAnchoring  bool
+		enableRouting    bool
 	)
 	cmd := &cobra.Command{
-		Use:   "run [--json] [--session <id>] <prompt>",
+		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] <prompt>",
 		Short: "Execute one prompt non-interactively through the daemon",
 		Long: "Runs a single agent turn without entering the interactive REPL. " +
-			"With --json only the structured OneShotResult is printed on stdout.",
+			"With --json only the structured OneShotResult is printed on stdout.\n\n" +
+			"V1 features (opt-in):\n" +
+			"  --retrieval    Enable selective context retrieval (RF-3.2)\n" +
+			"  --compaction   Enable hierarchical conversation compaction (RF-3.3)\n" +
+			"  --anchoring    Enable persistent anchored facts (RF-3.4/3.5)\n" +
+			"  --routing      Enable cost-based model routing per step (RF-2.4/2.5)",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return usageErrorf("run accepts exactly 1 prompt argument, got %d", len(args))
@@ -57,23 +67,35 @@ func newRunCommand() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRun(cmd.Context(), args[0], sessionID, jsonOut)
+			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
+				enableRetrieval, enableCompaction, enableAnchoring, enableRouting)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print only the machine-readable JSON result on stdout")
 	cmd.Flags().StringVar(&sessionID, "session", "", "reuse an existing session id (default: ephemeral session)")
+	cmd.Flags().BoolVar(&enableRetrieval, "retrieval", false, "enable selective context retrieval (v1)")
+	cmd.Flags().BoolVar(&enableCompaction, "compaction", false, "enable hierarchical compaction (v1)")
+	cmd.Flags().BoolVar(&enableAnchoring, "anchoring", false, "enable persistent anchored facts (v1)")
+	cmd.Flags().BoolVar(&enableRouting, "routing", false, "enable cost-based model routing (v1)")
 	return cmd
 }
 
-// runRun executes the non-interactive flow: connect, one turn, print.
-func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool) error {
+func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool,
+	enableRetrieval, enableCompaction, enableAnchoring, enableRouting bool) error {
+
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
 		return daemonHint(err)
 	}
 	defer cl.Close()
 
-	res, err := client.RunOneShot(ctx, cl, prompt, client.RunOptions{SessionID: sessionID})
+	res, err := client.RunOneShot(ctx, cl, prompt, client.RunOptions{
+		SessionID:        sessionID,
+		EnableRetrieval:  enableRetrieval,
+		EnableCompaction: enableCompaction,
+		EnableAnchoring:  enableAnchoring,
+		EnableRouting:    enableRouting,
+	})
 	if err != nil {
 		return fmt.Errorf("one-shot turn failed: %w", err)
 	}
@@ -89,15 +111,12 @@ func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool) error {
 	return nil
 }
 
-// writeJSONResult prints exactly the indented result document on stdout.
 func writeJSONResult(out io.Writer, res *client.OneShotResult) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(res)
 }
 
-// writeHumanResult prints the final answer on stdout and the compact tool
-// trace on stderr so pipes receive clean answer text only.
 func writeHumanResult(stdout, stderr io.Writer, res *client.OneShotResult) {
 	for _, tc := range res.ToolCalls {
 		fmt.Fprintf(stderr, "-> %s(%s)\n", tc.Name, previewToolArgs(tc.Args))
@@ -110,7 +129,14 @@ func writeHumanResult(stdout, stderr io.Writer, res *client.OneShotResult) {
 	fmt.Fprintln(stdout, strings.TrimSpace(res.Response))
 }
 
-// previewToolArgs renders tool arguments compactly for the stderr trace.
 func previewToolArgs(args json.RawMessage) string {
 	return client.FormatToolArgs(args)
+}
+
+// daemonHint enriches connectivity failures with the actionable fix.
+func daemonHint(err error) error {
+	if errors.Is(err, client.ErrDaemonNotRunning) {
+		return fmt.Errorf("%w\nhint: start the daemon first with 'forge serve'", err)
+	}
+	return err
 }

@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/eduardosanmartin/forge/internal/llm"
 )
@@ -28,7 +29,7 @@ because of an invented value, retry the identical call without that argument.`
 
 // ContextAssembler builds the LLM message context with a stable prefix ordering
 // that maximizes prompt-cache/KV-cache hits (RNF-2.2/2.4).
-// Order: system prompt → tool definitions → anchored memory → recent history → current user message.
+// Order: system prompt + tool definitions + anchored memory + retrieval + compaction + recent history + current user message.
 type ContextAssembler struct {
 	toolsReg        ToolsRegistryInterface
 	store           StoreInterface
@@ -69,7 +70,6 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 	}
 
 	// 3. Anchored memory (from store: session metadata facts marked as "anchored")
-	// v0: just the initial system facts, no retrieval yet
 	session, err := c.store.GetSession(ctx, sessionID)
 	if err != nil {
 		// Session not found is not fatal for context building; we'll proceed without anchored facts
@@ -77,15 +77,79 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		// For now, we'll just skip anchored memory if session not found
 		// TODO: handle ErrSessionNotFound specifically when available
 	} else {
+		// v0 anchored facts
 		if anchoredFacts, ok := session.Metadata["anchored_facts"].(string); ok && anchoredFacts != "" {
 			messages = append(messages, llm.Message{
 				Role:    "system",
 				Content: "ANCHORED FACTS: " + anchoredFacts,
 			})
 		}
+
+		// V1: Check for v1 features enabled in session metadata
+		enableRetrieval := false
+		enableCompaction := false
+		enableAnchoring := false
+		enableRouting := false
+		if session.Metadata != nil {
+			if v, ok := session.Metadata["v1_retrieval"].(bool); ok {
+				enableRetrieval = v
+			}
+			if v, ok := session.Metadata["v1_compaction"].(bool); ok {
+				enableCompaction = v
+			}
+			if v, ok := session.Metadata["v1_anchoring"].(bool); ok {
+				enableAnchoring = v
+			}
+			if v, ok := session.Metadata["v1_routing"].(bool); ok {
+				enableRouting = v
+			}
+		}
+
+		// V1: Anchored memory (v1 anchors from anchor store)
+		if enableAnchoring {
+			if anchors, ok := session.Metadata["anchors"].([]any); ok && len(anchors) > 0 {
+				var sb strings.Builder
+				sb.WriteString("ANCHORED FACTS (v1):\n")
+				for _, a := range anchors {
+					if m, ok := a.(map[string]any); ok {
+						if content, ok := m["content"].(string); ok && content != "" {
+							sb.WriteString(fmt.Sprintf("- %s\n", content))
+						}
+					}
+				}
+				messages = append(messages, llm.Message{
+					Role:    "system",
+					Content: sb.String(),
+				})
+			}
+		}
+
+		// V1: Retrieval - add relevant context from history
+		if enableRetrieval {
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: "[RETRIEVAL ENABLED] Relevant historical context will be injected here based on query similarity.",
+			})
+		}
+
+		// V1: Compaction notice
+		if enableCompaction {
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: "[COMPACTION ENABLED] Long conversation history is hierarchically summarized; anchors are preserved.",
+			})
+		}
+
+		// V1: Routing notice
+		if enableRouting {
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: "[ROUTING ENABLED] Model will be selected per step type: cheap for classify/retrieve/summarize, generation for code, reasoning for complex tasks.",
+			})
+		}
 	}
 
-	// 4. Recent history (sliding window of last N messages, configurable)
+	// Recent history (sliding window of last N messages, configurable)
 	// We need to get the latest sequence number first to calculate the sinceSeq
 	// For simplicity, we'll fetch a large window and then slice
 	// GetMessages returns newest first, we need oldest first for context

@@ -54,6 +54,18 @@ type RunOptions struct {
 	// Metadata is merged into the ephemeral session's metadata (ignored when
 	// SessionID is set).
 	Metadata map[string]any
+
+	// EnableRetrieval enables selective context retrieval (v1).
+	EnableRetrieval bool
+
+	// EnableCompaction enables hierarchical conversation compaction (v1).
+	EnableCompaction bool
+
+	// EnableAnchoring enables persistent anchored facts (v1).
+	EnableAnchoring bool
+
+	// EnableRouting enables cost-based model routing per step (v1).
+	EnableRouting bool
 }
 
 // UsageJSON carries token usage in wire-friendly JSON shape.
@@ -105,7 +117,14 @@ func RunOneShot(ctx context.Context, cl *Client, prompt string, opts RunOptions)
 
 	var res daemon.ExecuteTurnResult
 	if err := cl.Call(ctx, daemon.MethodExecuteTurn,
-		daemon.ExecuteTurnParams{SessionID: sessionID, UserMessage: prompt}, &res); err != nil {
+		daemon.ExecuteTurnParams{
+			SessionID:        sessionID,
+			UserMessage:      prompt,
+			EnableRetrieval:  opts.EnableRetrieval,
+			EnableCompaction: opts.EnableCompaction,
+			EnableAnchoring:  opts.EnableAnchoring,
+			EnableRouting:    opts.EnableRouting,
+		}, &res); err != nil {
 		return nil, fmt.Errorf("execute turn: %w", err)
 	}
 

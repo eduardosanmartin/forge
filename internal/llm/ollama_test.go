@@ -17,7 +17,7 @@ func TestNewOllamaProvider_AllowlistDeny(t *testing.T) {
 	defer func() { _ = logger }()
 
 	// Empty allowlist should deny all
-	_, err := NewOllamaProvider("http://127.0.0.1:11434/v1", []string{}, logger)
+	_, err := NewOllamaProvider("http://127.0.0.1:11434/v1", "", []string{}, logger)
 	if err == nil {
 		t.Fatal("expected error for empty allowlist, got nil")
 	}
@@ -26,13 +26,13 @@ func TestNewOllamaProvider_AllowlistDeny(t *testing.T) {
 	}
 
 	// Host not in allowlist
-	_, err = NewOllamaProvider("http://127.0.0.1:11434/v1", []string{"localhost"}, logger)
+	_, err = NewOllamaProvider("http://127.0.0.1:11434/v1", "", []string{"localhost"}, logger)
 	if err == nil {
 		t.Fatal("expected error for host not in allowlist, got nil")
 	}
 
 	// Exact match with port
-	_, err = NewOllamaProvider("http://127.0.0.1:11434/v1", []string{"127.0.0.1:11434"}, logger)
+	_, err = NewOllamaProvider("http://127.0.0.1:11434/v1", "", []string{"127.0.0.1:11434"}, logger)
 	if err != nil {
 		t.Fatalf("unexpected error for exact match: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestNewOllamaProvider_AllowlistExactMatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger, _, _ := logging.New(logging.Config{Level: "error"})
-			_, err := NewOllamaProvider(tt.baseURL, tt.allowlist, logger)
+			_, err := NewOllamaProvider(tt.baseURL, "", tt.allowlist, logger)
 			if tt.wantError {
 				if err == nil {
 					t.Error("expected error, got nil")
@@ -112,7 +112,7 @@ func TestOllamaProvider_Chat_NonStreaming(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestOllamaProvider_Chat_WithTools(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestOllamaProvider_ChatStream(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestOllamaProvider_ChatStream_WithToolCalls(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestOllamaProvider_ListModels_Merge(t *testing.T) {
 	})
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestOllamaProvider_ErrorMapping(t *testing.T) {
 			)
 
 			logger, _, _ := logging.New(logging.Config{Level: "error"})
-			provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+			provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 			if err != nil {
 				t.Fatalf("create provider: %v", err)
 			}
@@ -475,7 +475,7 @@ func TestOllamaProvider_ContextCancellation(t *testing.T) {
 	})
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestOllamaProvider_Close(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -593,7 +593,7 @@ func TestOllamaProvider_SSEParsing_EdgeCases(t *testing.T) {
 			})
 
 			logger, _, _ := logging.New(logging.Config{Level: "error"})
-			provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+			provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 			if err != nil {
 				t.Fatalf("create provider: %v", err)
 			}
@@ -627,7 +627,7 @@ func TestOllamaProvider_TemperatureAndMaxTokens(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -670,7 +670,7 @@ func TestOllamaProvider_Chat_NilOptionalFields(t *testing.T) {
 	)
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

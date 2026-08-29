@@ -18,7 +18,7 @@ import (
 func runREPL(t *testing.T, stack *daemonStack, sessionID, script string) string {
 	t.Helper()
 	var out bytes.Buffer
-	repl := NewREPL(stack.client, sessionID, &out, strings.NewReader(script))
+	repl := NewREPL(stack.client, sessionID, &out, strings.NewReader(script), REPLOptions{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -57,7 +57,7 @@ func TestREPLEOFExitsGracefully(t *testing.T) {
 	stack := startTestDaemon(t)
 
 	var out bytes.Buffer
-	repl := NewREPL(stack.client, "", &out, strings.NewReader(""))
+	repl := NewREPL(stack.client, "", &out, strings.NewReader(""), REPLOptions{})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := repl.Run(ctx); err != nil {
