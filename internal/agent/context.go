@@ -80,7 +80,7 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		Content: systemPrompt,
 	})
 
-	// 2. Tool definitions (fixed order: fs.read, fs.write, fs.list, shell.exec, git)
+	// 2. Tool definitions (fixed order: fs_read, fs_write, fs_list, shell_exec, git)
 	toolDefs := c.toolsReg.List()
 	for _, t := range toolDefs {
 		messages = append(messages, llm.Message{

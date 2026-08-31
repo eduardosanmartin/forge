@@ -10,7 +10,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/retrieval"
 )
 
-// RetrievalSearchTool implements the retrieval.search tool.
+// RetrievalSearchTool implements the retrieval_search tool.
 type RetrievalSearchTool struct {
 	retriever *retrieval.Retriever
 }
@@ -21,7 +21,7 @@ func NewRetrievalSearchTool(retriever *retrieval.Retriever) *RetrievalSearchTool
 }
 
 func (t *RetrievalSearchTool) Name() string {
-	return "retrieval.search"
+	return "retrieval_search"
 }
 
 func (t *RetrievalSearchTool) Description() string {

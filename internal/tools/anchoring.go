@@ -10,7 +10,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// AnchoringStoreTool implements the anchoring.store tool.
+// AnchoringStoreTool implements the anchoring_store tool.
 type AnchoringStoreTool struct {
 	anchorStore *anchor.AnchorStoreSQL
 }
@@ -21,7 +21,7 @@ func NewAnchoringStoreTool(anchorStore *anchor.AnchorStoreSQL) *AnchoringStoreTo
 }
 
 func (t *AnchoringStoreTool) Name() string {
-	return "anchoring.store"
+	return "anchoring_store"
 }
 
 func (t *AnchoringStoreTool) Description() string {
@@ -105,7 +105,7 @@ func (t *AnchoringStoreTool) Execute(ctx context.Context, req perms.Request) (Re
 	return Result{Content: fmt.Sprintf("Anchor created with ID %d", created.ID)}, nil
 }
 
-// AnchoringListTool implements the anchoring.list tool.
+// AnchoringListTool implements the anchoring_list tool.
 type AnchoringListTool struct {
 	anchorStore *anchor.AnchorStoreSQL
 }
@@ -115,7 +115,7 @@ func NewAnchoringListTool(anchorStore *anchor.AnchorStoreSQL) *AnchoringListTool
 }
 
 func (t *AnchoringListTool) Name() string {
-	return "anchoring.list"
+	return "anchoring_list"
 }
 
 func (t *AnchoringListTool) Description() string {
@@ -186,7 +186,7 @@ func (t *AnchoringListTool) Execute(ctx context.Context, req perms.Request) (Res
 	return Result{Content: string(content)}, nil
 }
 
-// AnchoringGetTool implements the anchoring.get tool.
+// AnchoringGetTool implements the anchoring_get tool.
 type AnchoringGetTool struct {
 	anchorStore *anchor.AnchorStoreSQL
 }
@@ -196,7 +196,7 @@ func NewAnchoringGetTool(anchorStore *anchor.AnchorStoreSQL) *AnchoringGetTool {
 }
 
 func (t *AnchoringGetTool) Name() string {
-	return "anchoring.get"
+	return "anchoring_get"
 }
 
 func (t *AnchoringGetTool) Description() string {
@@ -256,7 +256,7 @@ func (t *AnchoringGetTool) Execute(ctx context.Context, req perms.Request) (Resu
 	return Result{Content: string(content)}, nil
 }
 
-// AnchoringDeleteTool implements the anchoring.delete tool.
+// AnchoringDeleteTool implements the anchoring_delete tool.
 type AnchoringDeleteTool struct {
 	anchorStore *anchor.AnchorStoreSQL
 }
@@ -266,7 +266,7 @@ func NewAnchoringDeleteTool(anchorStore *anchor.AnchorStoreSQL) *AnchoringDelete
 }
 
 func (t *AnchoringDeleteTool) Name() string {
-	return "anchoring.delete"
+	return "anchoring_delete"
 }
 
 func (t *AnchoringDeleteTool) Description() string {

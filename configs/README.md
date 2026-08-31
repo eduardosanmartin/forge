@@ -45,7 +45,7 @@ silently. Documents on older schema versions are migrated forward at load.
         "shell": { "allow": ["go", "npm"] }
 
   - `permissions.shell.require_isolation`: when `true` (the default since
-    schema v3, RNF-4.7), forge refuses `shell.exec` on **Linux** if OS-level
+    schema v3, RNF-4.7), forge refuses `shell_exec` on **Linux** if OS-level
     isolation is unavailable instead of silently running with the permission
     model alone. Shell commands always run through an isolation wrapper on
     Linux (Landlock filesystem bounds + a default-deny seccomp filter, no

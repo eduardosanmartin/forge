@@ -47,7 +47,7 @@ func TestRunOneShotEphemeralSessionAndResponse(t *testing.T) {
 func TestRunOneShotToolTracePopulated(t *testing.T) {
 	stack := startTestDaemon(t,
 		toolCallReply("reading file",
-			llmToolCall("t1", "fs.read", `{"path":"notes.txt"}`)),
+			llmToolCall("t1", "fs_read", `{"path":"notes.txt"}`)),
 		plainReply("done"),
 	)
 
@@ -62,8 +62,8 @@ func TestRunOneShotToolTracePopulated(t *testing.T) {
 		t.Fatalf("tool trace len = %d, want 1", len(res.ToolCalls))
 	}
 	tc := res.ToolCalls[0]
-	if tc.Name != "fs.read" || !tc.OK {
-		t.Errorf("trace entry = %+v, want fs.read ok", tc)
+	if tc.Name != "fs_read" || !tc.OK {
+		t.Errorf("trace entry = %+v, want fs_read ok", tc)
 	}
 	var args map[string]string
 	if err := json.Unmarshal(tc.Args, &args); err != nil {
@@ -77,10 +77,10 @@ func TestRunOneShotToolTracePopulated(t *testing.T) {
 func TestRunOneShotFailedToolMarkedNotOK(t *testing.T) {
 	stack := startTestDaemon(t,
 		toolCallReply("attempting",
-			llmToolCall("t1", "fs.read", `{"path":"secret"}`)),
+			llmToolCall("t1", "fs_read", `{"path":"secret"}`)),
 		plainReply("recovered anyway"),
 	)
-	stack.toolsReg.fail = map[string]bool{"fs.read": true}
+	stack.toolsReg.fail = map[string]bool{"fs_read": true}
 
 	ctx, cancel := callCtx(t)
 	defer cancel()

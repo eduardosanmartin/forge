@@ -13,7 +13,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// TestFsReadTool_Basic tests basic fs.read functionality.
+// TestFsReadTool_Basic tests basic fs_read functionality.
 func TestFsReadTool_Basic(t *testing.T) {
 	tool := newFsReadTool()
 
@@ -169,7 +169,7 @@ func TestFsReadTool_EmptyFile(t *testing.T) {
 	}
 }
 
-// TestFsWriteTool_Basic tests basic fs.write functionality.
+// TestFsWriteTool_Basic tests basic fs_write functionality.
 func TestFsWriteTool_Basic(t *testing.T) {
 	tool := newFsWriteTool()
 

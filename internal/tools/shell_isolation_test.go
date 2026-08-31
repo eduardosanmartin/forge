@@ -154,7 +154,7 @@ func TestShellExecRequiredUnavailableDeniedOnLinux(t *testing.T) {
 }
 
 // TestRegistrySetIsolatorReachesShellTool proves the registry wiring: the
-// configured isolator drives shell.exec through the wrapper even though the
+// configured isolator drives shell_exec through the wrapper even though the
 // tool was created inside NewDefaultRegistry before SetIsolator ran.
 func TestRegistrySetIsolatorReachesShellTool(t *testing.T) {
 	reg, _ := setupRegistry(t)
@@ -167,7 +167,7 @@ func TestRegistrySetIsolatorReachesShellTool(t *testing.T) {
 	for i, a := range echoArgs {
 		args[i] = a
 	}
-	result, err := reg.Execute(context.Background(), "shell.exec",
+	result, err := reg.Execute(context.Background(), "shell_exec",
 		map[string]any{"command": echoCmd, "args": args})
 	if err != nil {
 		t.Fatal(err)

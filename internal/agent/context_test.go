@@ -57,7 +57,7 @@ func TestContextAssembler_Build_ToolDefinitionsInFixedOrder(t *testing.T) {
 		t.Errorf("expected 5 tool definitions, got %d", len(toolMsgs))
 	}
 
-	expectedOrder := []string{"fs.read", "fs.write", "fs.list", "shell.exec", "git"}
+	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git"}
 	for i, expected := range expectedOrder {
 		if i >= len(toolMsgs) {
 			t.Errorf("missing tool at index %d: %s", i, expected)
@@ -162,7 +162,7 @@ func TestContextAssembler_ToolDefs_FixedOrder(t *testing.T) {
 		t.Errorf("expected 5 tool defs, got %d", len(toolDefs))
 	}
 
-	expectedOrder := []string{"fs.read", "fs.write", "fs.list", "shell.exec", "git"}
+	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git"}
 	for i, expected := range expectedOrder {
 		if i >= len(toolDefs) {
 			t.Errorf("missing tool def at index %d: %s", i, expected)
@@ -227,7 +227,7 @@ func findSubstring(s, substr string) bool {
 }
 
 func containsToolName(content, toolName string) bool {
-	// content format: "TOOL: fs.read - ..."
+	// content format: "TOOL: fs_read - ..."
 	return findSubstring(content, "TOOL: "+toolName+" -")
 }
 

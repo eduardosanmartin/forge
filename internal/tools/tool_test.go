@@ -213,8 +213,8 @@ func TestBuildPermsRequest(t *testing.T) {
 		checkFunc func(*testing.T, perms.Request)
 	}{
 		{
-			name:     "fs.read basic",
-			toolName: "fs.read",
+			name:     "fs_read basic",
+			toolName: "fs_read",
 			args:     map[string]any{"path": "/test/file.txt"},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -227,8 +227,8 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "fs.read with offset limit",
-			toolName: "fs.read",
+			name:     "fs_read with offset limit",
+			toolName: "fs_read",
 			args:     map[string]any{"path": "/test/file.txt", "offset": 100.0, "limit": 500.0},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -241,14 +241,14 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "fs.read missing path",
-			toolName: "fs.read",
+			name:     "fs_read missing path",
+			toolName: "fs_read",
 			args:     map[string]any{},
 			wantErr:  true,
 		},
 		{
-			name:     "fs.write basic",
-			toolName: "fs.write",
+			name:     "fs_write basic",
+			toolName: "fs_write",
 			args:     map[string]any{"path": "/test/file.txt", "content": "hello"},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -264,8 +264,8 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "fs.write base64",
-			toolName: "fs.write",
+			name:     "fs_write base64",
+			toolName: "fs_write",
 			args:     map[string]any{"path": "/test/file.txt", "content": "SGVsbG8=", "encoding": "base64", "create_dirs": true},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -278,8 +278,8 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "fs.list with pattern",
-			toolName: "fs.list",
+			name:     "fs_list with pattern",
+			toolName: "fs_list",
 			args:     map[string]any{"path": "/test", "recursive": true, "pattern": "*.txt"},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -295,8 +295,8 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "shell.exec basic",
-			toolName: "shell.exec",
+			name:     "shell_exec basic",
+			toolName: "shell_exec",
 			args:     map[string]any{"command": "echo", "args": []any{"hello"}},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -312,8 +312,8 @@ func TestBuildPermsRequest(t *testing.T) {
 			},
 		},
 		{
-			name:     "shell.exec with timeout and workdir",
-			toolName: "shell.exec",
+			name:     "shell_exec with timeout and workdir",
+			toolName: "shell_exec",
 			args:     map[string]any{"command": "sleep", "args": []any{"10"}, "timeout_sec": 30.0, "workdir": "/tmp"},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
@@ -361,15 +361,15 @@ func TestBuildPermsRequest(t *testing.T) {
 		},
 		{
 			name:     "custom v1 tool maps to KindCustom with tool name",
-			toolName: "retrieval.search",
+			toolName: "retrieval_search",
 			args:     map[string]any{"query": "hello", "k": 5.0},
 			wantErr:  false,
 			checkFunc: func(t *testing.T, req perms.Request) {
 				if req.Kind != perms.KindCustom {
 					t.Errorf("Kind = %q, want %q", req.Kind, perms.KindCustom)
 				}
-				if req.Command != "retrieval.search" {
-					t.Errorf("Command = %q, want tool name %q", req.Command, "retrieval.search")
+				if req.Command != "retrieval_search" {
+					t.Errorf("Command = %q, want tool name %q", req.Command, "retrieval_search")
 				}
 				if req.Path != "" || len(req.Args) != 0 {
 					t.Errorf("custom request must not carry Path/Args: %+v", req)

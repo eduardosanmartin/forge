@@ -22,7 +22,7 @@ type Registry struct {
 	workspaceRoot string
 	logger        *slog.Logger
 	isolator      Isolator // OS-level shell isolation routing (RNF-4.7); nil = legacy direct exec
-	requireIso    bool     // refuse shell.exec when isolation is required but unavailable (Linux only)
+	requireIso    bool     // refuse shell_exec when isolation is required but unavailable (Linux only)
 	mu            sync.RWMutex
 	router        *routing.ModelRouter
 }
@@ -43,7 +43,7 @@ func New(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *
 
 // SetIsolator routes shell children through the OS-isolation wrapper
 // whenever the isolator reports Enabled. Safe to call before or after tool
-// registration; the setting reaches the shell.exec tool either way. A nil
+// registration; the setting reaches the shell_exec tool either way. A nil
 // isolator restores legacy direct execution.
 func (r *Registry) SetIsolator(isol Isolator) {
 	r.mu.Lock()
@@ -52,7 +52,7 @@ func (r *Registry) SetIsolator(isol Isolator) {
 	r.applyShellOptionsLocked()
 }
 
-// SetRequireShellIsolation configures whether shell.exec must refuse to run
+// SetRequireShellIsolation configures whether shell_exec must refuse to run
 // when isolation is unavailable. Only honored on Linux; other platforms
 // ignore it (documented config behavior).
 func (r *Registry) SetRequireShellIsolation(require bool) {
@@ -63,9 +63,9 @@ func (r *Registry) SetRequireShellIsolation(require bool) {
 }
 
 // applyShellOptionsLocked pushes registry-level shell configuration into the
-// registered shell.exec tool. Caller holds r.mu for writing.
+// registered shell_exec tool. Caller holds r.mu for writing.
 func (r *Registry) applyShellOptionsLocked() {
-	if t, ok := r.tools["shell.exec"]; ok {
+	if t, ok := r.tools["shell_exec"]; ok {
 		if se, ok := t.(*shellExecTool); ok {
 			se.setOptions(r.logger, r.isolator, r.requireIso)
 		}
@@ -82,7 +82,7 @@ func (r *Registry) Register(tool Tool) {
 		r.toolOrder = append(r.toolOrder, name)
 	}
 	r.tools[name] = tool
-	if name == "shell.exec" {
+	if name == "shell_exec" {
 		// Late-registered shell tools still receive the configured routing.
 		if se, ok := tool.(*shellExecTool); ok {
 			se.setOptions(r.logger, r.isolator, r.requireIso)

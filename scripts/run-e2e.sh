@@ -135,11 +135,11 @@ run_turn() {
 echo ""
 echo "== E2E turns (model: $MODEL)"
 printf '| %-4s | %-24s | %-4s | %10s | %9s |\n' Turn Step Result Latency Tokens
-run_turn 1 "fs.write creates file" 'Use the fs.write tool to create a file named cli-notes.md whose entire content is exactly this single line: CLI_E2E_MARKER=zulu-7 . Then reply DONE.'
-run_turn 2 "fs.read reads it back" 'Use the fs.read tool to read cli-notes.md, then reply with the exact value of CLI_E2E_MARKER.'
+run_turn 1 "fs_write creates file" 'Use the fs_write tool to create a file named cli-notes.md whose entire content is exactly this single line: CLI_E2E_MARKER=zulu-7 . Then reply DONE.'
+run_turn 2 "fs_read reads it back" 'Use the fs_read tool to read cli-notes.md, then reply with the exact value of CLI_E2E_MARKER.'
 run_turn 3 "git status"            'Use the git tool with subcommand status to show the repository status, then summarize it in one sentence.'
-run_turn 4 "shell.exec go version" 'Use the shell.exec tool to run the command go with argument version, then reply with the exact output.'
-run_turn 5 "fs.write rewrites"     'Use the fs.write tool to rewrite cli-notes.md so its entire content becomes exactly two lines: CLI_E2E_MARKER=zulu-7 and updated-by-cli-run . Then reply DONE.'
+run_turn 4 "shell_exec go version" 'Use the shell_exec tool to run the command go with argument version, then reply with the exact output.'
+run_turn 5 "fs_write rewrites"     'Use the fs_write tool to rewrite cli-notes.md so its entire content becomes exactly two lines: CLI_E2E_MARKER=zulu-7 and updated-by-cli-run . Then reply DONE.'
 run_turn 6 "git add + commit"      'Commit the change using the git tool twice: first subcommand add with argument cli-notes.md, then subcommand commit with commit message cli-e2e-commit . Reply with the confirmation.'
 
 ARTIFACT_OK=1

@@ -150,7 +150,7 @@ func TestToolCallEventPayload(t *testing.T) {
 	payload := ToolCallEventPayload{
 		SessionID:  "abc123",
 		ToolCallID: "call_123",
-		Name:       "fs.read",
+		Name:       "fs_read",
 		Status:     "finished",
 	}
 	data, err := json.Marshal(payload)

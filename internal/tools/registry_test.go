@@ -45,12 +45,12 @@ func setupRegistry(t *testing.T) (*Registry, string) {
 func TestRegistry_Get(t *testing.T) {
 	registry, _ := setupRegistry(t)
 
-	tool, ok := registry.Get("fs.read")
+	tool, ok := registry.Get("fs_read")
 	if !ok {
-		t.Error("fs.read should be registered")
+		t.Error("fs_read should be registered")
 	}
-	if tool.Name() != "fs.read" {
-		t.Errorf("Expected fs.read, got %s", tool.Name())
+	if tool.Name() != "fs_read" {
+		t.Errorf("Expected fs_read, got %s", tool.Name())
 	}
 
 	_, ok = registry.Get("nonexistent")
@@ -73,7 +73,7 @@ func TestRegistry_List(t *testing.T) {
 		names[tool.Name()] = true
 	}
 
-	expected := []string{"fs.read", "fs.write", "fs.list", "shell.exec", "git"}
+	expected := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("Missing tool: %s", name)
@@ -100,7 +100,7 @@ func TestRegistry_Execute_SchemaValidation(t *testing.T) {
 	registry, ws := setupRegistry(t)
 
 	// Missing required field
-	result, err := registry.Execute(context.Background(), "fs.read", map[string]any{})
+	result, err := registry.Execute(context.Background(), "fs_read", map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestRegistry_Execute_SchemaValidation(t *testing.T) {
 	}
 
 	// Wrong type for path
-	result, err = registry.Execute(context.Background(), "fs.read", map[string]any{"path": 123})
+	result, err = registry.Execute(context.Background(), "fs_read", map[string]any{"path": 123})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestRegistry_Execute_SchemaValidation(t *testing.T) {
 	}
 
 	// Wrong type for offset
-	result, err = registry.Execute(context.Background(), "fs.read", map[string]any{"path": "test.txt", "offset": "abc"})
+	result, err = registry.Execute(context.Background(), "fs_read", map[string]any{"path": "test.txt", "offset": "abc"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestRegistry_Execute_SchemaValidation(t *testing.T) {
 	testFile := filepath.Join(ws, "test.txt")
 	os.WriteFile(testFile, []byte("content"), 0o644)
 
-	result, err = registry.Execute(context.Background(), "fs.read", map[string]any{"path": testFile})
+	result, err = registry.Execute(context.Background(), "fs_read", map[string]any{"path": testFile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestRegistry_Execute_PermissionDenied(t *testing.T) {
 	}
 	registry := NewDefaultRegistry(engine, tmpDir, slog.Default())
 
-	result, err := registry.Execute(context.Background(), "shell.exec", map[string]any{
+	result, err := registry.Execute(context.Background(), "shell_exec", map[string]any{
 		"command": "echo",
 		"args":    []string{"hello"},
 	})
@@ -193,16 +193,16 @@ func TestRegistry_Execute_Allowed(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "test.txt")
 	os.WriteFile(testFile, []byte("hello"), 0o644)
 
-	result, err := registry.Execute(context.Background(), "fs.read", map[string]any{"path": testFile})
+	result, err := registry.Execute(context.Background(), "fs_read", map[string]any{"path": testFile})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Should be fenced
-	if !contains(result.Content, "<<TOOL_RESULT:fs.read>>") {
+	if !contains(result.Content, "<<TOOL_RESULT:fs_read>>") {
 		t.Errorf("Result should be fenced: %s", result.Content)
 	}
-	if !contains(result.Content, "</TOOL_RESULT:fs.read>") {
+	if !contains(result.Content, "</TOOL_RESULT:fs_read>") {
 		t.Errorf("Result should have closing fence: %s", result.Content)
 	}
 	if !contains(result.Content, "<CONTENT>") {
@@ -223,7 +223,7 @@ func TestRegistry_Execute_Redaction(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "secret.txt")
 	os.WriteFile(testFile, []byte("api_key=sk-1234567890abcdef"), 0o644)
 
-	result, err := registry.Execute(context.Background(), "fs.read", map[string]any{"path": testFile})
+	result, err := registry.Execute(context.Background(), "fs_read", map[string]any{"path": testFile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,13 +237,13 @@ func TestRegistry_Execute_Redaction(t *testing.T) {
 	}
 }
 
-// TestRegistry_Execute_FsWrite tests fs.write through registry.
+// TestRegistry_Execute_FsWrite tests fs_write through registry.
 func TestRegistry_Execute_FsWrite(t *testing.T) {
 	registry, tmpDir := setupRegistry(t)
 
 	testFile := filepath.Join(tmpDir, "output.txt")
 
-	result, err := registry.Execute(context.Background(), "fs.write", map[string]any{
+	result, err := registry.Execute(context.Background(), "fs_write", map[string]any{
 		"path":     testFile,
 		"content":  "test content",
 		"encoding": "utf8",
@@ -253,7 +253,7 @@ func TestRegistry_Execute_FsWrite(t *testing.T) {
 	}
 
 	// Should be fenced
-	if !contains(result.Content, "<<TOOL_RESULT:fs.write>>") {
+	if !contains(result.Content, "<<TOOL_RESULT:fs_write>>") {
 		t.Errorf("Result should be fenced: %s", result.Content)
 	}
 
@@ -267,7 +267,7 @@ func TestRegistry_Execute_FsWrite(t *testing.T) {
 	}
 }
 
-// TestRegistry_Execute_FsList tests fs.list through registry.
+// TestRegistry_Execute_FsList tests fs_list through registry.
 func TestRegistry_Execute_FsList(t *testing.T) {
 	registry, tmpDir := setupRegistry(t)
 
@@ -275,7 +275,7 @@ func TestRegistry_Execute_FsList(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "file2.txt"), []byte("2"), 0o644)
 	os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755)
 
-	result, err := registry.Execute(context.Background(), "fs.list", map[string]any{
+	result, err := registry.Execute(context.Background(), "fs_list", map[string]any{
 		"path":      tmpDir,
 		"recursive": false,
 	})
@@ -283,7 +283,7 @@ func TestRegistry_Execute_FsList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !contains(result.Content, "<<TOOL_RESULT:fs.list>>") {
+	if !contains(result.Content, "<<TOOL_RESULT:fs_list>>") {
 		t.Errorf("Result should be fenced: %s", result.Content)
 	}
 
@@ -293,12 +293,12 @@ func TestRegistry_Execute_FsList(t *testing.T) {
 	}
 }
 
-// TestRegistry_Execute_ShellExec tests shell.exec through registry.
+// TestRegistry_Execute_ShellExec tests shell_exec through registry.
 func TestRegistry_Execute_ShellExec(t *testing.T) {
 	registry, _ := setupRegistry(t)
 
 	// Use cmd /c echo - output may include banner but should be fenced
-	result, err := registry.Execute(context.Background(), "shell.exec", map[string]any{
+	result, err := registry.Execute(context.Background(), "shell_exec", map[string]any{
 		"command": "cmd",
 		"args":    []string{"/c", "echo", "hello"},
 	})
@@ -306,7 +306,7 @@ func TestRegistry_Execute_ShellExec(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !contains(result.Content, "<<TOOL_RESULT:shell.exec>>") {
+	if !contains(result.Content, "<<TOOL_RESULT:shell_exec>>") {
 		t.Errorf("Result should be fenced: %s", result.Content)
 	}
 	// Just verify it produced some output (may include banner)
@@ -357,7 +357,7 @@ func TestRegistry_Concurrent(t *testing.T) {
 	for w := 0; w < workers; w++ {
 		go func() {
 			for i := 0; i < iterations; i++ {
-				_, err := registry.Execute(context.Background(), "fs.read", map[string]any{"path": testFile})
+				_, err := registry.Execute(context.Background(), "fs_read", map[string]any{"path": testFile})
 				if err != nil {
 					errCh <- err
 					return

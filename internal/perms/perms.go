@@ -36,7 +36,7 @@ const (
 	// KindGit is a git invocation request.
 	KindGit Kind = "git"
 	// KindCustom is a forge-internal harness tool request (the v1 tools:
-	// retrieval.search, compaction.summarize, anchoring.*). These tools
+	// retrieval_search, compaction_summarize, anchoring_*). These tools
 	// only touch forge's own SQLite database and forge's own LLM client,
 	// never the host OS, so they sit inside the trust boundary the engine
 	// guards; see the custom floor in evaluate for why they are allowed
@@ -107,7 +107,7 @@ type GitPermissions struct {
 
 // CustomPermissions arbitrates forge-internal harness tools (kind "custom")
 // by tool name, case-sensitively (the tools.BuildPermsRequest names are
-// fixed lowercase-dotted strings). Unlike the OS-reaching kinds, the default
+// fixed lowercase-underscore strings). Unlike the OS-reaching kinds, the default
 // for these tools is ALLOW — the custom floor — because they never reach
 // the host OS; an explicit deny entry is the way to turn one off.
 type CustomPermissions struct {

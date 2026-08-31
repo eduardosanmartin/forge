@@ -13,12 +13,12 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// fsReadTool implements the fs.read tool.
+// fsReadTool implements the fs_read tool.
 type fsReadTool struct{}
 
 func newFsReadTool() *fsReadTool { return &fsReadTool{} }
 
-func (t *fsReadTool) Name() string { return "fs.read" }
+func (t *fsReadTool) Name() string { return "fs_read" }
 func (t *fsReadTool) Description() string {
 	return "Read a file from the filesystem. Supports offset/limit for paging. Binary files are returned as base64."
 }
@@ -100,12 +100,12 @@ func (t *fsReadTool) Execute(ctx context.Context, req perms.Request) (Result, er
 	return Result{Content: content, Metadata: metadata}, nil
 }
 
-// fsWriteTool implements the fs.write tool.
+// fsWriteTool implements the fs_write tool.
 type fsWriteTool struct{}
 
 func newFsWriteTool() *fsWriteTool { return &fsWriteTool{} }
 
-func (t *fsWriteTool) Name() string { return "fs.write" }
+func (t *fsWriteTool) Name() string { return "fs_write" }
 func (t *fsWriteTool) Description() string {
 	return "Write a file to the filesystem. Creates parent directories if requested. Atomic write via temp+rename."
 }
@@ -206,12 +206,12 @@ func (t *fsWriteTool) Execute(ctx context.Context, req perms.Request) (Result, e
 	return Result{Content: string(resultJSON), Metadata: metadata}, nil
 }
 
-// fsListTool implements the fs.list tool.
+// fsListTool implements the fs_list tool.
 type fsListTool struct{}
 
 func newFsListTool() *fsListTool { return &fsListTool{} }
 
-func (t *fsListTool) Name() string { return "fs.list" }
+func (t *fsListTool) Name() string { return "fs_list" }
 func (t *fsListTool) Description() string {
 	return "List directory contents. Supports recursive listing and glob pattern filtering."
 }

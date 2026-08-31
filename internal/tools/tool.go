@@ -10,7 +10,7 @@ import (
 
 // Tool is the MCP-shaped interface that every native tool implements.
 type Tool interface {
-	// Name returns the tool's unique identifier (e.g., "fs.read").
+	// Name returns the tool's unique identifier (e.g., "fs_read").
 	Name() string
 	// Description returns a human and model-readable description of the tool.
 	Description() string

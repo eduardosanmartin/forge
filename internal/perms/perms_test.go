@@ -482,7 +482,7 @@ func TestCustomFloor(t *testing.T) {
 	// deny rule present, only the rule can block the tool; everything else
 	// falls through to the floor, proving both directions of precedence.
 	eng, _ := newTestEngine(t, func(p *PermissionsPolicy) {
-		p.Custom.Deny = []string{"compaction.summarize"}
+		p.Custom.Deny = []string{"compaction_summarize"}
 	})
 
 	cases := []struct {
@@ -493,21 +493,21 @@ func TestCustomFloor(t *testing.T) {
 	}{
 		{
 			name:      "internal tool allowed by floor",
-			req:       Request{Kind: KindCustom, Command: "retrieval.search"},
+			req:       Request{Kind: KindCustom, Command: "retrieval_search"},
 			wantAllow: true,
 			wantRule:  "floor:custom",
 		},
 		{
 			name:      "anchoring tool allowed by floor",
-			req:       Request{Kind: KindCustom, Command: "anchoring.list"},
+			req:       Request{Kind: KindCustom, Command: "anchoring_list"},
 			wantAllow: true,
 			wantRule:  "floor:custom",
 		},
 		{
 			name:      "explicit deny rule takes precedence over floor",
-			req:       Request{Kind: KindCustom, Command: "compaction.summarize"},
+			req:       Request{Kind: KindCustom, Command: "compaction_summarize"},
 			wantAllow: false,
-			wantRule:  "custom:compaction.summarize",
+			wantRule:  "custom:compaction_summarize",
 		},
 		{
 			name:      "empty tool name is malformed",
@@ -532,7 +532,7 @@ func TestCustomFloor(t *testing.T) {
 		// Every engine constructed elsewhere (daemon, e2e harness) leaves
 		// Custom at its zero value: the floor must allow through it.
 		open, _ := newTestEngine(t, nil)
-		for _, tool := range []string{"retrieval.search", "compaction.summarize", "anchoring.get"} {
+		for _, tool := range []string{"retrieval_search", "compaction_summarize", "anchoring_get"} {
 			if d := open.Check(Request{Kind: KindCustom, Command: tool}); !d.Allowed || d.Rule != "floor:custom" {
 				t.Errorf("Check(%s) = %+v, want allowed with rule %q", tool, d, "floor:custom")
 			}

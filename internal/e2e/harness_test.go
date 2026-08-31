@@ -44,7 +44,7 @@ type stack struct {
 // fs access, conventional git allowlist) with one test-scoped adjustment:
 // shell.allow is ["go"] per the E2E design. require_isolation is left at the
 // config-level secure default; on Linux CI without the isolation wrapper the
-// offline suite would refuse shell.exec, so the stack builder disables it
+// offline suite would refuse shell_exec, so the stack builder disables it
 // explicitly (OS-isolation behavior itself is covered by internal/tools
 // shell_isolation_test.go).
 func testPolicy() perms.PermissionsPolicy {

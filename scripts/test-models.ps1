@@ -3,7 +3,7 @@
     Test forge tool-calling with specified models (local Ollama or remote OpenAI-compatible).
 .DESCRIPTION
     For each model: starts a forge daemon pinned to that model + a temp workspace,
-    runs fs.write, fs.read, shell.exec, git.status, git.commit, fs.list via
+    runs fs_write, fs_read, shell_exec, git.status, git.commit, fs_list via
     'forge run --json' (with a per-run timeout so a hung model fails gracefully),
     then stops the daemon. Prints a report.
 
@@ -135,32 +135,32 @@ function Test-Model {
 
     $r = @{ Model = $Model; Tests = @(); Passed = 0; Failed = 0; Start = Get-Date; ModelUsed = ""; Hung = $false }
 
-    # T1 fs.write
-    Write-Info "T1 fs.write"
-    $p = "Use the fs.write tool to create a file named test.txt containing exactly: hello from $Model"
+    # T1 fs_write
+    Write-Info "T1 fs_write"
+    $p = "Use the fs_write tool to create a file named test.txt containing exactly: hello from $Model"
     $res = Invoke-ForgeRun -Prompt $p
     if ($res.TimedOut) { $r.Hung = $true }
-    $ok = (-not $res.TimedOut) -and (Test-Path "test.txt") -and (HasToolCall $res.Json "fs.write")
-    $r.Tests += [pscustomobject]@{ Name="fs.write"; Passed=$ok; Detail=if($ok){"file created"}elseif($res.TimedOut){"TIMEOUT"}else{"file=$(Test-Path 'test.txt')"} }
-    if($ok){$r.Passed++;Write-Ok "fs.write"}else{$r.Failed++;Write-Err "fs.write"}
+    $ok = (-not $res.TimedOut) -and (Test-Path "test.txt") -and (HasToolCall $res.Json "fs_write")
+    $r.Tests += [pscustomobject]@{ Name="fs_write"; Passed=$ok; Detail=if($ok){"file created"}elseif($res.TimedOut){"TIMEOUT"}else{"file=$(Test-Path 'test.txt')"} }
+    if($ok){$r.Passed++;Write-Ok "fs_write"}else{$r.Failed++;Write-Err "fs_write"}
 
-    # T2 fs.read
-    Write-Info "T2 fs.read"
-    $p = "Use the fs.read tool to read test.txt and tell me its contents"
+    # T2 fs_read
+    Write-Info "T2 fs_read"
+    $p = "Use the fs_read tool to read test.txt and tell me its contents"
     $res = Invoke-ForgeRun -Prompt $p
     if ($res.TimedOut) { $r.Hung = $true }
-    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "fs.read")
-    $r.Tests += [pscustomobject]@{ Name="fs.read"; Passed=$ok; Detail=if($ok){"read ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
-    if($ok){$r.Passed++;Write-Ok "fs.read"}else{$r.Failed++;Write-Err "fs.read"}
+    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "fs_read")
+    $r.Tests += [pscustomobject]@{ Name="fs_read"; Passed=$ok; Detail=if($ok){"read ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
+    if($ok){$r.Passed++;Write-Ok "fs_read"}else{$r.Failed++;Write-Err "fs_read"}
 
-    # T3 shell.exec
-    Write-Info "T3 shell.exec"
-    $p = "Use the shell.exec tool to run the command: go version"
+    # T3 shell_exec
+    Write-Info "T3 shell_exec"
+    $p = "Use the shell_exec tool to run the command: go version"
     $res = Invoke-ForgeRun -Prompt $p
     if ($res.TimedOut) { $r.Hung = $true }
-    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "shell.exec")
-    $r.Tests += [pscustomobject]@{ Name="shell.exec"; Passed=$ok; Detail=if($ok){"shell ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
-    if($ok){$r.Passed++;Write-Ok "shell.exec"}else{$r.Failed++;Write-Err "shell.exec"}
+    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "shell_exec")
+    $r.Tests += [pscustomobject]@{ Name="shell_exec"; Passed=$ok; Detail=if($ok){"shell ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
+    if($ok){$r.Passed++;Write-Ok "shell_exec"}else{$r.Failed++;Write-Err "shell_exec"}
 
     # T4 git status
     Write-Info "T4 git.status"
@@ -180,14 +180,14 @@ function Test-Model {
     $r.Tests += [pscustomobject]@{ Name="git.commit"; Passed=$ok; Detail=if($ok){"commit ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
     if($ok){$r.Passed++;Write-Ok "git.commit"}else{$r.Failed++;Write-Err "git.commit"}
 
-    # T6 fs.list
-    Write-Info "T6 fs.list"
-    $p = "Use the fs.list tool to list files in the current directory"
+    # T6 fs_list
+    Write-Info "T6 fs_list"
+    $p = "Use the fs_list tool to list files in the current directory"
     $res = Invoke-ForgeRun -Prompt $p
     if ($res.TimedOut) { $r.Hung = $true }
-    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "fs.list")
-    $r.Tests += [pscustomobject]@{ Name="fs.list"; Passed=$ok; Detail=if($ok){"list ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
-    if($ok){$r.Passed++;Write-Ok "fs.list"}else{$r.Failed++;Write-Err "fs.list"}
+    $ok = (-not $res.TimedOut) -and (HasToolCall $res.Json "fs_list")
+    $r.Tests += [pscustomobject]@{ Name="fs_list"; Passed=$ok; Detail=if($ok){"list ok"}elseif($res.TimedOut){"TIMEOUT"}else{"no tool_call"} }
+    if($ok){$r.Passed++;Write-Ok "fs_list"}else{$r.Failed++;Write-Err "fs_list"}
 
     if ($null -ne $res.Json) { $r.ModelUsed = $res.Json.model }
     if ($r.ModelUsed -and $r.ModelUsed -ne $Model) { Write-Warn "daemon used $($r.ModelUsed) not $Model" }

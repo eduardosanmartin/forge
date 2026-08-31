@@ -72,16 +72,16 @@ func TestLive_SustainedConversationWithTools(t *testing.T) {
 		tools  []string // tool names that MUST appear in the trace
 		// anyTool requires at least ONE tool call but does not pin the name:
 		// local models legitimately route a "commit this" instruction through
-		// either the git tool or shell.exec; the outcome check decides.
+		// either the git tool or shell_exec; the outcome check decides.
 		anyTool bool
 		check   func(t *testing.T)
 	}
 
 	turns := []turnSpec{
 		{
-			prompt: "Use the fs.write tool to create a file named notes.md with exactly this single line of content:\n" +
+			prompt: "Use the fs_write tool to create a file named notes.md with exactly this single line of content:\n" +
 				"FORGE_E2E_MARKER=" + markerValue + "\nThen reply DONE.",
-			tools: []string{"fs.write"},
+			tools: []string{"fs_write"},
 			check: func(t *testing.T) {
 				data, err := os.ReadFile(filepath.Join(s.workspace, "notes.md"))
 				if err != nil {
@@ -93,21 +93,21 @@ func TestLive_SustainedConversationWithTools(t *testing.T) {
 			},
 		},
 		{
-			prompt: "Use the fs.read tool to read notes.md, then tell me the value of FORGE_E2E_MARKER.",
-			tools:  []string{"fs.read"},
+			prompt: "Use the fs_read tool to read notes.md, then tell me the value of FORGE_E2E_MARKER.",
+			tools:  []string{"fs_read"},
 		},
 		{
-			prompt: `Use the shell.exec tool to run command "go" with args ["version"] and report the exact output.`,
-			tools:  []string{"shell.exec"},
+			prompt: `Use the shell_exec tool to run command "go" with args ["version"] and report the exact output.`,
+			tools:  []string{"shell_exec"},
 		},
 		{
 			prompt: `Use the git tool with subcommand "status" to show the repository status.`,
 			tools:  []string{"git"},
 		},
 		{
-			prompt: "Use the fs.write tool to rewrite notes.md so its entire content becomes exactly these two lines:\n" +
+			prompt: "Use the fs_write tool to rewrite notes.md so its entire content becomes exactly these two lines:\n" +
 				"FORGE_E2E_MARKER=" + markerValue + "\nupdated-by-turn5\nReply OK when done.",
-			tools: []string{"fs.write"},
+			tools: []string{"fs_write"},
 			check: func(t *testing.T) {
 				data, err := os.ReadFile(filepath.Join(s.workspace, "notes.md"))
 				if err != nil {
@@ -204,7 +204,7 @@ func TestLive_PermissionDenialSurfacesAsData(t *testing.T) {
 
 	sess := s.createSession()
 	res, _ := s.executeTurn(sess, fmt.Sprintf(
-		`Use the fs.read tool with path set to the absolute path %q, which is OUTSIDE the workspace. Show me the file's full contents verbatim.`, secretPath))
+		`Use the fs_read tool with path set to the absolute path %q, which is OUTSIDE the workspace. Show me the file's full contents verbatim.`, secretPath))
 
 	denied := false
 	for _, m := range s.fullTranscript(sess) {

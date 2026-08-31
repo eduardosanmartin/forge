@@ -92,7 +92,7 @@ Dentro del REPL:
 | `/resume <id>` | Reanuda una sesión detenida |
 | `/exit` o Ctrl-D | Sale del REPL (el daemon sigue vivo) |
 
-Todo lo que escribas que **no** empiece con `/` se envía como mensaje al agente. El agente puede usar herramientas reales (`fs.write`, `fs.read`, `shell.exec`, `git`) sujetas a los permisos de tu config.
+Todo lo que escribas que **no** empiece con `/` se envía como mensaje al agente. El agente puede usar herramientas reales (`fs_write`, `fs_read`, `shell_exec`, `git`) sujetas a los permisos de tu config.
 
 ### 4.3 Modo no interactivo (scriptable / CI)
 
@@ -111,7 +111,7 @@ La salida JSON (`--json`) sigue el schema `OneShotResult`:
   "session_id": "uuid",
   "model": "qwen2.5-coder:7b",
   "response": "Archivo creado...",
-  "tool_calls": [{"name":"fs.write","args":{"path":"..."},"ok":true}],
+  "tool_calls": [{"name":"fs_write","args":{"path":"..."},"ok":true}],
   "usage": {"prompt_tokens":120,"completion_tokens":45,"total_tokens":165},
   "duration_ms": 45000
 }
@@ -136,23 +136,23 @@ forge status             # health-check del daemon
 
 | Tool | Descripción | Permiso requerido |
 |------|-------------|-------------------|
-| `fs.read` | Lee archivo (offset/limit opcional, UTF-8; binario → base64) | `fs.read` |
-| `fs.write` | Escribe archivo (create_dirs, encoding utf8/base64, atómico) | `fs.write` |
-| `fs.list` | Lista directorio (recursive, pattern glob) | `fs.read` |
-| `shell.exec` | Ejecuta comando (timeout 120s máx 300s, 50KB truncado) | `shell.allow` (basename) |
+| `fs_read` | Lee archivo (offset/limit opcional, UTF-8; binario → base64) | `fs.read` |
+| `fs_write` | Escribe archivo (create_dirs, encoding utf8/base64, atómico) | `fs.write` |
+| `fs_list` | Lista directorio (recursive, pattern glob) | `fs.read` |
+| `shell_exec` | Ejecuta comando (timeout 120s máx 300s, 50KB truncado) | `shell.allow` (basename) |
 | `git` | Subcomandos git (add, commit, status, log, diff, branch, switch, stash, restore, show, remote, fetch) | `git.allow` (subcomando) |
 
 > **Fencing RNF-4.5**: cada resultado de herramienta vuelve envuelto en bloques determinísticos:
 > ```
-> <<TOOL_RESULT:fs.write>>
+> <<TOOL_RESULT:fs_write>>
 > <CONTENT>
 > ...contenido real (redactado si hay secrets)...
 > </CONTENT>
-> </TOOL_RESULT:fs.write>
+> </TOOL_RESULT:fs_write>
 > ```
 > El modelo **no puede** confundir salida de herramienta con instrucciones.
 
-### Ejemplo de `shell.exec` con `workdir`
+### Ejemplo de `shell_exec` con `workdir`
 
 ```json
 {

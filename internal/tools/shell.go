@@ -15,7 +15,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// shellExecTool implements the shell.exec tool.
+// shellExecTool implements the shell_exec tool.
 //
 // Execution routing (spec RNF-4.7):
 //   - With a non-nil, enabled Isolator: the command runs through forge's own
@@ -48,7 +48,7 @@ func (t *shellExecTool) setOptions(logger *slog.Logger, isol Isolator, requireIs
 	t.requireIsolation = requireIsolation
 }
 
-func (t *shellExecTool) Name() string { return "shell.exec" }
+func (t *shellExecTool) Name() string { return "shell_exec" }
 func (t *shellExecTool) Description() string {
 	return "Execute a shell command. Captures stdout+stderr combined, with timeout and output truncation."
 }

@@ -145,12 +145,12 @@ func typeName(v any) string {
 func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, error) {
 	var req perms.Request
 	switch toolName {
-	case "fs.read":
+	case "fs_read":
 		req.Kind = perms.KindFsRead
 		path, _ := args["path"].(string)
 		req.Path = path
 		if path == "" {
-			return req, errors.New("fs.read: path is required")
+			return req, errors.New("fs_read: path is required")
 		}
 		if offset, ok := args["offset"].(float64); ok {
 			req.Offset = int64(offset)
@@ -158,12 +158,12 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 		if limit, ok := args["limit"].(float64); ok {
 			req.Limit = int64(limit)
 		}
-	case "fs.write":
+	case "fs_write":
 		req.Kind = perms.KindFsWrite
 		path, _ := args["path"].(string)
 		req.Path = path
 		if path == "" {
-			return req, errors.New("fs.write: path is required")
+			return req, errors.New("fs_write: path is required")
 		}
 		req.Content, _ = args["content"].(string)
 		req.Encoding, _ = args["encoding"].(string)
@@ -171,21 +171,21 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 			req.Encoding = "utf8"
 		}
 		req.CreateDirs, _ = args["create_dirs"].(bool)
-	case "fs.list":
+	case "fs_list":
 		req.Kind = perms.KindFsRead // list is a read operation
 		path, _ := args["path"].(string)
 		req.Path = path
 		if path == "" {
-			return req, errors.New("fs.list: path is required")
+			return req, errors.New("fs_list: path is required")
 		}
 		req.Recursive, _ = args["recursive"].(bool)
 		req.Pattern, _ = args["pattern"].(string)
-	case "shell.exec":
+	case "shell_exec":
 		req.Kind = perms.KindShell
 		cmd, _ := args["command"].(string)
 		req.Command = cmd
 		if cmd == "" {
-			return req, errors.New("shell.exec: command is required")
+			return req, errors.New("shell_exec: command is required")
 		}
 		if argsList, ok := args["args"].([]any); ok {
 			req.Args = make([]string, len(argsList))
@@ -211,7 +211,7 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 			}
 		}
 		req.Workdir, _ = args["workdir"].(string)
-	case "retrieval.search", "compaction.summarize", "anchoring.store", "anchoring.list", "anchoring.get", "anchoring.delete":
+	case "retrieval_search", "compaction_summarize", "anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete":
 		// Internal harness tools (v1 features): they operate only on forge's
 		// own SQLite store and forge's own LLM client, never on the host OS,
 		// so the request carries just the kind plus the tool name (kept in

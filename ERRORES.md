@@ -75,7 +75,7 @@
 | **Síntoma** | Turnos >30s (inferencia CPU 7B) → `writeLoop` hace `Ping()` cada 30s → `Ping()` bloquea hasta que `readLoop` procesa pong → pero `readLoop` está bloqueado en `LLM Chat()` → ping timeout → `writeLoop` mata conexión → respuesta del LLM queda encolada sin entregarse. |
 | **Causa Raíz** | `coder/websocket` `Ping()` bloquea hasta que **nuestro** `Read` procesa el pong. Si `readLoop` está en llamada LLM síncrona, no hay nadie leyendo → deadlock lógico. |
 | **Fix** | `readLoop` usa `cc.readCtx` (context con cancel) y `Read(cc.readCtx)`. `Stop()` cancela `readCancel()` → desbloquea `Read` → `Ping()` procesa pong → `writeLoop` sigue vivo. Ver `transport.go` líneas 262-274. |
-| **Validación** | Test `TestTransportHeartbeat` + live E2E turnos de 330s (turno 3: shell.exec go version + 331s) pasan sin desconexión. |
+| **Validación** | Test `TestTransportHeartbeat` + live E2E turnos de 330s (turno 3: shell_exec go version + 331s) pasan sin desconexión. |
 | **Prevención** | Separar contextos de lectura/escritura; timeouts de ping < timeout LLM; documentar en `DESARROLLO.md` sección transport. |
 
 ---
@@ -148,7 +148,7 @@
 | Campo | Detalle |
 |-------|---------|
 | **Componente** | `internal/e2e/harness_test.go` `assertTurnSane` + `e2e_live_test.go` turn 6 |
-| **Síntoma** | Dos falsos positivos por no-determinismo del modelo:<br/>1. "final assistant content is empty" en turno con tool calls (modelo emite contenido vacío tras tool calls — comportamiento legítimo)<br/>2. "expected tool git in trace, got []" — modelo usó shell.exec o ruta alternativa; trace vacío por bug de trace (ver ERR-006) o elección legítima |
+| **Síntoma** | Dos falsos positivos por no-determinismo del modelo:<br/>1. "final assistant content is empty" en turno con tool calls (modelo emite contenido vacío tras tool calls — comportamiento legítimo)<br/>2. "expected tool git in trace, got []" — modelo usó shell_exec o ruta alternativa; trace vacío por bug de trace (ver ERR-006) o elección legítima |
 | **Fix** | `assertTurnSane`: final vacío solo es error si **len(tools)==0** (turno puramente conversacional). Turnos con tools pueden terminar vacíos legítimamente. Log informativo en lugar de error.<br/>Turn 6: `anyTool: true` en lugar de `tools: ["git"]` + check de resultado (commit existe + subject correcto). |
 | **Validación** | Live sustained PASS: turn 1 final vacío + tools presentes → log, no error; turn 6 `anyTool=true` + commit verificado por check. |
 | **Prevención** | **Asertivas por resultado, no por forma**. Tests live deben tolerar no-determinismo del modelo; offline determinista para CI. |

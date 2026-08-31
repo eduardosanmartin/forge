@@ -10,7 +10,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// CompactionSummarizeTool implements the compaction.summarize tool.
+// CompactionSummarizeTool implements the compaction_summarize tool.
 type CompactionSummarizeTool struct {
 	compactor *compaction.Compactor
 }
@@ -21,7 +21,7 @@ func NewCompactionSummarizeTool(compactor *compaction.Compactor) *CompactionSumm
 }
 
 func (t *CompactionSummarizeTool) Name() string {
-	return "compaction.summarize"
+	return "compaction_summarize"
 }
 
 func (t *CompactionSummarizeTool) Description() string {

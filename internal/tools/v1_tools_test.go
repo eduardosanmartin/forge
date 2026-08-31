@@ -75,9 +75,9 @@ func TestRegistryWithDeps_RegistersBaseAndV1Tools(t *testing.T) {
 		t.Errorf("expected 11 tools (5 base + 6 v1), got %d", len(list))
 	}
 	expected := []string{
-		"fs.read", "fs.write", "fs.list", "shell.exec", "git",
-		"retrieval.search", "compaction.summarize",
-		"anchoring.store", "anchoring.list", "anchoring.get", "anchoring.delete",
+		"fs_read", "fs_write", "fs_list", "shell_exec", "git",
+		"retrieval_search", "compaction_summarize",
+		"anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete",
 	}
 	registered := make(map[string]bool, len(list))
 	for _, tool := range list {
@@ -91,23 +91,23 @@ func TestRegistryWithDeps_RegistersBaseAndV1Tools(t *testing.T) {
 }
 
 // TestRegistry_Execute_AnchoringStorePersistsAndReads proves the
-// anchoring.store -> list -> get -> delete cycle persists through the real
+// anchoring_store -> list -> get -> delete cycle persists through the real
 // AnchorStoreSQL via the Input args channel.
 func TestRegistry_Execute_AnchoringStorePersistsAndReads(t *testing.T) {
 	registry, _, _, anchorStore := setupV1Registry(t)
 	ctx := context.Background()
 
 	// store
-	res, err := registry.Execute(ctx, "anchoring.store", map[string]any{
+	res, err := registry.Execute(ctx, "anchoring_store", map[string]any{
 		"content":    "The config schema version is 4",
 		"session_id": "session-1",
 		"tags":       []any{"config"},
 	})
 	if err != nil {
-		t.Fatalf("anchoring.store: %v", err)
+		t.Fatalf("anchoring_store: %v", err)
 	}
 	if !contains(res.Content, "Anchor created with ID") {
-		t.Errorf("anchoring.store result: %s", res.Content)
+		t.Errorf("anchoring_store result: %s", res.Content)
 	}
 
 	// The anchor must exist in the real store, not just in the reply.
@@ -127,36 +127,36 @@ func TestRegistry_Execute_AnchoringStorePersistsAndReads(t *testing.T) {
 	id := anchors[0].ID
 
 	// list
-	res, err = registry.Execute(ctx, "anchoring.list", map[string]any{"session_id": "session-1"})
+	res, err = registry.Execute(ctx, "anchoring_list", map[string]any{"session_id": "session-1"})
 	if err != nil {
-		t.Fatalf("anchoring.list: %v", err)
+		t.Fatalf("anchoring_list: %v", err)
 	}
 	if !contains(res.Content, "The config schema version is 4") {
-		t.Errorf("anchoring.list result missing content: %s", res.Content)
+		t.Errorf("anchoring_list result missing content: %s", res.Content)
 	}
 
 	// get (JSON numbers arrive as float64, as they would from the model)
-	res, err = registry.Execute(ctx, "anchoring.get", map[string]any{"id": float64(id)})
+	res, err = registry.Execute(ctx, "anchoring_get", map[string]any{"id": float64(id)})
 	if err != nil {
-		t.Fatalf("anchoring.get: %v", err)
+		t.Fatalf("anchoring_get: %v", err)
 	}
 	if !contains(res.Content, "The config schema version is 4") {
-		t.Errorf("anchoring.get result missing content: %s", res.Content)
+		t.Errorf("anchoring_get result missing content: %s", res.Content)
 	}
 
 	// delete
-	res, err = registry.Execute(ctx, "anchoring.delete", map[string]any{"id": float64(id)})
+	res, err = registry.Execute(ctx, "anchoring_delete", map[string]any{"id": float64(id)})
 	if err != nil {
-		t.Fatalf("anchoring.delete: %v", err)
+		t.Fatalf("anchoring_delete: %v", err)
 	}
 	if !contains(res.Content, fmt.Sprintf("Anchor %d deleted", id)) {
-		t.Errorf("anchoring.delete result: %s", res.Content)
+		t.Errorf("anchoring_delete result: %s", res.Content)
 	}
 
 	// get after delete fails cleanly
-	res, err = registry.Execute(ctx, "anchoring.get", map[string]any{"id": float64(id)})
+	res, err = registry.Execute(ctx, "anchoring_get", map[string]any{"id": float64(id)})
 	if err != nil {
-		t.Fatalf("anchoring.get after delete: %v", err)
+		t.Fatalf("anchoring_get after delete: %v", err)
 	}
 	if !contains(res.Content, "ERROR:") {
 		t.Errorf("expected clean ERROR for deleted anchor, got: %s", res.Content)
@@ -179,12 +179,12 @@ func TestRegistry_Execute_RetrievalSearchReturnsTopChunk(t *testing.T) {
 		t.Fatalf("index: %v", err)
 	}
 
-	res, err := registry.Execute(ctx, "retrieval.search", map[string]any{
+	res, err := registry.Execute(ctx, "retrieval_search", map[string]any{
 		"query": "the tests run with go test -race",
 		"k":     float64(2),
 	})
 	if err != nil {
-		t.Fatalf("retrieval.search: %v", err)
+		t.Fatalf("retrieval_search: %v", err)
 	}
 	if !contains(res.Content, `"message_id":2`) {
 		t.Errorf("expected exact-match chunk (message_id 2) to rank first: %s", res.Content)
@@ -213,9 +213,9 @@ func TestRegistry_Execute_CompactionSummarizeCompactsProvidedTurns(t *testing.T)
 		}
 	}
 
-	res, err := registry.Execute(ctx, "compaction.summarize", map[string]any{"turns": turns})
+	res, err := registry.Execute(ctx, "compaction_summarize", map[string]any{"turns": turns})
 	if err != nil {
-		t.Fatalf("compaction.summarize: %v", err)
+		t.Fatalf("compaction_summarize: %v", err)
 	}
 	if !contains(res.Content, `"OriginalTurns":25`) {
 		t.Errorf("expected original turn count 25: %s", res.Content)
@@ -244,13 +244,13 @@ func TestRegistry_Execute_CustomToolsCleanErrorsOnBadInput(t *testing.T) {
 	}{
 		{
 			name:     "missing required field caught by schema validation",
-			tool:     "anchoring.store",
+			tool:     "anchoring_store",
 			args:     map[string]any{"content": "x"},
 			wantText: "ERROR: schema validation: session_id: required field is missing",
 		},
 		{
 			name:     "wrong type caught by schema validation",
-			tool:     "retrieval.search",
+			tool:     "retrieval_search",
 			args:     map[string]any{"query": 42},
 			wantText: "ERROR: schema validation: query: expected string, got int",
 		},
@@ -298,20 +298,20 @@ func TestRegistryWithDeps_BaseToolBehaviorUnchanged(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	res, err := registry.Execute(ctx, "fs.read", map[string]any{"path": testFile})
+	res, err := registry.Execute(ctx, "fs_read", map[string]any{"path": testFile})
 	if err != nil {
-		t.Fatalf("fs.read: %v", err)
+		t.Fatalf("fs_read: %v", err)
 	}
-	if !contains(res.Content, "<<TOOL_RESULT:fs.read>>") {
+	if !contains(res.Content, "<<TOOL_RESULT:fs_read>>") {
 		t.Errorf("result should be fenced: %s", res.Content)
 	}
 	if !contains(res.Content, "hello base") {
 		t.Errorf("result should contain file content: %s", res.Content)
 	}
 
-	res, err = registry.Execute(ctx, "fs.read", map[string]any{})
+	res, err = registry.Execute(ctx, "fs_read", map[string]any{})
 	if err != nil {
-		t.Fatalf("fs.read validation: %v", err)
+		t.Fatalf("fs_read validation: %v", err)
 	}
 	if res.Content != "ERROR: schema validation: path: required field is missing" {
 		t.Errorf("base schema validation changed: %s", res.Content)

@@ -120,7 +120,7 @@ func TestAgent_ExecuteTurn_MultiTurnWithToolCalls(t *testing.T) {
 										ID:   "call-1",
 										Type: "function",
 										Function: llm.ToolCallFunction{
-											Name:      "fs.read",
+											Name:      "fs_read",
 											Arguments: `{"path": "test.txt"}`,
 										},
 									},
@@ -210,7 +210,7 @@ func TestAgent_ExecuteTurn_MaxIterationsEnforced(t *testing.T) {
 									ID:   "call-" + string(rune('0'+callCount)),
 									Type: "function",
 									Function: llm.ToolCallFunction{
-										Name:      "fs.read",
+										Name:      "fs_read",
 										Arguments: `{"path": "test.txt"}`,
 									},
 								},

@@ -25,13 +25,13 @@ const fenceMarker = "<<TOOL_RESULT:"
 // conversation with deterministic scripted tool calls across one session.
 func TestOffline_SustainedConversationWithTools(t *testing.T) {
 	srv := newScriptServer(t, "mock-7b",
-		respTool(toolCall("call-1", "fs.write", map[string]any{
+		respTool(toolCall("call-1", "fs_write", map[string]any{
 			"path": "hello.txt", "content": "line-one\nline-two\n",
 		})),
 		respFinal("Wrote hello.txt with two lines."),
-		respTool(toolCall("call-2", "fs.read", map[string]any{"path": "hello.txt"})),
+		respTool(toolCall("call-2", "fs_read", map[string]any{"path": "hello.txt"})),
 		respFinal("hello.txt contains line-one and line-two."),
-		respTool(toolCall("call-3", "shell.exec", map[string]any{
+		respTool(toolCall("call-3", "shell_exec", map[string]any{
 			"command": "go", "args": []string{"version"},
 		})),
 		respFinal("Reported the Go toolchain version."),
@@ -45,9 +45,9 @@ func TestOffline_SustainedConversationWithTools(t *testing.T) {
 		tools  []string
 	}
 	turns := []turnSpec{
-		{"Create hello.txt with two lines.", []string{"fs.write"}},
-		{"Read hello.txt back and summarize it.", []string{"fs.read"}},
-		{"Report the Go version using a shell command.", []string{"shell.exec"}},
+		{"Create hello.txt with two lines.", []string{"fs_write"}},
+		{"Read hello.txt back and summarize it.", []string{"fs_read"}},
+		{"Report the Go version using a shell command.", []string{"shell_exec"}},
 	}
 
 	var stats []turnStat
@@ -69,7 +69,7 @@ func TestOffline_SustainedConversationWithTools(t *testing.T) {
 		t.Errorf("hello.txt content mismatch: got %q", string(data))
 	}
 
-	// RNF-4.5 evidence: the fs.read tool result stored in the session log is
+	// RNF-4.5 evidence: the fs_read tool result stored in the session log is
 	// fenced as untrusted content.
 	transcript := s.fullTranscript(sess)
 	fenced := false

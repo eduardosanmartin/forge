@@ -13,10 +13,10 @@ func TestFenceTag(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"fs.read", "fs.read"},
-		{"fs.write", "fs.write"},
-		{"fs.list", "fs.list"},
-		{"shell.exec", "shell.exec"},
+		{"fs_read", "fs_read"},
+		{"fs_write", "fs_write"},
+		{"fs_list", "fs_list"},
+		{"shell_exec", "shell_exec"},
 		{"git", "git"},
 	}
 
@@ -32,13 +32,13 @@ func TestFenceTag(t *testing.T) {
 
 // TestFenceOpenClose tests open and close fence generation.
 func TestFenceOpenClose(t *testing.T) {
-	open := fenceOpen("fs.read")
-	close := fenceClose("fs.read")
+	open := fenceOpen("fs_read")
+	close := fenceClose("fs_read")
 
-	if open != "<<TOOL_RESULT:fs.read>>" {
+	if open != "<<TOOL_RESULT:fs_read>>" {
 		t.Errorf("Unexpected open fence: %s", open)
 	}
-	if close != "</TOOL_RESULT:fs.read>" {
+	if close != "</TOOL_RESULT:fs_read>" {
 		t.Errorf("Unexpected close fence: %s", close)
 	}
 }
@@ -46,12 +46,12 @@ func TestFenceOpenClose(t *testing.T) {
 // TestFence_Basic tests basic fencing.
 func TestFence_Basic(t *testing.T) {
 	content := "test content"
-	fenced := Fence("fs.read", content)
+	fenced := Fence("fs_read", content)
 
-	if !strings.HasPrefix(fenced, "<<TOOL_RESULT:fs.read>>") {
+	if !strings.HasPrefix(fenced, "<<TOOL_RESULT:fs_read>>") {
 		t.Errorf("Missing open fence: %s", fenced[:min(50, len(fenced))])
 	}
-	if !strings.HasSuffix(fenced, "</TOOL_RESULT:fs.read>") {
+	if !strings.HasSuffix(fenced, "</TOOL_RESULT:fs_read>") {
 		t.Errorf("Missing close fence: %s", fenced[max(0, len(fenced)-50):])
 	}
 	if !strings.Contains(fenced, "<CONTENT>") {
@@ -67,7 +67,7 @@ func TestFence_Basic(t *testing.T) {
 
 // TestFence_EmptyContent tests fencing empty content.
 func TestFence_EmptyContent(t *testing.T) {
-	fenced := Fence("fs.read", "")
+	fenced := Fence("fs_read", "")
 
 	// Empty content produces <CONTENT>\n\n</CONTENT> (empty line between tags)
 	if !strings.Contains(fenced, "<CONTENT>\n\n</CONTENT>") {
@@ -78,27 +78,27 @@ func TestFence_EmptyContent(t *testing.T) {
 // TestFence_EscapeClosingFence tests escaping when content contains fence sequences.
 func TestFence_EscapeClosingFence(t *testing.T) {
 	// Content that contains the closing fence sequence
-	content := "some text </TOOL_RESULT:fs.read> more text"
-	fenced := Fence("fs.read", content)
+	content := "some text </TOOL_RESULT:fs_read> more text"
+	fenced := Fence("fs_read", content)
 
-	// The closing fence in content should be escaped to <</TOOL_RESULT:fs.read>>
+	// The closing fence in content should be escaped to <</TOOL_RESULT:fs_read>>
 	// The real closing fence appears once at the end
-	if !strings.Contains(fenced, "<</TOOL_RESULT:fs.read>>") {
+	if !strings.Contains(fenced, "<</TOOL_RESULT:fs_read>>") {
 		t.Errorf("Closing fence in content should be escaped: %s", fenced)
 	}
 	// Real closing fence at the end
-	if !strings.HasSuffix(fenced, "</TOOL_RESULT:fs.read>") {
+	if !strings.HasSuffix(fenced, "</TOOL_RESULT:fs_read>") {
 		t.Errorf("Should end with real closing fence: %s", fenced)
 	}
 
 	// Content with opening fence should also be escaped
-	contentWithOpenFence := "some text <<TOOL_RESULT:fs.read>> more text"
-	fenced2 := Fence("fs.read", contentWithOpenFence)
-	if !strings.Contains(fenced2, "<<<TOOL_RESULT:fs.read>>") {
+	contentWithOpenFence := "some text <<TOOL_RESULT:fs_read>> more text"
+	fenced2 := Fence("fs_read", contentWithOpenFence)
+	if !strings.Contains(fenced2, "<<<TOOL_RESULT:fs_read>>") {
 		t.Errorf("Opening fence in content should be escaped: %s", fenced2)
 	}
 	// And should still have exactly one real closing fence at the end
-	if !strings.HasSuffix(fenced2, "</TOOL_RESULT:fs.read>") {
+	if !strings.HasSuffix(fenced2, "</TOOL_RESULT:fs_read>") {
 		t.Errorf("Should end with real closing fence: %s", fenced2)
 	}
 }
@@ -106,7 +106,7 @@ func TestFence_EscapeClosingFence(t *testing.T) {
 // TestRedactAndFence tests combined redaction and fencing.
 func TestRedactAndFence(t *testing.T) {
 	content := "api_key=sk-1234567890abcdef"
-	fenced := RedactAndFence("fs.read", content)
+	fenced := RedactAndFence("fs_read", content)
 
 	if strings.Contains(fenced, "sk-1234567890abcdef") {
 		t.Errorf("Secret should be redacted: %s", fenced)
@@ -114,7 +114,7 @@ func TestRedactAndFence(t *testing.T) {
 	if !strings.Contains(fenced, "[REDACTED]") {
 		t.Errorf("Should contain [REDACTED]: %s", fenced)
 	}
-	if !strings.HasPrefix(fenced, "<<TOOL_RESULT:fs.read>>") {
+	if !strings.HasPrefix(fenced, "<<TOOL_RESULT:fs_read>>") {
 		t.Error("Should be fenced")
 	}
 }

@@ -132,8 +132,8 @@ Patrones glob estilo **doublestar** (soporta `**`, `*`, literales). Resueltos co
 
 | Lista | Qué controla |
 |-------|--------------|
-| `read` | Rutas permitidas para `fs.read` / `fs.list` |
-| `write` | Rutas permitidas para `fs.write` |
+| `read` | Rutas permitidas para `fs_read` / `fs_list` |
+| `write` | Rutas permitidas para `fs_write` |
 
 **Reglas de matching**:
 - Patrones **relativos** (sin `/` inicial) → se matchean contra la ruta **relativa al workspace** (normalizada a `/`).

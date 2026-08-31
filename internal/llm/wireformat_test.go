@@ -30,7 +30,7 @@ func TestOllamaProvider_Chat_RealWireFormat(t *testing.T) {
 					"id": "call_abc123",
 					"type": "function",
 					"function": {
-						"name": "fs.read",
+						"name": "fs_read",
 						"arguments": "{\"path\":\"main.go\"}"
 					}
 				}]
@@ -73,7 +73,7 @@ func TestOllamaProvider_Chat_RealWireFormat(t *testing.T) {
 		t.Fatalf("tool_calls decoded: got %d, want 1", len(c.Message.ToolCalls))
 	}
 	tc := c.Message.ToolCalls[0]
-	if tc.ID != "call_abc123" || tc.Type != "function" || tc.Function.Name != "fs.read" {
+	if tc.ID != "call_abc123" || tc.Type != "function" || tc.Function.Name != "fs_read" {
 		t.Errorf("tool call decode mismatch: %+v", tc)
 	}
 	var args map[string]any

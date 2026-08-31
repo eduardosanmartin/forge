@@ -12,7 +12,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
-// TestShellExecTool_Basic tests basic shell.exec functionality.
+// TestShellExecTool_Basic tests basic shell_exec functionality.
 func TestShellExecTool_Basic(t *testing.T) {
 	tool := newShellExecTool(nil)
 
@@ -38,7 +38,7 @@ func TestShellExecTool_Basic(t *testing.T) {
 	}
 }
 
-// TestShellExecTool_Args tests shell.exec with arguments.
+// TestShellExecTool_Args tests shell_exec with arguments.
 func TestShellExecTool_Args(t *testing.T) {
 	tool := newShellExecTool(nil)
 
@@ -59,7 +59,7 @@ func TestShellExecTool_Args(t *testing.T) {
 	}
 }
 
-// TestShellExecTool_Timeout tests shell.exec timeout.
+// TestShellExecTool_Timeout tests shell_exec timeout.
 func TestShellExecTool_Timeout(t *testing.T) {
 	tool := newShellExecTool(nil)
 
@@ -155,7 +155,7 @@ func TestShellExecTool_LargeOutput(t *testing.T) {
 	}
 }
 
-// TestShellExecTool_Workdir tests shell.exec with workdir.
+// TestShellExecTool_Workdir tests shell_exec with workdir.
 func TestShellExecTool_Workdir(t *testing.T) {
 	tool := newShellExecTool(nil)
 

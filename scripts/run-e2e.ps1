@@ -104,7 +104,10 @@ try {
         -WorkingDirectory $tmpWs -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
-    $addrFile = Join-Path $cfgDir "daemon.addr"
+    # Daemon address discovery: forge always writes daemon.addr under the
+    # process home directory (os.UserHomeDir()/.forge), which this script
+    # isolates to $tmpHome — regardless of where the config file lives.
+    $addrFile = Join-Path (Join-Path $tmpHome ".forge") "daemon.addr"
     $deadline = (Get-Date).AddSeconds(30)
     while (-not (Test-Path $addrFile)) {
         if ($proc.HasExited) { throw "forge serve exited early; see $errLog" }
@@ -116,16 +119,16 @@ try {
 
     # --- Prompts (single sustained session) ---------------------------------
     $prompts = @(
-        @{ id = 1; desc = "fs.write creates file";
-           prompt = 'Use the fs.write tool to create a file named cli-notes.md whose entire content is exactly this single line: CLI_E2E_MARKER=zulu-7 . Then reply DONE.' },
-        @{ id = 2; desc = "fs.read reads it back";
-           prompt = 'Use the fs.read tool to read cli-notes.md, then reply with the exact value of CLI_E2E_MARKER.' },
+        @{ id = 1; desc = "fs_write creates file";
+           prompt = 'Use the fs_write tool to create a file named cli-notes.md whose entire content is exactly this single line: CLI_E2E_MARKER=zulu-7 . Then reply DONE.' },
+        @{ id = 2; desc = "fs_read reads it back";
+           prompt = 'Use the fs_read tool to read cli-notes.md, then reply with the exact value of CLI_E2E_MARKER.' },
         @{ id = 3; desc = "git status";
            prompt = 'Use the git tool with subcommand status to show the repository status, then summarize it in one sentence.' },
-        @{ id = 4; desc = "shell.exec go version";
-           prompt = 'Use the shell.exec tool to run the command go with argument version, then reply with the exact output.' },
-        @{ id = 5; desc = "fs.write rewrites file";
-           prompt = 'Use the fs.write tool to rewrite cli-notes.md so its entire content becomes exactly two lines: CLI_E2E_MARKER=zulu-7 and updated-by-cli-run . Then reply DONE.' },
+        @{ id = 4; desc = "shell_exec go version";
+           prompt = 'Use the shell_exec tool to run the command go with argument version, then reply with the exact output.' },
+        @{ id = 5; desc = "fs_write rewrites file";
+           prompt = 'Use the fs_write tool to rewrite cli-notes.md so its entire content becomes exactly two lines: CLI_E2E_MARKER=zulu-7 and updated-by-cli-run . Then reply DONE.' },
         @{ id = 6; desc = "git add + commit";
            prompt = 'Commit the change using the git tool twice: first subcommand add with argument cli-notes.md, then subcommand commit with commit message cli-e2e-commit . Reply with the confirmation.' }
     )
@@ -186,7 +189,8 @@ try {
             $artifactOk = $false
         }
     }
-    $subject = (& git -C $tmpWs log "-1" "--format=%s") 2>$null
+    $subject = $null
+    try { $subject = (& git -C $tmpWs log "-1" "--format=%s" 2>$null) } catch { $subject = $null }
     if ($LASTEXITCODE -ne 0 -or "$subject".Trim() -ne "cli-e2e-commit") {
         Write-Host "ARTIFACT FAIL: expected HEAD subject 'cli-e2e-commit', got '$subject'" -ForegroundColor Red
         $artifactOk = $false

@@ -106,13 +106,13 @@ func TestWriteHumanResultRoutesStreams(t *testing.T) {
 	if !strings.Contains(stdout.String(), "answer") {
 		t.Errorf("answer must go to stdout, got %q", stdout.String())
 	}
-	if strings.Contains(stdout.String(), "fs.read") {
+	if strings.Contains(stdout.String(), "fs_read") {
 		t.Errorf("tool trace leaked into stdout: %q", stdout.String())
 	}
 	for _, want := range []string{
-		"-> fs.read(path=notes.txt)",
+		"-> fs_read(path=notes.txt)",
 		"<- ok",
-		"-> shell.exec(cmd=pwd)",
+		"-> shell_exec(cmd=pwd)",
 		"<- error",
 	} {
 		if !strings.Contains(stderr.String(), want) {
@@ -140,7 +140,7 @@ func TestWriteJSONResultEmitsOnlyTheDocument(t *testing.T) {
 			t.Errorf("JSON output missing %s:\n%s", key, got)
 		}
 	}
-	if !strings.Contains(got, `"name": "fs.read"`) || !strings.Contains(got, `"ok": true`) {
+	if !strings.Contains(got, `"name": "fs_read"`) || !strings.Contains(got, `"ok": true`) {
 		t.Errorf("tool trace not serialized:\n%s", got)
 	}
 }
@@ -152,8 +152,8 @@ func oneShotFixture() *client.OneShotResult {
 		Model:     "model-a",
 		Response:  "answer",
 		ToolCalls: []client.ToolCallTrace{
-			{Name: "fs.read", Args: []byte(`{"path":"notes.txt"}`), OK: true},
-			{Name: "shell.exec", Args: []byte(`{"cmd":"pwd"}`), OK: false},
+			{Name: "fs_read", Args: []byte(`{"path":"notes.txt"}`), OK: true},
+			{Name: "shell_exec", Args: []byte(`{"cmd":"pwd"}`), OK: false},
 		},
 		DurationMs: 12,
 	}

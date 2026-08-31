@@ -9,7 +9,7 @@ import (
 )
 
 // fenceTag converts a tool name to its fence tag.
-// e.g., "fs.read" -> "fs.read", "shell.exec" -> "shell.exec"
+// e.g., "fs_read" -> "fs_read", "shell_exec" -> "shell_exec"
 func fenceTag(name string) string {
 	return strings.ReplaceAll(name, ":", ".")
 }

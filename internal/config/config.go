@@ -27,7 +27,7 @@ import (
 // CurrentSchemaVersion is the newest configuration schema revision this
 // build understands. Version 2 added the "permissions" section (RNF-4.1).
 // Version 3 added permissions.shell.require_isolation (RNF-4.7), which
-// makes Linux refuse shell.exec when OS-level isolation is unavailable
+// makes Linux refuse shell_exec when OS-level isolation is unavailable
 // instead of silently degrading; non-Linux platforms ignore it.
 // Version 4 added the optional providers.<name>.model_roles map for
 // cost-based model routing (RF-2.4/2.5); a v3 document needs no data

@@ -89,13 +89,13 @@ func TestREPLTurnRendersAssistantReply(t *testing.T) {
 func TestREPLTurnWithToolTrace(t *testing.T) {
 	stack := startTestDaemon(t,
 		toolCallReply("reading file",
-			llmToolCall("t1", "fs.read", `{"path":"notes.txt"}`)),
+			llmToolCall("t1", "fs_read", `{"path":"notes.txt"}`)),
 		plainReply("final answer after tool"),
 	)
 
 	out := runREPL(t, stack, "", "read my notes\n/exit\n")
 	for _, want := range []string{
-		"-> fs.read(path=notes.txt)",
+		"-> fs_read(path=notes.txt)",
 		"<- ok",
 		"final answer after tool",
 	} {
