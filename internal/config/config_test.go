@@ -837,3 +837,52 @@ func TestLoadRejectsUnknownFieldOnCurrentSchema(t *testing.T) {
 		t.Errorf("error %q does not name the typo'd field", err.Error())
 	}
 }
+
+func TestMigrateV3ToV4PassesDocumentThrough(t *testing.T) {
+	v3 := []byte(`{"schema_version": 3, "default_provider": "ollama"}`)
+
+	migrated, err := Migrate(v3, 3)
+	if err != nil {
+		t.Fatalf("Migrate(v3): %v", err)
+	}
+	if string(migrated) != string(v3) {
+		t.Errorf("v3 -> v4 step must not alter the document: %s", migrated)
+	}
+}
+
+func TestLoadUpgradesV3DocumentInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v3.json")
+	writeConfigFile(t, path, `{
+		"schema_version": 3,
+		"default_provider": "ollama",
+		"providers": {
+			"ollama": {
+				"kind": "openai-compatible",
+				"base_url": "http://127.0.0.1:11434/v1",
+				"models": ["qwen2.5-coder:7b"]
+			}
+		}
+	}`)
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(v3 document): %v", err)
+	}
+	if got.SchemaVersion != CurrentSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d after migration", got.SchemaVersion, CurrentSchemaVersion)
+	}
+	// v4 added only the optional providers.<name>.model_roles map: the
+	// provider entry must survive the 3 -> 4 step verbatim with no roles
+	// invented for it.
+	p, ok := got.Providers["ollama"]
+	if !ok {
+		t.Fatalf("provider ollama lost during migration: %+v", got.Providers)
+	}
+	if len(p.ModelRoles) != 0 {
+		t.Errorf("model_roles = %v, want none injected by migration", p.ModelRoles)
+	}
+	if want := []string{"qwen2.5-coder:7b"}; !reflect.DeepEqual(p.Models, want) {
+		t.Errorf("models = %v, want %v preserved verbatim", p.Models, want)
+	}
+}

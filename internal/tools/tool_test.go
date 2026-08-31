@@ -360,6 +360,23 @@ func TestBuildPermsRequest(t *testing.T) {
 			wantErr:  true,
 		},
 		{
+			name:     "custom v1 tool maps to KindCustom with tool name",
+			toolName: "retrieval.search",
+			args:     map[string]any{"query": "hello", "k": 5.0},
+			wantErr:  false,
+			checkFunc: func(t *testing.T, req perms.Request) {
+				if req.Kind != perms.KindCustom {
+					t.Errorf("Kind = %q, want %q", req.Kind, perms.KindCustom)
+				}
+				if req.Command != "retrieval.search" {
+					t.Errorf("Command = %q, want tool name %q", req.Command, "retrieval.search")
+				}
+				if req.Path != "" || len(req.Args) != 0 {
+					t.Errorf("custom request must not carry Path/Args: %+v", req)
+				}
+			},
+		},
+		{
 			name:     "unknown tool",
 			toolName: "unknown.tool",
 			args:     map[string]any{},

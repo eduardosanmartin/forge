@@ -7,7 +7,11 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/eduardosanmartin/forge/internal/anchor"
+	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/retrieval"
+	"github.com/eduardosanmartin/forge/internal/routing"
 )
 
 // Registry holds all registered tools and coordinates execution with the permission engine.
@@ -20,17 +24,21 @@ type Registry struct {
 	isolator      Isolator // OS-level shell isolation routing (RNF-4.7); nil = legacy direct exec
 	requireIso    bool     // refuse shell.exec when isolation is required but unavailable (Linux only)
 	mu            sync.RWMutex
+	router        *routing.ModelRouter
 }
 
 // New creates a new Registry with the given permission engine and workspace root.
 func New(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *Registry {
-	return &Registry{
+	r := &Registry{
 		tools:         make(map[string]Tool),
 		toolOrder:     make([]string, 0),
 		permsEngine:   permsEngine,
 		workspaceRoot: workspaceRoot,
 		logger:        logger,
 	}
+	// Initialize router with default empty role models
+	r.router = routing.NewModelRouter(map[routing.ModelRole]string{})
+	return r
 }
 
 // SetIsolator routes shell children through the OS-isolation wrapper
@@ -149,7 +157,8 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	}, nil
 }
 
-// defaultRegistryTools returns the standard set of tools for the registry.
+// defaultRegistryTools returns the base tool set (the original five
+// OS-reaching tools). Every entry is dependency-free.
 func defaultRegistryTools(logger *slog.Logger) []Tool {
 	return []Tool{
 		newFsReadTool(),
@@ -160,10 +169,52 @@ func defaultRegistryTools(logger *slog.Logger) []Tool {
 	}
 }
 
-// NewDefaultRegistry creates a registry with all standard tools registered.
+// v1RegistryTools returns the v1 feature tools. Each needs a real dependency
+// (retriever, compactor, anchor store); registering them with nil deps is a
+// nil-pointer landmine on first use, and no production call site constructs
+// those deps yet — so they are registered only by NewDefaultRegistryWithDeps,
+// the sole entry point that receives them.
+func v1RegistryTools(
+	retriever *retrieval.Retriever,
+	compactor *compaction.Compactor,
+	anchorStore *anchor.AnchorStoreSQL,
+) []Tool {
+	return []Tool{
+		newRetrievalSearchTool(retriever),
+		newCompactionSummarizeTool(compactor),
+		newAnchoringStoreTool(anchorStore),
+		newAnchoringListTool(anchorStore),
+		newAnchoringGetTool(anchorStore),
+		newAnchoringDeleteTool(anchorStore),
+	}
+}
+
+// NewDefaultRegistry creates a registry with the base tools registered. The
+// v1 feature tools are intentionally absent: they require real dependencies
+// (see v1RegistryTools and NewDefaultRegistryWithDeps).
 func NewDefaultRegistry(permsEngine *perms.Engine, workspaceRoot string, logger *slog.Logger) *Registry {
 	r := New(permsEngine, workspaceRoot, logger)
 	for _, tool := range defaultRegistryTools(logger) {
+		r.Register(tool)
+	}
+	return r
+}
+
+// NewDefaultRegistryWithDeps creates a registry with the base tools plus the
+// v1 feature tools, wiring the real dependencies the v1 tools need.
+func NewDefaultRegistryWithDeps(
+	permsEngine *perms.Engine,
+	workspaceRoot string,
+	logger *slog.Logger,
+	retriever *retrieval.Retriever,
+	compactor *compaction.Compactor,
+	anchorStore *anchor.AnchorStoreSQL,
+) *Registry {
+	r := New(permsEngine, workspaceRoot, logger)
+	for _, tool := range defaultRegistryTools(logger) {
+		r.Register(tool)
+	}
+	for _, tool := range v1RegistryTools(retriever, compactor, anchorStore) {
 		r.Register(tool)
 	}
 	return r

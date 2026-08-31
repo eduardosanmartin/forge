@@ -189,6 +189,29 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	_ = enableAnchoring
 	_ = enableRouting
 
+	// DEBUG: Log v1 flags received
+	if m.logger != nil {
+		m.logger.Debug("ExecuteTurn v1 flags", "retrieval", enableRetrieval, "compaction", enableCompaction, "anchoring", enableAnchoring, "routing", enableRouting)
+	}
+
+	// Store v1 flags in session metadata for ContextAssembler. The flags
+	// usually come from this same metadata (resolved above), so compare the
+	// four values first: an unchanged turn must not hit SQLite again.
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]any)
+	}
+	metadataChanged := session.Metadata["v1_retrieval"] != enableRetrieval ||
+		session.Metadata["v1_compaction"] != enableCompaction ||
+		session.Metadata["v1_anchoring"] != enableAnchoring ||
+		session.Metadata["v1_routing"] != enableRouting
+	if metadataChanged {
+		session.Metadata["v1_retrieval"] = enableRetrieval
+		session.Metadata["v1_compaction"] = enableCompaction
+		session.Metadata["v1_anchoring"] = enableAnchoring
+		session.Metadata["v1_routing"] = enableRouting
+		_ = m.store.UpdateSessionMetadata(ctx, sessionID, session.Metadata)
+	}
+
 	// Create turn context with cancellation
 	turnCtx, turnCancel := context.WithCancel(ctx)
 

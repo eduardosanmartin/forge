@@ -92,6 +92,14 @@ func TestNewRejectsInvalidConstruction(t *testing.T) {
 			},
 			wantErrs: []string{"permissions.git.allow[0]"},
 		},
+		{
+			name:   "empty custom deny entry",
+			useTmp: true,
+			mutate: func(p *PermissionsPolicy) {
+				p.Custom.Deny = []string{"go", " "}
+			},
+			wantErrs: []string{"permissions.custom.deny[1]"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -467,6 +475,69 @@ func TestFloorBeatsAllowlist(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCustomFloor(t *testing.T) {
+	// Mirror of TestFloorBeatsAllowlist for the allow-side floor: with a
+	// deny rule present, only the rule can block the tool; everything else
+	// falls through to the floor, proving both directions of precedence.
+	eng, _ := newTestEngine(t, func(p *PermissionsPolicy) {
+		p.Custom.Deny = []string{"compaction.summarize"}
+	})
+
+	cases := []struct {
+		name      string
+		req       Request
+		wantAllow bool
+		wantRule  string
+	}{
+		{
+			name:      "internal tool allowed by floor",
+			req:       Request{Kind: KindCustom, Command: "retrieval.search"},
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "anchoring tool allowed by floor",
+			req:       Request{Kind: KindCustom, Command: "anchoring.list"},
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "explicit deny rule takes precedence over floor",
+			req:       Request{Kind: KindCustom, Command: "compaction.summarize"},
+			wantAllow: false,
+			wantRule:  "custom:compaction.summarize",
+		},
+		{
+			name:      "empty tool name is malformed",
+			req:       Request{Kind: KindCustom},
+			wantAllow: false,
+			wantRule:  "malformed-request",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := eng.Check(tc.req)
+			if d.Allowed != tc.wantAllow {
+				t.Errorf("Check(%+v) allowed = %v; want %v", tc.req, d.Allowed, tc.wantAllow)
+			}
+			if d.Rule != tc.wantRule {
+				t.Errorf("Rule = %q, want %q", d.Rule, tc.wantRule)
+			}
+		})
+	}
+
+	t.Run("empty policy leaves floor allowing everything", func(t *testing.T) {
+		// Every engine constructed elsewhere (daemon, e2e harness) leaves
+		// Custom at its zero value: the floor must allow through it.
+		open, _ := newTestEngine(t, nil)
+		for _, tool := range []string{"retrieval.search", "compaction.summarize", "anchoring.get"} {
+			if d := open.Check(Request{Kind: KindCustom, Command: tool}); !d.Allowed || d.Rule != "floor:custom" {
+				t.Errorf("Check(%s) = %+v, want allowed with rule %q", tool, d, "floor:custom")
+			}
+		}
+	})
 }
 
 func TestEngineConcurrentChecksAreStable(t *testing.T) {

@@ -23,7 +23,7 @@
 #>
 param(
     [string]$Model = "qwen2.5-coder:7b",
-    [string]$BaseUrl = "http://127.0.0.1:11434/v1"
+    [string]$BaseUrl = "https://opencode.ai/zen/v1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,20 +72,20 @@ try {
     & git -C $tmpWs config user.name "Forge E2E"
 
     # --- Config (global only; no project config in the workspace) ----------
-    $cfgDir = Join-Path $tmpHome ".forge"
+    $cfgDir = Join-Path $tmpWs ".forge"
     New-Item -ItemType Directory -Path $cfgDir | Out-Null
     $config = @{
-        schema_version   = 3
-        default_provider = "ollama"
+        schema_version   = 4
+        default_provider = "zen"
         providers        = @{
-            ollama = @{
+            zen = @{
                 kind     = "openai-compatible"
                 base_url = $BaseUrl
                 models   = @($Model)
             }
         }
         storage          = @{ path = (Join-Path $tmpHome "forge.db") }
-        network          = @{ allowed_hosts = @("127.0.0.1", "localhost") }
+        network          = @{ allowed_hosts = @("127.0.0.1", "localhost", "opencode.ai") }
         logging          = @{ level = "info" }
         permissions      = @{
             fs    = @{ read = @("./**"); write = @("./**") }

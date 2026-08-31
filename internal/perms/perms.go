@@ -2,7 +2,10 @@
 // (spec RNF-4.1): every shell execution, filesystem access, and git
 // operation is denied unless a configured rule explicitly allows it, and a
 // non-configurable git safety floor denies destructive invocations before
-// any allowlist is consulted (RNF-8.2 spirit).
+// any allowlist is consulted (RNF-8.2 spirit). Forge's internal harness
+// tools (kind "custom") invert the default — an explicit floor ALLOWS them
+// because they never reach the host OS — while explicit deny rules still
+// take precedence over that floor.
 //
 // The engine is immutable after construction, so a single *Engine is safe
 // for concurrent Check calls. All matching runs over forward-slash-normalized
@@ -32,6 +35,13 @@ const (
 	KindShell Kind = "shell.exec"
 	// KindGit is a git invocation request.
 	KindGit Kind = "git"
+	// KindCustom is a forge-internal harness tool request (the v1 tools:
+	// retrieval.search, compaction.summarize, anchoring.*). These tools
+	// only touch forge's own SQLite database and forge's own LLM client,
+	// never the host OS, so they sit inside the trust boundary the engine
+	// guards; see the custom floor in evaluate for why they are allowed
+	// by default.
+	KindCustom Kind = "custom"
 )
 
 // Request describes one operation seeking authorization. Only the fields
@@ -39,7 +49,7 @@ const (
 type Request struct {
 	Kind       Kind
 	Path       string   // fs.*: path as given (relative or absolute)
-	Command    string   // shell.exec: executable name or path
+	Command    string   // shell.exec: executable name or path; custom: tool name (audit trail identifier)
 	Args       []string // shell.exec: command arguments (never affect the decision)
 	Subcommand string   // git: e.g. "push"
 	GitArgs    []string // git: arguments after the subcommand
@@ -60,8 +70,10 @@ type Request struct {
 type Decision struct {
 	Allowed bool
 	// Rule names what decided: "malformed-request", "git-floor",
-	// "default-deny:<kind>", or an allowing rule "<kind>:<pattern>"
-	// (fs), "<kind>:<basename>" (shell), "<kind>:<subcommand>" (git).
+	// "floor:custom", "default-deny:<kind>", or an allowing rule
+	// "<kind>:<pattern>" (fs), "<kind>:<basename>" (shell),
+	// "<kind>:<subcommand>" (git); a denying custom rule is
+	// "custom:<tool>".
 	Rule string
 }
 
@@ -85,11 +97,24 @@ type GitPermissions struct {
 	Allow []string `json:"allow"`
 }
 
+// CustomPermissions arbitrates forge-internal harness tools (kind "custom")
+// by tool name, case-sensitively (the tools.BuildPermsRequest names are
+// fixed lowercase-dotted strings). Unlike the OS-reaching kinds, the default
+// for these tools is ALLOW — the custom floor — because they never reach
+// the host OS; an explicit deny entry is the way to turn one off.
+type CustomPermissions struct {
+	Deny []string `json:"deny"`
+}
+
 // PermissionsPolicy mirrors the config document's "permissions" section.
+// It is deny-by-default: anything not explicitly allowed is refused by the
+// permission engine (RNF-4.1). The one exception is the "custom" kind,
+// which the custom floor allows by default (see CustomPermissions).
 type PermissionsPolicy struct {
-	FS    FSPermissions    `json:"fs"`
-	Shell ShellPermissions `json:"shell"`
-	Git   GitPermissions   `json:"git"`
+	FS     FSPermissions     `json:"fs"`
+	Shell  ShellPermissions  `json:"shell"`
+	Git    GitPermissions    `json:"git"`
+	Custom CustomPermissions `json:"custom"`
 }
 
 // patternLists holds one fs pattern list split into its relative and absolute
@@ -121,6 +146,7 @@ type Engine struct {
 
 	shellAllow []string
 	gitAllow   []string
+	customDeny []string
 
 	workspaceRoot string // cleaned absolute path
 	logger        *slog.Logger
@@ -147,11 +173,15 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	if err := validateAllowList("permissions.git.allow", policy.Git.Allow); err != nil {
 		return nil, err
 	}
+	if err := validateAllowList("permissions.custom.deny", policy.Custom.Deny); err != nil {
+		return nil, err
+	}
 	return &Engine{
 		fsRead:        splitPatterns(policy.FS.Read),
 		fsWrite:       splitPatterns(policy.FS.Write),
 		shellAllow:    policy.Shell.Allow,
 		gitAllow:      policy.Git.Allow,
+		customDeny:    policy.Custom.Deny,
 		workspaceRoot: filepath.Clean(workspaceRoot),
 		logger:        logger,
 	}, nil
@@ -186,8 +216,12 @@ func validateAllowList(section string, entries []string) error {
 //  1. Malformed requests are denied outright ("malformed-request").
 //  2. git only: the safety floor denies destructive invocations ("git-floor")
 //     BEFORE the allowlist is consulted.
-//  3. The kind's list is matched; a hit allows ("<kind>:<pattern>").
-//  4. Otherwise default deny ("default-deny:<kind>").
+//  3. The kind's list is matched; a hit allows ("<kind>:<pattern>" for fs,
+//     "<kind>:<basename>" for shell, "<kind>:<subcommand>" for git) or, for
+//     custom, denies ("custom:<tool>").
+//  4. custom only: the custom floor ALLOWS internal harness tools
+//     ("floor:custom") when no deny rule matched.
+//  5. Otherwise default deny ("default-deny:<kind>").
 func (e *Engine) Check(req Request) Decision {
 	d := e.evaluate(req)
 	e.audit(req, d)
@@ -231,6 +265,21 @@ func (e *Engine) evaluate(req Request) Decision {
 				return Decision{Allowed: true, Rule: string(KindGit) + ":" + allowed}
 			}
 		}
+	case KindCustom:
+		// Custom floor (the allow-side mirror of the git floor's
+		// "floor decides" idea): explicit deny rules take precedence;
+		// when no rule matches, ALLOW. These are internal harness tools
+		// that only touch forge's own SQLite DB and forge's own LLM
+		// client — they never cross the OS boundary that fs/shell/git
+		// guard, so they sit inside the trust boundary, and the
+		// deny-by-default invariant stays intact for OS-reaching
+		// operations.
+		for _, denied := range e.customDeny {
+			if req.Command == denied {
+				return Decision{Allowed: false, Rule: string(KindCustom) + ":" + denied}
+			}
+		}
+		return Decision{Allowed: true, Rule: "floor:custom"}
 	}
 
 	return Decision{Allowed: false, Rule: "default-deny:" + string(req.Kind)}
@@ -247,6 +296,8 @@ func malformedRequest(req Request) bool {
 		return req.Command == ""
 	case KindGit:
 		return req.Subcommand == ""
+	case KindCustom:
+		return req.Command == ""
 	default:
 		return true // empty or unknown kind
 	}

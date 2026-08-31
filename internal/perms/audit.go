@@ -45,6 +45,10 @@ func (e *Engine) audit(req Request, d Decision) {
 			slog.String("subcommand", logging.Redact(req.Subcommand)),
 			slog.String("args", logging.Redact(truncate(strings.Join(req.GitArgs, " ")))),
 		)
+	case KindCustom:
+		// Command carries the internal tool name (tools.BuildPermsRequest
+		// keeps it there precisely so the audit trail is readable).
+		attrs = append(attrs, slog.String("tool", logging.Redact(req.Command)))
 	}
 	e.logger.Info(auditMsg, attrs...)
 }

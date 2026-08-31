@@ -29,6 +29,9 @@ import (
 // Version 3 added permissions.shell.require_isolation (RNF-4.7), which
 // makes Linux refuse shell.exec when OS-level isolation is unavailable
 // instead of silently degrading; non-Linux platforms ignore it.
+// Version 4 added the optional providers.<name>.model_roles map for
+// cost-based model routing (RF-2.4/2.5); a v3 document needs no data
+// change to be valid v4.
 const CurrentSchemaVersion = 4
 
 // Provider describes a single OpenAI-compatible inference endpoint.
@@ -336,14 +339,25 @@ func Migrate(data []byte, from int) ([]byte, error) {
 		return data, nil
 	case 1:
 		// Chain: v1 gains the permissions section (v2), then the shell
-		// isolation flag (v3).
+		// isolation flag (v3), then the optional provider model_roles
+		// map (v4, no data change).
 		v2, err := migrateV1ToV2(data)
 		if err != nil {
 			return nil, err
 		}
-		return migrateV2ToV3(v2)
+		v3, err := migrateV2ToV3(v2)
+		if err != nil {
+			return nil, err
+		}
+		return migrateV3ToV4(v3)
 	case 2:
-		return migrateV2ToV3(data)
+		v3, err := migrateV2ToV3(data)
+		if err != nil {
+			return nil, err
+		}
+		return migrateV3ToV4(v3)
+	case 3:
+		return migrateV3ToV4(data)
 	default:
 		return nil, fmt.Errorf(
 			"no migration path from schema_version %d to schema_version %d",
@@ -432,6 +446,17 @@ func migrateV2ToV3(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%s: encode migrated document: %w", step, err)
 	}
 	return out, nil
+}
+
+// migrateV3ToV4 upgrades a v3 document to v4. Schema v4 added the OPTIONAL
+// providers.<name>.model_roles map (Provider.ModelRoles, cost-based model
+// routing, RF-2.4/2.5): absence in a v3 document already means "no roles
+// assigned" (the Go zero value), so no data transformation is needed and
+// the document passes through unchanged. The step exists so the migration
+// chain can express v1 -> v4 and Load accepts v3 files instead of rejecting
+// them with "no migration path" (the gap the v4 bump originally left).
+func migrateV3ToV4(data []byte) ([]byte, error) {
+	return data, nil
 }
 
 // Validate checks c against all configuration rules and returns an aggregated

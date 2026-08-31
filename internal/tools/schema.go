@@ -211,6 +211,14 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 			}
 		}
 		req.Workdir, _ = args["workdir"].(string)
+	case "retrieval.search", "compaction.summarize", "anchoring.store", "anchoring.list", "anchoring.get", "anchoring.delete":
+		// Internal harness tools (v1 features): they operate only on forge's
+		// own SQLite store and forge's own LLM client, never on the host OS,
+		// so the request carries just the kind plus the tool name (kept in
+		// Command so the audit trail records a readable identifier). Tool
+		// arguments are not permission-relevant.
+		req.Kind = perms.KindCustom
+		req.Command = toolName
 	default:
 		return req, fmt.Errorf("unknown tool: %s", toolName)
 	}
