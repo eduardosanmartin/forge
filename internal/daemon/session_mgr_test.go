@@ -10,9 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/config"
+	"github.com/eduardosanmartin/forge/internal/embedding"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -98,9 +101,11 @@ func (m *testStore) DeleteSession(ctx context.Context, id string) error {
 func (m *testStore) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	seq := len(m.messages[msg.SessionID])
+	// Sequences are 1-based, matching the real store contract:
+	// GetMessagesSince(sinceSeq=0) must return the FULL transcript.
+	seq := len(m.messages[msg.SessionID]) + 1
 	msg.Seq = seq
-	msg.ID = int64(seq + 1)
+	msg.ID = int64(seq)
 	msg.CreatedAt = time.Now().UnixMilli()
 	m.messages[msg.SessionID] = append(m.messages[msg.SessionID], *msg)
 	return seq, msg.ID, nil
@@ -496,5 +501,72 @@ func TestSessionManagerGetMessagesSince(t *testing.T) {
 	}
 	if len(messages) == 0 {
 		t.Error("expected messages since seq 0")
+	}
+}
+
+// TestSessionManagerExecuteTurnIndexesTranscriptWhenRetrievalEnabled
+// proves the v1 retrieval flag indexes the persisted transcript into the
+// real retriever after a completed turn (the flag is passed through the
+// v1Flags path and persisted to session metadata).
+func TestSessionManagerExecuteTurnIndexesTranscriptWhenRetrievalEnabled(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	store := newTestStore()
+	llmReg := newTestLLMRegistry()
+	toolsReg := newTestToolsRegistry()
+	emergency := NewEmergencyState(logger)
+	cfg := config.Defaults()
+	permsEng := newTestPermsEngine()
+
+	embStore, err := embedding.NewStore("")
+	if err != nil {
+		t.Fatalf("create embedding store: %v", err)
+	}
+	retriever := retrieval.NewRetriever(embStore)
+
+	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store,
+		WithV1Deps(agent.V1Deps{Retriever: retriever}))
+
+	session, _ := mgr.CreateSession(context.Background(), nil)
+
+	if _, err := mgr.ExecuteTurn(context.Background(), session.ID,
+		"index me please", true, false, false, false); err != nil {
+		t.Fatalf("execute turn failed: %v", err)
+	}
+
+	// The mock provider answers without tool calls, so the turn persists
+	// one user + one assistant message — both must be indexed.
+	if got := retriever.Len(); got != 2 {
+		t.Errorf("retriever indexed %d chunks, want 2 (user + assistant)", got)
+	}
+}
+
+// TestSessionManagerExecuteTurnSkipsIndexingWhenRetrievalDisabled proves
+// no indexing work happens with the flag off.
+func TestSessionManagerExecuteTurnSkipsIndexingWhenRetrievalDisabled(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	store := newTestStore()
+	llmReg := newTestLLMRegistry()
+	toolsReg := newTestToolsRegistry()
+	emergency := NewEmergencyState(logger)
+	cfg := config.Defaults()
+	permsEng := newTestPermsEngine()
+
+	embStore, err := embedding.NewStore("")
+	if err != nil {
+		t.Fatalf("create embedding store: %v", err)
+	}
+	retriever := retrieval.NewRetriever(embStore)
+
+	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store,
+		WithV1Deps(agent.V1Deps{Retriever: retriever}))
+
+	session, _ := mgr.CreateSession(context.Background(), nil)
+
+	if _, err := mgr.ExecuteTurn(context.Background(), session.ID, "do not index me"); err != nil {
+		t.Fatalf("execute turn failed: %v", err)
+	}
+
+	if got := retriever.Len(); got != 0 {
+		t.Errorf("retriever indexed %d chunks with retrieval disabled, want 0", got)
 	}
 }

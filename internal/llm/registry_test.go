@@ -10,6 +10,7 @@ import (
 
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/logging"
+	"github.com/eduardosanmartin/forge/internal/routing"
 )
 
 func TestRegistry_New_Basic(t *testing.T) {
@@ -640,5 +641,120 @@ func TestRegistry_SingleProviderMultipleModels(t *testing.T) {
 	all := registry.ListAll()
 	if len(all) != 3 {
 		t.Errorf("ListAll: got %d models, want 3", len(all))
+	}
+}
+
+func TestRegistry_GetModelForStep_ResolvesModelRolesFromConfig(t *testing.T) {
+	mock := NewMockServer()
+	defer mock.Close()
+
+	mock.SetDefaultResponse(
+		(&ModelsResponseBuilder{Models: []string{"model-small"}}).Build(),
+	)
+
+	// The daemon passes the loaded config straight into New; the roles
+	// below mirror what providers.<name>.model_roles provides (schema v4).
+	cfg := &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		DefaultProvider: "ollama",
+		Providers: map[string]config.Provider{
+			"ollama": {
+				Kind:    "openai-compatible",
+				BaseURL: mock.URL(),
+				Models:  []string{"model-small"},
+				ModelRoles: map[string]string{
+					"cheap":      "model-small",
+					"generation": "model-gen",
+					"reasoning":  "model-reason",
+				},
+			},
+		},
+		Network: config.NetworkConfig{
+			AllowedHosts: []string{hostFromURL(mock.URL())},
+		},
+	}
+
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	registry, err := New(cfg, cfg.Network.AllowedHosts, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer registry.Close()
+
+	tests := []struct {
+		step routing.StepType
+		want string
+	}{
+		{routing.StepGenerate, "model-gen"},
+		{routing.StepClassify, "model-small"},
+		{routing.StepRetrieve, "model-small"},
+		{routing.StepSummarize, "model-small"},
+		{routing.StepValidate, "model-reason"},
+		{routing.StepReason, "model-reason"},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.step), func(t *testing.T) {
+			if got := registry.GetModelForStep(tc.step); got != tc.want {
+				t.Errorf("GetModelForStep(%s) = %q, want %q", tc.step, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegistry_ChatForStep_UsesStepModel(t *testing.T) {
+	mock := NewMockServer()
+	defer mock.Close()
+
+	mock.SetDefaultResponse(
+		(&ChatResponseBuilder{ID: "step", Model: "model-reason", Content: "ok", FinishReason: "stop"}).Build(),
+	)
+
+	cfg := &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		DefaultProvider: "ollama",
+		Providers: map[string]config.Provider{
+			"ollama": {
+				Kind:    "openai-compatible",
+				BaseURL: mock.URL(),
+				Models:  []string{"model-small"},
+				ModelRoles: map[string]string{
+					"cheap":      "model-small",
+					"generation": "model-gen",
+					"reasoning":  "model-reason",
+				},
+			},
+		},
+		Network: config.NetworkConfig{
+			AllowedHosts: []string{hostFromURL(mock.URL())},
+		},
+	}
+
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	registry, err := New(cfg, cfg.Network.AllowedHosts, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer registry.Close()
+
+	ctx, cancel := ContextWithTimeout(5 * time.Second)
+	defer cancel()
+
+	// No explicit model: ChatForStep must fill in the router's model for
+	// the reasoning step and send it to the provider.
+	resp, err := registry.ChatForStep(ctx, routing.StepReason, ChatRequest{
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("ChatForStep: %v", err)
+	}
+	if resp.Choices[0].Message.Content != "ok" {
+		t.Errorf("content: got %q, want %q", resp.Choices[0].Message.Content, "ok")
+	}
+
+	req := mock.LastRequest()
+	var body map[string]any
+	_ = json.Unmarshal(req.Body, &body)
+	if body["model"] != "model-reason" {
+		t.Errorf("request model: got %v, want model-reason", body["model"])
 	}
 }

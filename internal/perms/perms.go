@@ -64,6 +64,14 @@ type Request struct {
 	Pattern    string // fs.list: doublestar glob pattern
 	TimeoutSec int    // shell.exec: timeout in seconds (default 120, max 300)
 	Workdir    string // shell.exec, git: working directory
+
+	// Input carries the raw, already-schema-validated tool arguments for
+	// the v1 custom tools (KindCustom), which read their structured
+	// parameters from here. It is populated by tools.Registry.Execute and
+	// is never consulted by the permission engine or the audit trail.
+	// Deliberately NOT Args: that field is argv-shaped and stays
+	// shell.exec-only, so the two channels can never be confused.
+	Input map[string]any
 }
 
 // Decision is the outcome of one permission check.

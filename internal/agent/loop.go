@@ -13,6 +13,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/routing"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -40,6 +41,13 @@ type ToolsRegistryInterface interface {
 // PermsEngineInterface defines the permission engine operations needed by Agent.
 type PermsEngineInterface interface {
 	Check(req perms.Request) perms.Decision
+}
+
+// ModelForStepSelector matches LLM registries that can resolve a model per
+// routing step type (llm.Registry implements it through its ModelRouter,
+// which is fed from config providers.<name>.model_roles).
+type ModelForStepSelector interface {
+	GetModelForStep(step routing.StepType) string
 }
 
 // Agent orchestrates the agent loop: user message -> assistant -> tool calls -> ... -> final answer.
@@ -78,6 +86,12 @@ func NewAgent(
 	}
 }
 
+// SetV1Deps wires the optional v1 feature dependencies into the agent's
+// context assembler. Intended to be called once at construction time.
+func (a *Agent) SetV1Deps(deps V1Deps) {
+	a.ctxAssembler.SetV1Deps(deps)
+}
+
 // ExecuteTurn runs one complete turn: user message -> assistant -> tool calls -> ... -> final answer.
 func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage string) (TurnResult, error) {
 	startTime := time.Now()
@@ -103,6 +117,11 @@ func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage s
 		result.Metrics.EndTime = time.Now()
 		return result, result.Error
 	}
+
+	// v1 routing flag (session metadata, persisted by the SessionManager
+	// before the turn starts): when on, the main generation call resolves
+	// its model through the registry's router.
+	routingEnabled, _ := session.Metadata["v1_routing"].(bool)
 
 	// 1. Persist user message to store (role="user")
 	userMsg := &store.Message{
@@ -150,6 +169,23 @@ func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage s
 			result.Error = errors.New("no LLM provider available")
 			result.Halted = true
 			break
+		}
+
+		// v1 routing: when the session flag is on and the registry can
+		// resolve step models, the main generation call uses the router's
+		// model for the generate step (config providers.<name>.model_roles
+		// -> generation role). In this build routing affects exactly this
+		// existing operation: retrieval embeddings and compaction summaries
+		// are deterministic and make no model calls, so there is nothing
+		// else to route. The provider stays the default one; only the
+		// model name changes, and an unresolvable role falls back to the
+		// default model.
+		if routingEnabled {
+			if sel, ok := a.llmReg.(ModelForStepSelector); ok {
+				if routed := sel.GetModelForStep(routing.StepGenerate); routed != "" {
+					model = routed
+				}
+			}
 		}
 
 		req := llm.ChatRequest{

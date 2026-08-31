@@ -11,6 +11,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
+	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -51,6 +52,7 @@ type SessionManager struct {
 	mu        sync.RWMutex
 	sessions  map[string]*SessionState // active sessions with turn contexts
 	agent     *agent.Agent
+	v1Deps    agent.V1Deps
 }
 
 // SessionState holds runtime state for an active session.
@@ -59,6 +61,23 @@ type SessionState struct {
 	TurnCtx    context.Context
 	TurnCancel context.CancelFunc
 	mu         sync.Mutex
+}
+
+// SessionManagerOption configures optional SessionManager dependencies at
+// construction time.
+type SessionManagerOption func(*SessionManager)
+
+// WithV1Deps wires the v1 feature dependencies (retriever, compactor,
+// anchor store) into the session manager and its agent. Nil fields disable
+// the corresponding behavior; the retriever is also used by the session
+// manager itself to re-index transcripts after each turn.
+func WithV1Deps(deps agent.V1Deps) SessionManagerOption {
+	return func(m *SessionManager) {
+		m.v1Deps = deps
+		if m.agent != nil {
+			m.agent.SetV1Deps(deps)
+		}
+	}
 }
 
 // NewSessionManager creates a new SessionManager.
@@ -71,6 +90,7 @@ func NewSessionManager(
 	cfg *config.Config,
 	permsEngine agent.PermsEngineInterface,
 	storeImpl agent.StoreInterface,
+	opts ...SessionManagerOption,
 ) *SessionManager {
 	mgr := &SessionManager{
 		store:     store,
@@ -89,6 +109,10 @@ func NewSessionManager(
 				mgr.agent = agent.NewAgent(cfg, storeImpl, llmRegConcrete, toolsRegConcrete, permsEngine, logger)
 			}
 		}
+	}
+
+	for _, opt := range opts {
+		opt(mgr)
 	}
 
 	return mgr
@@ -184,19 +208,11 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		}
 	}
 
-	_ = enableRetrieval
-	_ = enableCompaction
-	_ = enableAnchoring
-	_ = enableRouting
-
-	// DEBUG: Log v1 flags received
-	if m.logger != nil {
-		m.logger.Debug("ExecuteTurn v1 flags", "retrieval", enableRetrieval, "compaction", enableCompaction, "anchoring", enableAnchoring, "routing", enableRouting)
-	}
-
-	// Store v1 flags in session metadata for ContextAssembler. The flags
-	// usually come from this same metadata (resolved above), so compare the
-	// four values first: an unchanged turn must not hit SQLite again.
+	// Persist the resolved v1 flags in session metadata for the agent's
+	// ContextAssembler (compaction/anchoring injections) and the agent
+	// loop's model selection (routing). The flags usually come from this
+	// same metadata, so compare the four values first: an unchanged turn
+	// must not hit SQLite again.
 	if session.Metadata == nil {
 		session.Metadata = make(map[string]any)
 	}
@@ -242,7 +258,45 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		return result.Messages, err
 	}
 
+	// v1 retrieval indexing (best-effort): now that this turn's messages
+	// are persisted, rebuild the retrieval index for the session. An index
+	// failure is logged and never fails the completed turn.
+	if enableRetrieval && m.v1Deps.Retriever != nil {
+		m.indexSession(turnCtx, sessionID)
+	}
+
 	return result.Messages, nil
+}
+
+// indexSession rebuilds the retrieval index for a session from the full
+// persisted transcript. Retriever.Index clears and rebuilds, so a full
+// re-index keeps the operation stateless: the retrieval flag can be
+// enabled at any point in a session and the next turn still sees the whole
+// history. The index itself is in-memory per daemon process (v1). Best
+// effort: failures are logged and swallowed.
+func (m *SessionManager) indexSession(ctx context.Context, sessionID string) {
+	msgs, err := m.store.GetMessagesSince(ctx, sessionID, 0)
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Warn("v1 retrieval: fetch transcript for indexing failed",
+				"session_id", sessionID, "error", err)
+		}
+		return
+	}
+	index := make([]retrieval.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		index = append(index, retrieval.Message{
+			ID:      msg.ID,
+			Role:    msg.Role,
+			Content: msg.Content,
+		})
+	}
+	if err := m.v1Deps.Retriever.Index(index); err != nil {
+		if m.logger != nil {
+			m.logger.Warn("v1 retrieval: indexing failed",
+				"session_id", sessionID, "error", err)
+		}
+	}
 }
 
 // GetMessages returns messages for a session.

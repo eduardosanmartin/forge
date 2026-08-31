@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/anchor"
+	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/llm"
+	"github.com/eduardosanmartin/forge/internal/retrieval"
 )
 
 // systemPrompt is the fixed system prompt describing forge capabilities,
@@ -34,6 +37,23 @@ type ContextAssembler struct {
 	toolsReg        ToolsRegistryInterface
 	store           StoreInterface
 	maxHistoryTurns int
+	v1Deps          V1Deps
+}
+
+// V1Deps groups the optional dependencies behind the v1 feature flags.
+// Every field is nil-safe: a nil dependency simply disables the
+// corresponding context injection in Build, keeping flag semantics intact
+// for binaries and tests constructed without the full wiring.
+type V1Deps struct {
+	Retriever   *retrieval.Retriever
+	Compactor   *compaction.Compactor
+	AnchorStore *anchor.AnchorStoreSQL
+}
+
+// SetV1Deps wires the optional v1 feature dependencies. Intended to be
+// called once at construction time, before any Build call.
+func (c *ContextAssembler) SetV1Deps(deps V1Deps) {
+	c.v1Deps = deps
 }
 
 // NewContextAssembler creates a new ContextAssembler.
@@ -69,7 +89,14 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		})
 	}
 
-	// 3. Anchored memory (from store: session metadata facts marked as "anchored")
+	// 3. Session-scoped context: v0 anchored facts plus the v1 feature
+	// injections (anchoring, retrieval, compaction), all gated by the
+	// session's flag metadata. The v1 routing flag needs no context
+	// injection: it changes which model the agent loop selects, not what
+	// the model sees.
+	enableRetrieval := false
+	enableCompaction := false
+	enableAnchoring := false
 	session, err := c.store.GetSession(ctx, sessionID)
 	if err != nil {
 		// Session not found is not fatal for context building; we'll proceed without anchored facts
@@ -86,10 +113,6 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		}
 
 		// V1: Check for v1 features enabled in session metadata
-		enableRetrieval := false
-		enableCompaction := false
-		enableAnchoring := false
-		enableRouting := false
 		if session.Metadata != nil {
 			if v, ok := session.Metadata["v1_retrieval"].(bool); ok {
 				enableRetrieval = v
@@ -100,21 +123,21 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			if v, ok := session.Metadata["v1_anchoring"].(bool); ok {
 				enableAnchoring = v
 			}
-			if v, ok := session.Metadata["v1_routing"].(bool); ok {
-				enableRouting = v
-			}
 		}
 
-		// V1: Anchored memory (v1 anchors from anchor store)
-		if enableAnchoring {
-			if anchors, ok := session.Metadata["anchors"].([]any); ok && len(anchors) > 0 {
+		// V1: Anchored memory. The assembler queries the anchor store
+		// directly — nil-safe: the injection happens only when the
+		// dependency is wired AND the session flag is on. Nothing writes
+		// session.Metadata["anchors"] anymore; v0 anchored_facts (above)
+		// is untouched. A store error skips the injection rather than
+		// failing the turn.
+		if enableAnchoring && c.v1Deps.AnchorStore != nil {
+			if anchors, listErr := c.v1Deps.AnchorStore.List(ctx, sessionID); listErr == nil && len(anchors) > 0 {
 				var sb strings.Builder
 				sb.WriteString("ANCHORED FACTS (v1):\n")
 				for _, a := range anchors {
-					if m, ok := a.(map[string]any); ok {
-						if content, ok := m["content"].(string); ok && content != "" {
-							sb.WriteString(fmt.Sprintf("- %s\n", content))
-						}
+					if a.Content != "" {
+						sb.WriteString(fmt.Sprintf("- %s\n", a.Content))
 					}
 				}
 				messages = append(messages, llm.Message{
@@ -124,51 +147,60 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			}
 		}
 
-		// V1: Retrieval - add relevant context from history
-		if enableRetrieval {
-			messages = append(messages, llm.Message{
-				Role:    "system",
-				Content: "[RETRIEVAL ENABLED] Relevant historical context will be injected here based on query similarity.",
-			})
-		}
-
-		// V1: Compaction notice
-		if enableCompaction {
-			messages = append(messages, llm.Message{
-				Role:    "system",
-				Content: "[COMPACTION ENABLED] Long conversation history is hierarchically summarized; anchors are preserved.",
-			})
-		}
-
-		// V1: Routing notice
-		if enableRouting {
-			messages = append(messages, llm.Message{
-				Role:    "system",
-				Content: "[ROUTING ENABLED] Model will be selected per step type: cheap for classify/retrieve/summarize, generation for code, reasoning for complex tasks.",
-			})
+		// V1: Retrieval — inject the chunks of indexed history most
+		// similar to the current user message. The index is in-memory per
+		// daemon process (acceptable for v1): the SessionManager re-indexes
+		// the session transcript after each turn. Empty index, no hits, or
+		// an empty user message → no injection.
+		if enableRetrieval && c.v1Deps.Retriever != nil && userMessage != "" {
+			if chunks, searchErr := c.v1Deps.Retriever.Search(userMessage, retrievalTopK); searchErr == nil && len(chunks) > 0 {
+				var sb strings.Builder
+				sb.WriteString("RELEVANT CONTEXT (v1):\n")
+				for _, ch := range chunks {
+					sb.WriteString(fmt.Sprintf("- [%s] %s (score %.2f)\n", ch.Role, ch.Content, ch.Score))
+				}
+				messages = append(messages, llm.Message{
+					Role:    "system",
+					Content: sb.String(),
+				})
+			}
 		}
 	}
 
-	// Recent history (sliding window of last N messages, configurable)
-	// We need to get the latest sequence number first to calculate the sinceSeq
-	// For simplicity, we'll fetch a large window and then slice
-	// GetMessages returns newest first, we need oldest first for context
-	recentMessages, err := c.store.GetMessages(ctx, sessionID, c.maxHistoryTurns*2, 0)
-	if err != nil {
-		return nil, fmt.Errorf("get recent messages: %w", err)
+	// 4. History window. With compaction enabled and the compactor wired,
+	// sessions longer than compactionThreshold persisted messages get a
+	// compacted VIEW: one deterministic summary system message for the
+	// older turns plus the most recent turns verbatim. It is computed
+	// statelessly from the fetched transcript on every Build — no marker
+	// in session metadata — because the Compactor is deterministic and
+	// cheap to re-run, and a marker could go stale across flag toggles.
+	// Non-destructive by construction: the SQLite store keeps the full
+	// transcript; only what the model sees changes.
+	compacted := false
+	if enableCompaction && c.v1Deps.Compactor != nil {
+		compacted = c.appendCompactedHistory(ctx, sessionID, &messages)
 	}
 
-	// Reverse to get chronological order (oldest first)
-	for i := len(recentMessages) - 1; i >= 0; i-- {
-		msg := recentMessages[i]
-		llmMsg := llm.Message{
-			Role:       msg.Role,
-			Content:    msg.Content,
-			ToolCalls:  msg.ToolCalls,
-			ToolCallID: msg.ToolCallID,
-			Name:       msg.Name,
+	if !compacted {
+		// Recent history (sliding window of last N messages, configurable)
+		// GetMessages returns newest first, we need oldest first for context
+		recentMessages, err := c.store.GetMessages(ctx, sessionID, c.maxHistoryTurns*2, 0)
+		if err != nil {
+			return nil, fmt.Errorf("get recent messages: %w", err)
 		}
-		messages = append(messages, llmMsg)
+
+		// Reverse to get chronological order (oldest first)
+		for i := len(recentMessages) - 1; i >= 0; i-- {
+			msg := recentMessages[i]
+			llmMsg := llm.Message{
+				Role:       msg.Role,
+				Content:    msg.Content,
+				ToolCalls:  msg.ToolCalls,
+				ToolCallID: msg.ToolCallID,
+				Name:       msg.Name,
+			}
+			messages = append(messages, llmMsg)
+		}
 	}
 
 	// 5. Current user message
@@ -178,6 +210,79 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 	})
 
 	return messages, nil
+}
+
+// retrievalTopK is how many similar history chunks the v1 retrieval
+// injection adds ahead of the current user message.
+const retrievalTopK = 3
+
+// compactionThreshold is the persisted message count above which the v1
+// compaction flag switches the model's view to summary + recent turns.
+// compaction.Config defines no count threshold (its fields are model names
+// and an anchor score), so the threshold lives here as a named constant.
+const compactionThreshold = 40
+
+// appendCompactedHistory appends the compacted view of the session history
+// to messages when the session exceeds compactionThreshold persisted
+// messages. It reports whether the compacted view was applied; when false
+// (session at or below the threshold, or any store/compactor error) the
+// caller falls back to the plain sliding window.
+//
+// The older turns are summarized by Compactor.Compact (deterministic, no
+// LLM call); the most recent turns stay verbatim using the same sliding
+// window Build always applies, taken from the original transcript rather
+// than the Compactor's output so tool_call fields survive intact. The full
+// transcript is fed to Compact so every message outside the verbatim
+// window is covered by a summary (Compact's internal keep-recent slice
+// overlaps the window instead of leaving a gap).
+func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID string, messages *[]llm.Message) bool {
+	transcript, err := c.store.GetMessagesSince(ctx, sessionID, 0)
+	if err != nil || len(transcript) <= compactionThreshold {
+		return false
+	}
+
+	turns := make([]compaction.Turn, 0, len(transcript))
+	for _, msg := range transcript {
+		turns = append(turns, compaction.Turn{
+			Role:    msg.Role,
+			Content: msg.Content,
+			Tokens:  len(msg.Content) / 4, // same rough estimate Compact uses
+		})
+	}
+	compactedTurns, _, err := c.v1Deps.Compactor.Compact(turns)
+	if err != nil {
+		return false
+	}
+
+	var summaries []string
+	for _, t := range compactedTurns {
+		if t.Summary != "" {
+			summaries = append(summaries, t.Summary)
+		}
+	}
+	if len(summaries) == 0 {
+		return false
+	}
+
+	*messages = append(*messages, llm.Message{
+		Role:    "system",
+		Content: "COMPACTED HISTORY (v1):\n" + strings.Join(summaries, "\n"),
+	})
+
+	window := c.maxHistoryTurns * 2
+	if window > len(transcript) {
+		window = len(transcript)
+	}
+	for _, msg := range transcript[len(transcript)-window:] {
+		*messages = append(*messages, llm.Message{
+			Role:       msg.Role,
+			Content:    msg.Content,
+			ToolCalls:  msg.ToolCalls,
+			ToolCallID: msg.ToolCallID,
+			Name:       msg.Name,
+		})
+	}
+	return true
 }
 
 // ToolDefs returns the tool definitions in fixed order for ChatRequest.

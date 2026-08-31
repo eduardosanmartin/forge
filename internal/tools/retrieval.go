@@ -37,7 +37,10 @@ func (t *RetrievalSearchTool) JSONSchema() map[string]any {
 				"description": "Search query text",
 			},
 			"k": map[string]any{
-				"type":        "integer",
+				// "number" rather than "integer": forge's schema validator
+				// supports the number/string/boolean/array/object subset,
+				// and JSON integers arrive as float64 anyway.
+				"type":        "number",
 				"description": "Number of results to return (default: 5)",
 				"minimum":     1,
 				"maximum":     20,
@@ -49,13 +52,10 @@ func (t *RetrievalSearchTool) JSONSchema() map[string]any {
 }
 
 func (t *RetrievalSearchTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}

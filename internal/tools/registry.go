@@ -129,6 +129,14 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		return Result{Content: "ERROR: " + err.Error()}, nil
 	}
 
+	// Args delivery channel for the v1 custom tools: Registry.Execute is
+	// the only place that holds the raw, schema-validated arguments, so it
+	// publishes them on req.Input instead of widening the Tool.Execute
+	// signature for every tool. Base tools ignore Input (BuildPermsRequest
+	// already filled their typed fields), so their behavior is unchanged;
+	// req.Args remains the shell-only argv channel.
+	permsReq.Input = args
+
 	// 3. Check permissions
 	decision := r.permsEngine.Check(permsReq)
 	if !decision.Allowed {

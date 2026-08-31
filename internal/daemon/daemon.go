@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
@@ -43,6 +44,7 @@ func New(
 	permsEng *perms.Engine,
 	logger *slog.Logger,
 	addr string,
+	v1Deps agent.V1Deps,
 ) (*Daemon, error) {
 	if addr == "" {
 		addr = "127.0.0.1:0"
@@ -56,7 +58,7 @@ func New(
 	addrFile := filepath.Join(home, ".forge", "daemon.addr")
 
 	emergency := NewEmergencyState(logger)
-	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store)
+	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store, WithV1Deps(v1Deps))
 	handler := NewHandler(mgr, logger)
 	transport := NewTransport(addr, handler, logger)
 

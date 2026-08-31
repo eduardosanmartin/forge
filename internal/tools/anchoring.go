@@ -56,13 +56,10 @@ func (t *AnchoringStoreTool) JSONSchema() map[string]any {
 }
 
 func (t *AnchoringStoreTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}
@@ -139,13 +136,10 @@ func (t *AnchoringListTool) JSONSchema() map[string]any {
 }
 
 func (t *AnchoringListTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}
@@ -154,9 +148,9 @@ func (t *AnchoringListTool) Execute(ctx context.Context, req perms.Request) (Res
 	var err error
 
 	if sessionID, ok := args["session_id"].(string); ok && sessionID != "" {
-		anchors, err = t.anchorStore.List(nil, args["session_id"].(string))
+		anchors, err = t.anchorStore.List(ctx, args["session_id"].(string))
 	} else {
-		anchors, err = t.anchorStore.ListAll(nil)
+		anchors, err = t.anchorStore.ListAll(ctx)
 	}
 
 	if err != nil {
@@ -214,7 +208,10 @@ func (t *AnchoringGetTool) JSONSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"id": map[string]any{
-				"type":        "integer",
+				// "number" rather than "integer": forge's schema validator
+				// supports the number/string/boolean/array/object subset,
+				// and JSON integers arrive as float64 anyway.
+				"type":        "number",
 				"description": "Anchor ID to retrieve",
 			},
 		},
@@ -223,13 +220,10 @@ func (t *AnchoringGetTool) JSONSchema() map[string]any {
 }
 
 func (t *AnchoringGetTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}
@@ -249,7 +243,7 @@ func (t *AnchoringGetTool) Execute(ctx context.Context, req perms.Request) (Resu
 		return Result{Content: "ERROR: id must be an integer"}, nil
 	}
 
-	anchor, err := t.anchorStore.Get(nil, id)
+	anchor, err := t.anchorStore.Get(ctx, id)
 	if err != nil {
 		return Result{Content: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
@@ -284,7 +278,10 @@ func (t *AnchoringDeleteTool) JSONSchema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"id": map[string]any{
-				"type":        "integer",
+				// "number" rather than "integer": forge's schema validator
+				// supports the number/string/boolean/array/object subset,
+				// and JSON integers arrive as float64 anyway.
+				"type":        "number",
 				"description": "Anchor ID to delete",
 			},
 		},
@@ -293,13 +290,10 @@ func (t *AnchoringDeleteTool) JSONSchema() map[string]any {
 }
 
 func (t *AnchoringDeleteTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}
@@ -319,7 +313,7 @@ func (t *AnchoringDeleteTool) Execute(ctx context.Context, req perms.Request) (R
 		return Result{Content: "ERROR: id must be an integer"}, nil
 	}
 
-	if err := t.anchorStore.Delete(nil, id); err != nil {
+	if err := t.anchorStore.Delete(ctx, id); err != nil {
 		return Result{Content: fmt.Sprintf("ERROR: %v", err)}, nil
 	}
 

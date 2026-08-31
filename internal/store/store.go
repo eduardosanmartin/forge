@@ -70,6 +70,13 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB exposes the underlying *sql.DB so forge-internal feature stores (the
+// v1 anchor store) can share the session database. Ownership stays with
+// Store: callers must not close the returned handle.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // expandPath expands a leading "~/" in path.
 func expandPath(path string) (string, error) {
 	if path == "~" {

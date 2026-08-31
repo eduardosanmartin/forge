@@ -10,10 +10,15 @@ import (
 	"path/filepath"
 
 	"github.com/coder/websocket"
+	"github.com/eduardosanmartin/forge/internal/agent"
+	"github.com/eduardosanmartin/forge/internal/anchor"
+	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/embedding"
 	"github.com/eduardosanmartin/forge/internal/isolation"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 	"github.com/spf13/cobra"
@@ -155,8 +160,36 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	}
 	defer llmReg.Close()
 
-	// Create tools registry
-	toolsReg := tools.NewDefaultRegistry(permsEng, workspaceRoot, app.Logger)
+	// v1 feature dependencies. The embedding store is in-memory per daemon
+	// process: embedding.NewStore ignores its DSN today (the parameter is
+	// reserved for a future persistent backend), so no sibling database
+	// file is created in v1 and the retrieval index lives only for this
+	// process. The anchor store shares the session database through the
+	// raw handle, with its table created alongside the store schema.
+	// Construction errors fail fast: a daemon without its declared v1
+	// features would silently regress to placeholder behavior.
+	embStore, err := embedding.NewStore("")
+	if err != nil {
+		app.Logger.Error("v1 deps: embedding store construction failed", "error", err)
+		return fmt.Errorf("create embedding store: %w", err)
+	}
+	defer embStore.Close()
+	retriever := retrieval.NewRetriever(embStore)
+	compactor := compaction.NewCompactor(compaction.Config{})
+	if err := anchor.CreateAnchorTable(ctx, st.DB()); err != nil {
+		app.Logger.Error("v1 deps: anchors table creation failed", "error", err)
+		return fmt.Errorf("create anchors table: %w", err)
+	}
+	anchorStore := anchor.NewAnchorStoreSQL(st.DB())
+	v1Deps := agent.V1Deps{
+		Retriever:   retriever,
+		Compactor:   compactor,
+		AnchorStore: anchorStore,
+	}
+
+	// Create tools registry (base five tools + the six v1 feature tools on
+	// their real dependencies)
+	toolsReg := tools.NewDefaultRegistryWithDeps(permsEng, workspaceRoot, app.Logger, retriever, compactor, anchorStore)
 
 	// OS-level shell isolation (spec RNF-4.7): shell children run through
 	// forge itself as an isolation wrapper (Landlock + seccomp on Linux)
@@ -182,7 +215,7 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	toolsReg.SetRequireShellIsolation(app.Config.Permissions.Shell.RequireIsolation)
 
 	// Create daemon
-	d, err := daemon.New(app.Config, st, llmReg, toolsReg, permsEng, app.Logger, addr)
+	d, err := daemon.New(app.Config, st, llmReg, toolsReg, permsEng, app.Logger, addr, v1Deps)
 	if err != nil {
 		return fmt.Errorf("create daemon: %w", err)
 	}

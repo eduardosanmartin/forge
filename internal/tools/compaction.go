@@ -47,7 +47,9 @@ func (t *CompactionSummarizeTool) JSONSchema() map[string]any {
 							"description": "Message content",
 						},
 						"tokens": map[string]any{
-							"type":        "integer",
+							// "number": the validator's supported subset has
+							// no "integer" type; JSON ints arrive as float64.
+							"type":        "number",
 							"description": "Approximate token count",
 						},
 						"anchor": map[string]any{
@@ -59,7 +61,9 @@ func (t *CompactionSummarizeTool) JSONSchema() map[string]any {
 				},
 			},
 			"keep_recent": map[string]any{
-				"type":        "integer",
+				// "number": the validator's supported subset has no
+				// "integer" type; JSON ints arrive as float64.
+				"type":        "number",
 				"description": "Number of recent turns to keep verbatim (default: 10)",
 				"default":     10,
 				"minimum":     0,
@@ -70,13 +74,10 @@ func (t *CompactionSummarizeTool) JSONSchema() map[string]any {
 }
 
 func (t *CompactionSummarizeTool) Execute(ctx context.Context, req perms.Request) (Result, error) {
-	// Extract args from the request (stored as JSON in Args[0])
-	var args map[string]any
-	if len(req.Args) > 0 {
-		if err := json.Unmarshal([]byte(req.Args[0]), &args); err != nil {
-			return Result{Content: fmt.Sprintf("ERROR: failed to parse args: %v", err)}, nil
-		}
-	}
+	// v1 custom tools receive their schema-validated arguments via
+	// req.Input, populated by Registry.Execute. req.Args is the shell-only
+	// argv channel and never carries tool JSON.
+	args := req.Input
 	if args == nil {
 		args = make(map[string]any)
 	}

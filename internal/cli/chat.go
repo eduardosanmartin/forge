@@ -33,7 +33,10 @@ func newChatCommand() *cobra.Command {
 			"  --retrieval    Enable selective context retrieval (RF-3.2)\n" +
 			"  --compaction   Enable hierarchical conversation compaction (RF-3.3)\n" +
 			"  --anchoring    Enable persistent anchored facts (RF-3.4/3.5)\n" +
-			"  --routing      Enable cost-based model routing per step (RF-2.4/2.5)",
+			"  --routing      Enable cost-based model routing per step (RF-2.4/2.5)\n" +
+			"                 (this build: selects the generation-step model from\n" +
+			"                 providers.<name>.model_roles; other steps are deterministic\n" +
+			"                 and need no model)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runChat(cmd.Context(), sessionID,
 				enableRetrieval, enableCompaction, enableAnchoring, enableRouting)
