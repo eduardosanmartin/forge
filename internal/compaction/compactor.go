@@ -4,6 +4,10 @@ import (
 	"strings"
 )
 
+// defaultSummaryChars is the historical per-message summary cap used when
+// Config.SummaryCharsPerMessage is unset.
+const defaultSummaryChars = 100
+
 // Turn represents a single conversation turn.
 type Turn struct {
 	Role    string
@@ -18,6 +22,11 @@ type Config struct {
 	SummaryModel    string  // Model for summarization (small/fast)
 	GenerationModel string  // Model for generation (large/capable)
 	AnchorThreshold float64 // Score threshold to auto-mark as anchor
+	// SummaryCharsPerMessage caps how many characters of each old message
+	// survive into its chunk summary. 0 or negative falls back to the
+	// historical default (100). Tighter values shrink the compacted-view
+	// share of the context budget (RNF-2.5 target: 4k-8k total).
+	SummaryCharsPerMessage int
 }
 
 // CompactionStats holds statistics about compaction.
@@ -35,14 +44,20 @@ type Compactor struct {
 	summaryModel    string
 	generationModel string
 	anchorThreshold float64
+	summaryChars    int
 }
 
 // NewCompactor creates a new compactor with the given config.
 func NewCompactor(cfg Config) *Compactor {
+	chars := cfg.SummaryCharsPerMessage
+	if chars <= 0 {
+		chars = defaultSummaryChars
+	}
 	return &Compactor{
 		summaryModel:    cfg.SummaryModel,
 		generationModel: cfg.GenerationModel,
 		anchorThreshold: cfg.AnchorThreshold,
+		summaryChars:    chars,
 	}
 }
 
@@ -148,8 +163,8 @@ func (c *Compactor) createSummary(turns []Turn) string {
 	for _, t := range turns {
 		// Truncate content for summary
 		content := t.Content
-		if len(content) > 100 {
-			content = content[:100] + "..."
+		if len(content) > c.summaryChars {
+			content = content[:c.summaryChars] + "..."
 		}
 		parts = append(parts, t.Role+": "+content)
 	}

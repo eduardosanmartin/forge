@@ -76,7 +76,7 @@ func NewAgent(
 	maxIterations := 10 // default
 	// Could be made configurable via config in the future
 	return &Agent{
-		ctxAssembler:  NewContextAssembler(toolsReg, store, 10), // default 10 turns history
+		ctxAssembler:  NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
 		llmReg:        llmReg,
 		toolsReg:      toolsReg,
 		permsEngine:   permsEngine,

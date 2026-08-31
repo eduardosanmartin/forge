@@ -175,7 +175,10 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	}
 	defer embStore.Close()
 	retriever := retrieval.NewRetriever(embStore)
-	compactor := compaction.NewCompactor(compaction.Config{})
+	// Summary granularity 60: keeps the compacted view inside the RNF-2.5
+	// 4k-8k context ceiling; measured by the RNF-10 bench (44.6% context
+	// reduction at 40 turns vs full history).
+	compactor := compaction.NewCompactor(compaction.Config{SummaryCharsPerMessage: 60})
 	if err := anchor.CreateAnchorTable(ctx, st.DB()); err != nil {
 		app.Logger.Error("v1 deps: anchors table creation failed", "error", err)
 		return fmt.Errorf("create anchors table: %w", err)

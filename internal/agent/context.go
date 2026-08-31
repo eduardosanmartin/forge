@@ -57,10 +57,10 @@ func (c *ContextAssembler) SetV1Deps(deps V1Deps) {
 }
 
 // NewContextAssembler creates a new ContextAssembler.
-// maxHistoryTurns defaults to 10 if <= 0.
+// maxHistoryTurns defaults to 8 if <= 0 (RNF-10-tuned, see the bench).
 func NewContextAssembler(toolsReg ToolsRegistryInterface, store StoreInterface, maxHistoryTurns int) *ContextAssembler {
 	if maxHistoryTurns <= 0 {
-		maxHistoryTurns = 10
+		maxHistoryTurns = 8
 	}
 	return &ContextAssembler{
 		toolsReg:        toolsReg,

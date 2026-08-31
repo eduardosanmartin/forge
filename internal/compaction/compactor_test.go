@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -129,5 +130,34 @@ func TestCompactorModelSelection(t *testing.T) {
 	}
 	if c.GetGenerationModel() != "qwen2.5-coder:7b" {
 		t.Errorf("expected generation model 7b, got %s", c.GetGenerationModel())
+	}
+}
+
+func TestCompactorSummaryCharsPerMessage(t *testing.T) {
+	turns := make([]Turn, 15)
+	for i := range turns {
+		turns[i] = Turn{Role: "user", Content: strings.Repeat("x", 200), Tokens: 50}
+	}
+	cfg := Config{SummaryCharsPerMessage: 60}
+	c := NewCompactor(cfg)
+	compacted, _, err := c.Compact(turns)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	summaryFound := false
+	for _, ct := range compacted {
+		if ct.Summary != "" {
+			summaryFound = true
+			// "RESUMEN: " + per-message "user: <60 chars>..." segments
+			if !strings.Contains(ct.Summary, strings.Repeat("x", 60)) {
+				t.Errorf("summary should keep 60 chars per message")
+			}
+			if strings.Contains(ct.Summary, strings.Repeat("x", 61)) {
+				t.Errorf("summary should truncate at 60 chars, kept more")
+			}
+		}
+	}
+	if !summaryFound {
+		t.Fatalf("expected a summary turn, got none")
 	}
 }
