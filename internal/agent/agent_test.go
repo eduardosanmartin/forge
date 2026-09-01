@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -458,6 +459,7 @@ func (m *mockProvider) Close() error {
 }
 
 type mockStore struct {
+	mu       sync.Mutex
 	sessions map[string]*store.Session
 	messages map[string][]store.Message
 }
@@ -472,6 +474,8 @@ func newMockStore() *mockStore {
 }
 
 func (m *mockStore) GetSession(ctx context.Context, id string) (store.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if s, ok := m.sessions[id]; ok {
 		return *s, nil
 	}
@@ -488,6 +492,8 @@ func (m *mockStore) GetSession(ctx context.Context, id string) (store.Session, e
 }
 
 func (m *mockStore) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	seq := len(m.messages[msg.SessionID])
 	msg.Seq = seq
 	msg.ID = int64(seq + 1)
@@ -497,6 +503,8 @@ func (m *mockStore) AppendMessage(ctx context.Context, msg *store.Message) (int,
 }
 
 func (m *mockStore) GetMessages(ctx context.Context, sessionID string, limit, offset int) ([]store.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	msgs := m.messages[sessionID]
 	if msgs == nil {
 		return []store.Message{}, nil
@@ -517,6 +525,8 @@ func (m *mockStore) GetMessages(ctx context.Context, sessionID string, limit, of
 }
 
 func (m *mockStore) GetMessagesSince(ctx context.Context, sessionID string, sinceSeq int) ([]store.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	msgs := m.messages[sessionID]
 	if msgs == nil {
 		return []store.Message{}, nil

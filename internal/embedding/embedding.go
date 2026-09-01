@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 )
 
@@ -44,19 +45,52 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// GenerateEmbedding generates a deterministic hash-based embedding for testing.
-// In production, replace with real embedding model call (Ollama, etc.).
+// GenerateEmbedding generates a deterministic token-based bag-of-words embedding
+// (hashing trick) for testing. It is a deterministic stand-in for a real model
+// (production can swap to Ollama etc.), but unlike the previous whole-text
+// hash it is token-overlap-aware: texts sharing vocabulary produce meaningfully
+// positive cosine, while unrelated texts remain near zero.
+// Tokenization: lowercased, split on non-alphanumeric runes, empty tokens skipped.
+// Each token hashes to a bucket (h % dim) with signed hashing (+1/-1 from a bit
+// of h) to zero-mean collision noise; the vector is then L2-normalized.
 func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
 	const dim = 384
 	emb := make([]float32, dim)
 
-	hash := hashString(text)
-	for i := 0; i < dim; i++ {
-		hash = hash*1664525 + 1013904223
-		emb[i] = float32(hash&0xFFFFFF)/0xFFFFFF*2.0 - 1.0
+	// Tokenize: lowercase + split on non-alphanumeric.
+	lower := strings.ToLower(text)
+	var tokens []string
+	var cur strings.Builder
+	for _, r := range lower {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			cur.WriteRune(r)
+		} else {
+			if cur.Len() > 0 {
+				tokens = append(tokens, cur.String())
+				cur.Reset()
+			}
+		}
+	}
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
 	}
 
-	// Normalize to unit vector
+	for _, tok := range tokens {
+		if tok == "" {
+			continue
+		}
+		h := hashString(tok)
+		bucket := int(h % uint32(dim))
+		// Signed hashing: use bit 0 of h for sign.
+		sign := float32(1)
+		if (h & 1) == 0 {
+			sign = -1
+		}
+		emb[bucket] += sign
+	}
+
+	// If no tokens (empty or only symbols), return zero vector (cosine will be 0).
+	// Otherwise L2-normalize to unit vector.
 	norm := float32(0)
 	for _, v := range emb {
 		norm += v * v

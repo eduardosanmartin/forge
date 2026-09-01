@@ -134,6 +134,7 @@ type ExecuteTurnParams struct {
 	EnableCompaction bool   `json:"enable_compaction,omitempty"`
 	EnableAnchoring  bool   `json:"enable_anchoring,omitempty"`
 	EnableRouting    bool   `json:"enable_routing,omitempty"`
+	EnableSkills     bool   `json:"enable_skills,omitempty"`
 }
 
 // GetMessagesParams for session.get_messages.

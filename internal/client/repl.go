@@ -27,6 +27,7 @@ type REPLOptions struct {
 	EnableCompaction bool
 	EnableAnchoring  bool
 	EnableRouting    bool
+	EnableSkills     bool
 }
 
 // REPL is an interactive line-oriented client for one forge session.
@@ -63,8 +64,8 @@ func (r *REPL) Run(ctx context.Context) error {
 	go r.drainEvents(eventCh)
 
 	r.writef("forge REPL - session %s\n", r.sessionID)
-	r.writef("V1 features: retrieval=%v compaction=%v anchoring=%v routing=%v\n",
-		r.v1Enabled.EnableRetrieval, r.v1Enabled.EnableCompaction, r.v1Enabled.EnableAnchoring, r.v1Enabled.EnableRouting)
+	r.writef("V1 features: retrieval=%v compaction=%v anchoring=%v routing=%v skills=%v\n",
+		r.v1Enabled.EnableRetrieval, r.v1Enabled.EnableCompaction, r.v1Enabled.EnableAnchoring, r.v1Enabled.EnableRouting, r.v1Enabled.EnableSkills)
 	r.writef("Type a message, /help for commands, /exit or Ctrl-D to quit.\n")
 
 	scanner := bufio.NewScanner(r.in)
@@ -166,6 +167,7 @@ func (r *REPL) printHelp() {
 	r.writeln("  --compaction   Enable hierarchical compaction")
 	r.writeln("  --anchoring    Enable persistent anchored facts")
 	r.writeln("  --routing      Enable cost-based model routing")
+	r.writeln("  --skills       Enable skills lazy-load injection")
 }
 
 func (r *REPL) cmdModel(ctx context.Context, line string) {
@@ -291,6 +293,7 @@ func (r *REPL) cmdTurn(ctx context.Context, line string) {
 			EnableCompaction: r.v1Enabled.EnableCompaction,
 			EnableAnchoring:  r.v1Enabled.EnableAnchoring,
 			EnableRouting:    r.v1Enabled.EnableRouting,
+			EnableSkills:     r.v1Enabled.EnableSkills,
 		}, &res)
 	if err != nil {
 		if IsCode(err, daemon.ErrCodeSessionHalted) {

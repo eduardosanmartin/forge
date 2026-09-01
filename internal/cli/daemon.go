@@ -19,6 +19,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
+	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 	"github.com/spf13/cobra"
@@ -184,10 +185,19 @@ func runServe(ctx context.Context, app *App, addr string) error {
 		return fmt.Errorf("create anchors table: %w", err)
 	}
 	anchorStore := anchor.NewAnchorStoreSQL(st.DB())
+	// Skills manager: owns its own embedding store internally; missing directory is NOT an error.
+	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger})
+	defer skillsMgr.Close()
+	if results, err := skillsMgr.Scan(filepath.Join(workspaceRoot, ".forge", "skills")); err != nil {
+		app.Logger.Warn("skills scan: some skills failed to load", "error", err, "results", results)
+	} else {
+		app.Logger.Info("skills manager ready", "loaded", len(skillsMgr.Loaded()), "enabled", len(skillsMgr.Enabled()))
+	}
 	v1Deps := agent.V1Deps{
 		Retriever:   retriever,
 		Compactor:   compactor,
 		AnchorStore: anchorStore,
+		Skills:      skillsMgr,
 	}
 
 	// Create tools registry (base five tools + the six v1 feature tools on

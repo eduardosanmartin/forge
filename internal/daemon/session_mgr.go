@@ -164,7 +164,7 @@ func (m *SessionManager) DeleteSession(ctx context.Context, id string) error {
 }
 
 // ExecuteTurn executes a single agent turn for a session.
-// v1Flags can include: enableRetrieval, enableCompaction, enableAnchoring, enableRouting
+// v1Flags can include: enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills
 func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage string, v1Flags ...bool) ([]store.Message, error) {
 	// Check if session exists
 	session, err := m.store.GetSession(ctx, sessionID)
@@ -187,11 +187,19 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	enableCompaction := false
 	enableAnchoring := false
 	enableRouting := false
-	if len(v1Flags) >= 4 {
+	enableSkills := false
+	if len(v1Flags) >= 5 {
 		enableRetrieval = v1Flags[0]
 		enableCompaction = v1Flags[1]
 		enableAnchoring = v1Flags[2]
 		enableRouting = v1Flags[3]
+		enableSkills = v1Flags[4]
+	} else if len(v1Flags) >= 4 {
+		enableRetrieval = v1Flags[0]
+		enableCompaction = v1Flags[1]
+		enableAnchoring = v1Flags[2]
+		enableRouting = v1Flags[3]
+		// enableSkills remains false for 4-flag callers (backward-compatible)
 	} else if session.ID != "" && session.Metadata != nil {
 		// Fallback to session metadata
 		if v, ok := session.Metadata["v1_retrieval"].(bool); ok {
@@ -206,6 +214,9 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		if v, ok := session.Metadata["v1_routing"].(bool); ok {
 			enableRouting = v
 		}
+		if v, ok := session.Metadata["v1_skills"].(bool); ok {
+			enableSkills = v
+		}
 	}
 
 	// Persist the resolved v1 flags in session metadata for the agent's
@@ -219,12 +230,14 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	metadataChanged := session.Metadata["v1_retrieval"] != enableRetrieval ||
 		session.Metadata["v1_compaction"] != enableCompaction ||
 		session.Metadata["v1_anchoring"] != enableAnchoring ||
-		session.Metadata["v1_routing"] != enableRouting
+		session.Metadata["v1_routing"] != enableRouting ||
+		session.Metadata["v1_skills"] != enableSkills
 	if metadataChanged {
 		session.Metadata["v1_retrieval"] = enableRetrieval
 		session.Metadata["v1_compaction"] = enableCompaction
 		session.Metadata["v1_anchoring"] = enableAnchoring
 		session.Metadata["v1_routing"] = enableRouting
+		session.Metadata["v1_skills"] = enableSkills
 		_ = m.store.UpdateSessionMetadata(ctx, sessionID, session.Metadata)
 	}
 

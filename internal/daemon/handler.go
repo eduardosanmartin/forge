@@ -155,7 +155,7 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 	}
 
 	messages, err := h.mgr.ExecuteTurn(ctx, params.SessionID, params.UserMessage,
-		params.EnableRetrieval, params.EnableCompaction, params.EnableAnchoring, params.EnableRouting)
+		params.EnableRetrieval, params.EnableCompaction, params.EnableAnchoring, params.EnableRouting, params.EnableSkills)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrSessionNotFound):

@@ -40,15 +40,16 @@ func init() {
 
 func newRunCommand() *cobra.Command {
 	var (
-		jsonOut        bool
-		sessionID      string
+		jsonOut          bool
+		sessionID        string
 		enableRetrieval  bool
 		enableCompaction bool
 		enableAnchoring  bool
 		enableRouting    bool
+		enableSkills     bool
 	)
 	cmd := &cobra.Command{
-		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] <prompt>",
+		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills] <prompt>",
 		Short: "Execute one prompt non-interactively through the daemon",
 		Long: "Runs a single agent turn without entering the interactive REPL. " +
 			"With --json only the structured OneShotResult is printed on stdout.\n\n" +
@@ -59,7 +60,8 @@ func newRunCommand() *cobra.Command {
 			"  --routing      Enable cost-based model routing per step (RF-2.4/2.5)\n" +
 			"                 (this build: selects the generation-step model from\n" +
 			"                 providers.<name>.model_roles; other steps are deterministic\n" +
-			"                 and need no model)",
+			"                 and need no model)\n" +
+			"  --skills       Enable skills lazy-load injection (RF-4.2)",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return usageErrorf("run accepts exactly 1 prompt argument, got %d", len(args))
@@ -71,7 +73,7 @@ func newRunCommand() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
-				enableRetrieval, enableCompaction, enableAnchoring, enableRouting)
+				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print only the machine-readable JSON result on stdout")
@@ -80,11 +82,12 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableCompaction, "compaction", false, "enable hierarchical compaction (v1)")
 	cmd.Flags().BoolVar(&enableAnchoring, "anchoring", false, "enable persistent anchored facts (v1)")
 	cmd.Flags().BoolVar(&enableRouting, "routing", false, "enable cost-based model routing (v1)")
+	cmd.Flags().BoolVar(&enableSkills, "skills", false, "enable skills lazy-load injection (v1)")
 	return cmd
 }
 
 func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool,
-	enableRetrieval, enableCompaction, enableAnchoring, enableRouting bool) error {
+	enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills bool) error {
 
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
@@ -98,6 +101,7 @@ func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool,
 		EnableCompaction: enableCompaction,
 		EnableAnchoring:  enableAnchoring,
 		EnableRouting:    enableRouting,
+		EnableSkills:     enableSkills,
 	})
 	if err != nil {
 		return fmt.Errorf("one-shot turn failed: %w", err)

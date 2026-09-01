@@ -11,6 +11,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
+	"github.com/eduardosanmartin/forge/internal/skill"
 )
 
 // systemPrompt is the fixed system prompt describing forge capabilities,
@@ -48,6 +49,9 @@ type V1Deps struct {
 	Retriever   *retrieval.Retriever
 	Compactor   *compaction.Compactor
 	AnchorStore *anchor.AnchorStoreSQL
+	// Skills is the skills manager for lazy-load semantic injection (RF-4.2).
+	// Nil disables skills injection.
+	Skills *skill.Manager
 }
 
 // SetV1Deps wires the optional v1 feature dependencies. Intended to be
@@ -97,6 +101,7 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 	enableRetrieval := false
 	enableCompaction := false
 	enableAnchoring := false
+	enableSkills := false
 	session, err := c.store.GetSession(ctx, sessionID)
 	if err != nil {
 		// Session not found is not fatal for context building; we'll proceed without anchored facts
@@ -122,6 +127,9 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			}
 			if v, ok := session.Metadata["v1_anchoring"].(bool); ok {
 				enableAnchoring = v
+			}
+			if v, ok := session.Metadata["v1_skills"].(bool); ok {
+				enableSkills = v
 			}
 		}
 
@@ -163,6 +171,19 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 					Role:    "system",
 					Content: sb.String(),
 				})
+			}
+		}
+
+		// Skills (v1): lazy-load injection — only enabled skills whose description
+		// semantically matches the current user message get injected (RF-4.2).
+		if enableSkills && c.v1Deps.Skills != nil && userMessage != "" {
+			if skills, err := c.v1Deps.Skills.Relevant(userMessage); err == nil && len(skills) > 0 {
+				for _, sk := range skills {
+					messages = append(messages, llm.Message{
+						Role:    "system",
+						Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
+					})
+				}
 			}
 		}
 	}

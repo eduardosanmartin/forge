@@ -66,6 +66,9 @@ type RunOptions struct {
 
 	// EnableRouting enables cost-based model routing per step (v1).
 	EnableRouting bool
+
+	// EnableSkills enables skills lazy-load injection (v1).
+	EnableSkills bool
 }
 
 // UsageJSON carries token usage in wire-friendly JSON shape.
@@ -124,6 +127,7 @@ func RunOneShot(ctx context.Context, cl *Client, prompt string, opts RunOptions)
 			EnableCompaction: opts.EnableCompaction,
 			EnableAnchoring:  opts.EnableAnchoring,
 			EnableRouting:    opts.EnableRouting,
+			EnableSkills:     opts.EnableSkills,
 		}, &res); err != nil {
 		return nil, fmt.Errorf("execute turn: %w", err)
 	}

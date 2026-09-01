@@ -22,9 +22,10 @@ func newChatCommand() *cobra.Command {
 		enableCompaction bool
 		enableAnchoring  bool
 		enableRouting    bool
+		enableSkills     bool
 	)
 	cmd := &cobra.Command{
-		Use:   "chat [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing]",
+		Use:   "chat [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills]",
 		Short: "Interactive REPL against the running forge daemon",
 		Long: "Opens an interactive session against the daemon started with " +
 			"'forge serve'. Type messages or /help inside the REPL; /exit or " +
@@ -36,10 +37,11 @@ func newChatCommand() *cobra.Command {
 			"  --routing      Enable cost-based model routing per step (RF-2.4/2.5)\n" +
 			"                 (this build: selects the generation-step model from\n" +
 			"                 providers.<name>.model_roles; other steps are deterministic\n" +
-			"                 and need no model)",
+			"                 and need no model)\n" +
+			"  --skills       Enable skills lazy-load injection (RF-4.2)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runChat(cmd.Context(), sessionID,
-				enableRetrieval, enableCompaction, enableAnchoring, enableRouting)
+				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
 		},
 	}
 	cmd.Flags().StringVar(&sessionID, "session", "", "attach to an existing session id (default: start a new session)")
@@ -47,11 +49,12 @@ func newChatCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&enableCompaction, "compaction", false, "enable hierarchical compaction (v1)")
 	cmd.Flags().BoolVar(&enableAnchoring, "anchoring", false, "enable persistent anchored facts (v1)")
 	cmd.Flags().BoolVar(&enableRouting, "routing", false, "enable cost-based model routing (v1)")
+	cmd.Flags().BoolVar(&enableSkills, "skills", false, "enable skills lazy-load injection (v1)")
 	return cmd
 }
 
 func runChat(ctx context.Context, sessionID string,
-	enableRetrieval, enableCompaction, enableAnchoring, enableRouting bool) error {
+	enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills bool) error {
 
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
@@ -65,6 +68,7 @@ func runChat(ctx context.Context, sessionID string,
 			EnableCompaction: enableCompaction,
 			EnableAnchoring:  enableAnchoring,
 			EnableRouting:    enableRouting,
+			EnableSkills:     enableSkills,
 		})
 	if err := repl.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("repl: %w", err)
