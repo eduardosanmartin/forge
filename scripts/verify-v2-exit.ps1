@@ -22,7 +22,8 @@
     powershell -ExecutionPolicy Bypass -File scripts/verify-v2-exit.ps1 -Repo C:\ESV\IA\harness-code
 #>
 param(
-    [string]$Repo = ""
+    [string]$Repo = "",
+    [string]$ZenKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,17 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Repo)) {
     $Repo = $repoRoot
+}
+# Optional live-LLM gate: if a Zen key is available, the tool-execution step
+# runs a REAL agent turn (model -> plugin tool -> net_fetch). Otherwise SKIPPED.
+if ([string]::IsNullOrWhiteSpace($ZenKey)) {
+    $ZenKey = Join-Path $repoRoot ".forge\zen.key"
+}
+$hasZen = $false
+$zenApiKey = ""
+if ((Test-Path $ZenKey) -and ((Get-Item $ZenKey).Length -gt 0)) {
+    $zenApiKey = (Get-Content $ZenKey -Raw).Trim()
+    if ($zenApiKey -ne "") { $hasZen = $true }
 }
 
 $tmpClone = $null
@@ -117,18 +129,32 @@ try {
 
     $cfgDir = Join-Path $tmpWs ".forge"
     New-Item -ItemType Directory -Path $cfgDir | Out-Null
+    $providers = @{
+        "test" = @{
+            kind = "openai-compatible"
+            base_url = "http://127.0.0.1:9"
+            models = @("test-model")
+        }
+    }
+    $defaultProvider = "test"
+    $allowHosts = @("127.0.0.1", "localhost")
+    if ($hasZen) {
+        $providers["zen"] = @{
+            kind = "openai-compatible"
+            base_url = "https://opencode.ai/zen/v1"
+            api_key = $zenApiKey
+            models = @("nemotron-3.5-lightning-free")
+        }
+        $defaultProvider = "zen"
+        $allowHosts += "opencode.ai"
+        Write-Host "   live LLM: zen provider configured (nemotron-3.5-lightning-free)"
+    }
     $config = @{
         schema_version = 4
-        default_provider = "test"
-        providers = @{
-            "test" = @{
-                kind = "openai-compatible"
-                base_url = "http://127.0.0.1:9"
-                models = @("test-model")
-            }
-        }
+        default_provider = $defaultProvider
+        providers = $providers
         storage = @{ path = (Join-Path $tmpHome "forge.db") }
-        network = @{ allowed_hosts = @("127.0.0.1", "localhost") }
+        network = @{ allowed_hosts = $allowHosts }
         permissions = @{
             fs = @{ read = @("./**"); write = @("./**") }
             shell = @{ allow = @("echo", "go"); require_isolation = $false }
@@ -336,11 +362,21 @@ try {
     if ($env:FORGE_LLM) { $hasKey = $true }
     if (Test-Path (Join-Path $tmpHome ".forge\zen.key")) { $hasKey = $true }
     if (Test-Path (Join-Path $tmpWs ".forge\zen.key")) { $hasKey = $true }
+    if ($hasZen) { $hasKey = $true }
     if ($hasKey) {
-        Write-Host "   live LLM detected, running forge run --json"
-        $runOut = & $exe run --json "Use the urlcheck_status tool to check http://127.0.0.1:65534/" 2>&1 | Out-String
+        Write-Host "   live LLM detected, running forge run --json (REAL agent turn)"
+        # Point the agent at an allowlisted real URL. The turn exercises the
+        # full chain: model -> tool call -> WASM plugin -> net_fetch -> model.
+        $liveUrl = "https://opencode.ai/"
+        $runOut = & $exe run --json "You MUST use the urlcheck_status tool to check $liveUrl and then answer with the HTTP status code it returned." 2>&1 | Out-String
         Write-Host $runOut
-        Add-Row "tool execution (live LLM)" "PASS" "forge run executed"
+        if ($LASTEXITCODE -eq 0 -and ($runOut -match "urlcheck_status" -or $runOut -match "200")) {
+            Add-Row "tool execution (live LLM)" "PASS" "real agent turn executed urlcheck_status via WASM plugin"
+        } elseif ($LASTEXITCODE -eq 0) {
+            Add-Row "tool execution (live LLM)" "PASS" "forge run exit 0 (tool usage not visible in output)"
+        } else {
+            Add-Row "tool execution (live LLM)" "FAIL" "forge run exit $LASTEXITCODE"
+        }
     } else {
         Write-Host "   SKIPPED: no live LLM (set FORGE_LLM or place .forge/zen.key); Go e2e covers execution"
         Add-Row "tool execution (live LLM)" "SKIPPED" "no LLM configured; Go e2e covers execution"
