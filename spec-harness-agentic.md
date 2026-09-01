@@ -1,7 +1,7 @@
-﻿# SPEC â€” Harness de Desarrollo Agentic a Medida
+# SPEC â€” Harness de Desarrollo Agentic a Medida
 
 **Nombre de proyecto (working title):** `forge` *(placeholder â€” renombrar libremente)*
-**VersiÃ³n del documento:** 0.8
+**Versión del documento:** 0.9
 **Estado:** Borrador para validaciÃ³n de arquitectura
 **Alcance:** DefiniciÃ³n funcional, no funcional y arquitectÃ³nica de un harness de desarrollo con agentes IA, inspirado en OpenCode y Claude Code, optimizado para modelos locales, eficiencia de contexto/tokens, y extensibilidad total.
 
@@ -16,7 +16,9 @@ Herramientas como OpenCode y Claude Code resuelven bien el caso general, pero:
 
 Este proyecto no busca ser "mejor en todos los ejes" que herramientas con equipo detrÃ¡s â€” busca ser **superior en el caso de uso propio**: eficiencia de contexto, control total del stack, y una arquitectura que crezca por plugins en vez de por reescritura.
 
-**Principio rector â€” bootstrapping:** forge se construye a sÃ­ mismo. La Ãºnica versiÃ³n desarrollada con herramientas externas es v0; desde ahÃ­, cada MVP se implementa usando el MVP anterior como herramienta principal de trabajo. No es solo filosofÃ­a de proceso: es criterio de salida verificable en cada versiÃ³n (Â§6) y la prueba de honestidad del producto â€” un harness agÃ©ntico incapaz de sostener su propio desarrollo no cumple su razÃ³n de ser.
+**Principio rector — eficiencia de contexto y tokens:** el diferencial del proyecto es sostener sesiones agénticas reales minimizando los tokens de contexto por turno (RNF-2.1-2.5). Toda decisión de diseño se valida contra ese objetivo medido en el banco de pruebas de RNF-10 (§6).
+
+**Bootstrapping (requerimiento deseable, diferido):** forge se construye a sí mismo. Implementar cada MVP usando el MVP anterior como herramienta principal de trabajo ya no es principio rector ni criterio de salida: queda registrado como requerimiento deseable, a abordar en algún momento del desarrollo cuando el core y su arquitectura estén más depurados — posiblemente hacia el final (v1.0 o posterior). Hasta entonces, el desarrollo usa herramientas externas sin restricción. Cuando se retome, recupera su condición de honestidad original: un harness agéntico que no puede sostener su propio desarrollo no cumple del todo su razón de ser.
 
 **No-objetivos explÃ­citos (v1):**
 - No busca paridad de features con Claude Code/OpenCode desde el dÃ­a uno.
@@ -684,13 +686,13 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
   - **ImplicaciÃ³n concreta para modelos:** en el Perfil A, el objetivo son modelos de 1-3B parÃ¡metros (cuantizados, ej. GGUF Q4_K_M) para los pasos baratos del ruteo (RF-2.4/2.5 â€” clasificaciÃ³n, queries de retrieval, resÃºmenes) y de 7-8B para generaciÃ³n real. Modelos de 13B+ son usables pero notablemente mÃ¡s lentos en CPU; 30B+ se considera poco prÃ¡ctico para trabajo interactivo en este perfil y se reserva para el Perfil B. Estas cifras son una hipÃ³tesis de diseÃ±o razonable, no una mediciÃ³n â€” deben confirmarse con el banco de pruebas de RNF-10 antes de fijarse como objetivo definitivo.
 - **Riesgo de autonomÃ­a plena (RF-11)**: es, con diferencia, el componente de mayor riesgo del sistema. Un ciclo de auto-correcciÃ³n mal acotado puede degenerar en bucles infinitos, gasto descontrolado de tokens/costo, o "arreglos" que satisfacen la mÃ©trica (tests pasan) sin satisfacer la intenciÃ³n real de la SPEC. Las mitigaciones de diseÃ±o (circuit breaker en RF-11.5, piso de seguridad no configurable en RNF-8.2, aislamiento obligatorio en worktree en RNF-8.1) reducen el riesgo pero no lo eliminan â€” no reemplazan revisiÃ³n humana real en los primeros usos de este modo, especialmente sobre proyectos/repos que importan.
 - **Alcance de la seguridad por diseÃ±o (RNF-4, RNF-9)**: lo cubierto en este documento es una primera pasada de diseÃ±o â€” postura deny-por-defecto, tratamiento de contenido no confiable, aislamiento por capas, allowlist de red, log a prueba de manipulaciÃ³n. No reemplaza un modelado de amenazas formal ni una revisiÃ³n de seguridad externa. Antes de habilitar v1.0 (ejecuciÃ³n autÃ³noma, Â§6) sobre un proyecto `regulado` o `datos-sensibles` real, corresponde una revisiÃ³n dedicada â€” no basta con que el diseÃ±o en papel luzca razonable.
-- **Riesgo de velocidad del bootstrapping (Â§0)**: construir v1 usando v0 es hacerlo con la herramienta mÃ¡s dÃ©bil del ciclo â€” modelo local chico, sin retrieval ni compactaciÃ³n (justo lo que se estÃ¡ construyendo), y con los bugs propios de una v0. El costo es tiempo puro frente a usar OpenCode/Claude Code para el mismo trabajo. *MitigaciÃ³n:* aceptarlo como inversiÃ³n de validaciÃ³n â€” si v0 no alcanza para construir v1, la tesis del producto se falsa temprano y barato â€” y convertir cada dolor concreto sufrido con v0 en requisito priorizado de v1. **VÃ¡lvula de escape acordada â€” cambiar el modelo, no la herramienta:** si la velocidad de depuraciÃ³n llegara a ser inviable con modelos locales, v0 se conecta temporalmente a un modelo de frontera vÃ­a su adaptador OpenAI-compatible (RF-2.1/RF-2.3) hasta volver a ser viable el modelo local. El bootstrapping de herramienta queda intacto â€” el criterio "v1 se desarrolla usando v0" sigue cumpliÃ©ndose â€” bajo dos condiciones: toda excepciÃ³n se registra con motivo y duraciÃ³n, y las mÃ©tricas de RNF-10 se validan siempre contra el modelo local objetivo â€” optimizar compactaciÃ³n/retrieval medido contra un modelo de frontera puede sesgar el diseÃ±o hacia un perfil de contexto que no representa al Perfil A real.
+- **Riesgo de velocidad del desarrollo con modelos locales (§5)**: construir contra herramientas débiles o modelos chicos cuesta tiempo puro frente a OpenCode/Claude Code. *Mitigación vigente:* el desarrollo del core y su arquitectura se hace con herramientas externas y modelos de frontera vía el adaptador OpenAI-compatible (RF-2.1/RF-2.3), sin ruido de bugs ni límites de rendimiento de modelos locales. Las métricas de eficiencia de contexto (RNF-2.x) se validan con el banco determinístico model-free de RNF-10, que mide el payload del request y no depende del modelo — neutralizando el sesgo de diseño hacia perfiles de contexto de frontera. La validación de rendimiento con el modelo local objetivo (tokens/seg, TTFT, prefill, Perfil A/B) queda diferida hasta que la arquitectura esté afinada; el bootstrapping de herramienta es un requerimiento deseable diferido (§0).
 
 ---
 
 ## 6. Hoja de ruta de implementaciÃ³n (MVP v0 â†’ producto completo)
 
-**Advertencia honesta antes de la tabla:** esto es mucho trabajo para una sola persona. La Ãºnica forma de que converja es tratar cada MVP como una versiÃ³n realmente usable (aunque incompleta) â€” no una lista de checkboxes que solo tiene sentido al final. Cada corte de abajo deberÃ­a poder usarse de verdad para trabajo real antes de pasar al siguiente. Y desde v1 ese trabajo real incluye, por el principio de bootstrapping (Â§0), el propio desarrollo del harness: cada versiÃ³n se construye usando la anterior.
+**Advertencia honesta antes de la tabla:** esto es mucho trabajo para una sola persona. La única forma de que converja es tratar cada MVP como una versión realmente usable (aunque incompleta) — no una lista de checkboxes que solo tiene sentido al final. Cada corte de abajo debería poder usarse de verdad para trabajo real antes de pasar al siguiente. El desarrollo de cada versión se hace con herramientas externas; el bootstrapping queda como requerimiento deseable diferido (§0).
 
 ### MVP v0 â€” NÃºcleo interactivo mÃ­nimo
 **Tema:** un agente conversacional real, con herramientas reales, sobre un workspace real. Nada elegante todavÃ­a.
@@ -698,7 +700,7 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
 - **RF cubiertos:** RF-1.1 (agente + tools sobre workspace, sin subagentes aÃºn), RF-2.1 (un solo adaptador: OpenAI-compatible vÃ­a Ollama), RF-2.3 (cambiar modelo sin reiniciar), RF-3.1 (memoria persistente simple, SQLite sin vectorial), RF-6.1-6.3 (CLI completa), RF-10.1-10.2 (git bÃ¡sico + shell), RF-1.4 parcial (sesiÃ³n sobrevive a un cierre de cliente, sin el resto de background jobs complejos).
 - **RNF cubiertos â€” y esto es lo que quiero remarcarte:** RNF-1.1/1.2/1.3 (mÃ©tricas base), RNF-3.1 (independencia de proveedor â€” decisiÃ³n de arquitectura que no se puede corregir despuÃ©s sin reescritura), RNF-4.1 (deny-por-defecto), RNF-4.3/4.4 (local-first, secrets fuera de logs), **RNF-4.5 (tratar contenido no confiable como dato, no como instrucciÃ³n) y RNF-4.7 (aislamiento de shell del propio core vÃ­a contenedor/seccomp)** â€” no son "seguridad para despuÃ©s": si el core ejecuta shell sin esto desde el dÃ­a uno, cada mes que pasa hace mÃ¡s caro meterlo retroactivamente. **RNF-4.8** (parada de emergencia) y **RNF-4.9** (allowlist de red por defecto) tambiÃ©n entran aquÃ­ â€” son baratos de construir ahora y muy caros de agregar despuÃ©s de que el hÃ¡bito de "todo pasa" ya estÃ© instalado. RNF-6.1 (logging estructurado), RNF-7.1/7.2 (cambios de direcciÃ³n a mitad de tarea, config versionable).
 - **Diferido explÃ­citamente:** subagentes, retrieval, plugins, skills, GUI, SDD, branching de sesiones, ejecuciÃ³n autÃ³noma, RNF-8/RNF-9 (no aplican sin modo autÃ³nomo), adaptadores remotos.
-- **Criterio de salida:** podÃ©s sostener una conversaciÃ³n con herramientas reales (leer/escribir archivos, correr comandos, commitear) contra un modelo local, sin que se degrade en sesiones largas, y sin que el core pueda hacer nada fuera de lo que vos declaraste permitido. Es la Ãºnica versiÃ³n que se construye sin sÃ­ misma: herramientas externas (OpenCode/Claude Code u otras) hacen de andamio â€” este hito es la semilla del bootstrapping (Â§0).
+- **Criterio de salida:** podés sostener una conversación con herramientas reales (leer/escribir archivos, correr comandos, commitear) contra un modelo local, sin que se degrade en sesiones largas, y sin que el core pueda hacer nada fuera de lo que vos declaraste permitido. Es la única versión que se construye sin sí misma: herramientas externas (OpenCode/Claude Code u otras) hacen de andamio — históricamente la semilla del bootstrapping (§0), hoy requerimiento deseable diferido.
 
 **Aclaraciones de implementaciÃ³n â€” v0 (decididas durante exploraciÃ³n agÃ©ntica del proyecto):**
 1. **MCP:** las tools nativas (file read/write, shell, git) se implementan como funciones Go en proceso, no como servidores MCP separados â€” pero con la misma forma de interfaz (nombre, descripciÃ³n, JSON schema, dispatch) que un tool de MCP, para que v2 solo agregue transporte/cliente MCP sobre la abstracciÃ³n existente, sin reescribir el contrato.
@@ -713,17 +715,22 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
 - **RF cubiertos:** RF-3.2 (retrieval selectivo), RF-3.3 (compactaciÃ³n jerÃ¡rquica), RF-3.4 (memoria inspeccionable/editable), RF-3.5 (anclaje), RF-2.4/2.5 (ruteo por costo de paso).
 - **RNF cubiertos:** RNF-2.1-2.5 completos (mediciÃ³n de tokens, prompt-caching, objetivo â‰¥40%, KV-cache local, techo de contexto), RNF-1.4 (validado, no solo asumido), RNF-1.5/1.6 (concurrencia realista, reserva de nÃºcleos), **RNF-10 completo (banco de pruebas)** â€” deliberadamente aquÃ­ y no al final: sin medir desde este punto, "eficiencia de contexto" es una afirmaciÃ³n de fe, no un requisito cumplido. RNF-6.3 (mÃ©tricas de costo, junto con RNF-2.1).
 - **Nota de dependencia:** RNF-4.12 (aprobaciÃ³n humana para anclar contenido no confiable) empieza a aplicar aquÃ­ en su mitad de memoria (RF-3.5) â€” la otra mitad (skills, RF-4.3) llega en v2.
-- **Criterio de salida:** el banco de pruebas de RNF-10 confirma el â‰¥40% de reducciÃ³n de tokens sobre el Perfil A real (Â§5) â€” no es un objetivo de diseÃ±o, es un nÃºmero medido. AdemÃ¡s: todo v1 se desarrolla usando v0 como herramienta principal de trabajo â€” primer ejercicio real de bootstrapping, con la herramienta mÃ¡s cruda del ciclo.
+- **Criterio de salida:** el banco de pruebas de RNF-10 confirma el ≥40% de reducción de tokens sobre el Perfil A real (§5) — no es un objetivo de diseño, es un número medido.
 
 ### MVP v2 — Se extiende sin tocar el core
 **Tema:** extensibilidad real vía plugins y skills, y el primer adaptador remoto.
 
 - **RF cubiertos:** RF-4.1-4.4 (skills con lazy-load y aprobación humana), RF-5.1-5.4 (plugins WASM), **RF-2.2 (adaptadores Anthropic/Gemini)** — entra aquí, no en v0: el primer adaptador remoto es, en los hechos, el primer "plugin real" que ejercita el sistema de extensibilidad recién construido, en vez de ser un caso especial cableado al core.
 - **RNF cubiertos:** RNF-3.2 (extender vía plugin sin tocar el core — ahora se prueba de verdad), RNF-3.3 (tests de integración sobre la API interna), RNF-4.2 (mínimo privilegio en plugins), RNF-4.6 (procedencia/firma de plugins y skills externos), RNF-4.12 completo (incluye ahora la mitad de skills), RNF-6.2 (grabación/replay de sesiones — necesario para que la minería de skills tenga de dónde sacar trayectorias).
-- **Criterio de salida:** instalás un plugin de terceros y una skill sin recompilar el binario, y ambos corren aislados con permisos mínimos declarados. **Además: el wizard CLI (`forge plugin new`, `forge skill new`) permite crear plugins y skills válidos desde cero sin editar archivos a mano. v2 se desarrolla usando v1.**ertos:** RF-1.2/1.3 (subagentes con contexto acotado), RF-9.1-9.3 (branching, merge, multi-run).
+- **Criterio de salida:** instalás un plugin de terceros y una skill sin recompilar el binario, y ambos corren aislados con permisos mínimos declarados. **Además: el wizard CLI (orge plugin new, orge skill new) permite crear plugins y skills válidos desde cero sin editar archivos a mano.**
+
+### MVP v3 — Multiagente (subagentes y ramas)
+**Tema:** orquestación multiagente con contexto acotado, y ramas de ejecución por sesión.
+
+- **RF cubiertos:** RF-1.2/1.3 (subagentes con contexto acotado), RF-9.1-9.3 (branching, merge, multi-run).
 - **RNF cubiertos:** re-validaciÃ³n de RNF-1.5 con subagentes reales (no solo teÃ³rica como en v1) â€” la cola/scheduler ahora tiene contenciÃ³n de verdad que probar.
 - **Diferido:** RF-10.3 (integraciÃ³n GitHub) es explÃ­citamente "deseable, no v1" â€” entra acÃ¡ o despuÃ©s, sin bloquear nada.
-- **Criterio de salida:** el orquestador delega una tarea real a un subagente con contexto acotado, y el resultado consolidado vuelve sin inflar el contexto del orquestador (medible con el banco de RNF-10). AdemÃ¡s: v3 se desarrolla usando v2 â€” todavÃ­a monoagente; los subagentes que introduce esta versiÃ³n se estrenan construyendo lo que viene despuÃ©s.
+- **Criterio de salida:** el orquestador delega una tarea real a un subagente con contexto acotado, y el resultado consolidado vuelve sin inflar el contexto del orquestador (medible con el banco de RNF-10).
 
 ### MVP v4 â€” Superficies adicionales
 **Tema:** GUI web, SDD formal, auto-aprendizaje activo, portabilidad validada.
@@ -731,7 +738,7 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
 - **RF cubiertos:** RF-7.1-7.4 (GUI web), RF-8.1-8.4 (SDD formal â€” descomposiciÃ³n de spec en tareas trackeables), auto-aprendizaje activo (minerÃ­a de patrones sobre las trayectorias grabadas desde v2).
 - **RNF cubiertos:** RNF-5.1/5.2 (portabilidad â€” validaciÃ³n real en Linux/Windows, no solo "el lenguaje lo permite"), RNF-4.11 (transporte cifrado para acceso remoto a la GUI).
 - **Nota de reutilizaciÃ³n:** el motor de descomposiciÃ³n de RF-8.2 (spec â†’ tareas) es el mismo que necesita RF-11.3 â€” construirlo bien acÃ¡ evita reconstruirlo en la fase siguiente.
-- **Criterio de salida:** la GUI muestra el mismo estado que la CLI en tiempo real, y una SPEC real se descompone y trackea automÃ¡ticamente sin intervenciÃ³n manual. AdemÃ¡s: v4 se desarrolla usando v3 â€” el desarrollo mismo del SDD y la GUI sirve como banco de pruebas de la orquestaciÃ³n multiagente sobre tareas reales.
+- **Criterio de salida:** la GUI muestra el mismo estado que la CLI en tiempo real, y una SPEC real se descompone y trackea automáticamente sin intervención manual.
 
 ### v1.0 â€” Producto completo: ejecuciÃ³n autÃ³noma end-to-end
 **Tema:** RF-11 completo â€” el modo de mayor riesgo, por eso va Ãºltimo.
@@ -739,7 +746,7 @@ Cada subagente recibe **solo** el contexto necesario para su sub-tarea â€” 
 - **RF cubiertos:** RF-11.1-11.10 completos, casos extraordinarios (ambigÃ¼edad Tier 3, Â§3.7).
 - **RNF cubiertos:** RNF-8.1-8.4 completos (autonomÃ­a segura), RNF-9.1-9.4 completos (techo de sensibilidad de proyecto), RNF-4.8/4.9 ya existÃ­an desde v0 pero se validan bajo carga real, RNF-4.10 (log a prueba de manipulaciÃ³n â€” reciÃ©n tiene sentido con RNF-9 ya activo).
 - **Rollout dentro de esta versiÃ³n, no como MVP aparte:** la progresiÃ³n `dry_run â†’ supervised â†’ checkpoint â†’ autonomous` (Â§7.2) se recorre sobre proyectos reales de sensibilidad `general` antes de considerar el modo maduro.
-- **Criterio de salida:** un run manifest completo corre en modo `checkpoint` sobre un proyecto real de baja sensibilidad, sin intervenciÃ³n fuera de los checkpoints declarados, con reporte final coherente (RF-11.10) y sin que el piso de seguridad no configurable (RNF-8.2) haya tenido que intervenir. AdemÃ¡s: v1.0 se desarrolla usando v4, y una vez validado el flujo, parte de sus tareas restantes puede ejecutarlas el propio harness en modo `checkpoint` â€” el cierre natural del bootstrapping.
+- **Criterio de salida:** un run manifest completo corre en modo `checkpoint` sobre un proyecto real de baja sensibilidad, sin intervención fuera de los checkpoints declarados, con reporte final coherente (RF-11.10) y sin que el piso de seguridad no configurable (RNF-8.2) haya tenido que intervenir. Como requerimiento deseable diferido (§0): una vez validado el flujo, parte de las tareas restantes puede ejecutarlas el propio harness en modo `checkpoint` — primer paso natural del bootstrapping cuando se decida retomarlo.
 
 ---
 
@@ -839,6 +846,7 @@ hitl:
 
 ## Registro de revisiones
 
+- **0.9** — Gobernanza (decisión del owner, 2026-08-31): el bootstrapping (§0) deja de ser principio rector y criterio de salida; pasa a requerimiento deseable diferido — a abordar cuando el core esté más depurado, posiblemente al final (v1.0 o posterior). El principio rector pasa a ser la eficiencia de contexto y tokens (RNF-2.x). La validación de rendimiento con modelos locales queda diferida hasta tener la arquitectura afinada; el banco de RNF-10 opera model-free (determinístico). Reparación estructural: se restaura el encabezado de MVP v3 (había quedado fusionado con la sección v2).
 - **0.8** â€” Se hace explÃ­cito el principio rector de bootstrapping (Â§0) y se incorpora como criterio de salida verificable en cada versiÃ³n de la hoja de ruta (Â§6): desde v1, cada MVP se desarrolla usando el anterior. Incluye el riesgo de velocidad asociado en Â§5, con vÃ¡lvula de escape por capacidad de modelo (frontera temporal vÃ­a RF-2.1/2.3) sin suspender el bootstrapping de herramienta.
 - **0.7** â€” Borrador inicial para validaciÃ³n de arquitectura.
 

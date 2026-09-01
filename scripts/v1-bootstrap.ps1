@@ -1,4 +1,4 @@
-﻿<#>
+<#>
 .SYNOPSIS
     Bootstrap script para iniciar v1 development con forge v0.
     Ejecutar desde una NUEVA sesión de terminal (fresh session).
@@ -95,12 +95,12 @@ Vamos a implementar la **primera historia de v1**: **retrieval + compactación j
 
 Contexto:
 - Estamos en forge v0 (MVP completo, commit `b8ef0de` / tag `v0.0-mvp-complete`).
-- La spec es `spec-harness-agentic.md` v0.8, §6 MVP v1.
-- v1 se construye **100% con forge v0 + modelo local** (bootstrapping). Sin OpenCode, sin OpenChamber.
+- La spec es `spec-harness-agentic.md` v0.9, §6 MVP v1.
+- Bootstrapping (construir v1 100% con forge v0 + modelo local, sin herramientas externas) es un **requerimiento deseable diferido** (spec §0, changelog 0.9): este script queda como andamio para cuando se retome.
 - Stack actual: config v3, perms engine, MCP tools (fs/shell/git), Ollama adapter, SQLite store, daemon JSON-RPC, agent loop, REPL, Landlock+seccomp isolation.
 
 Tarea:
-1. **Leé la spec v0.8 §6 MVP v1** (retrieval, compactación jerárquica, anclaje, ruteo por costo).
+1. **Leé la spec v0.9 §6 MVP v1** (retrieval, compactación jerárquica, anclaje, ruteo por costo).
 2. **Descomponé en tareas atómicas** con criterio de "hecho" verificable (tests, lint, build).
 3. **Presentá el plan** (tareas, orden, dependencias, riesgos) antes de codear.
 4. Empezá por la **primera tarea** (sugerencia: infraestructura de embeddings + vector store SQLite-vec / LanceDB).

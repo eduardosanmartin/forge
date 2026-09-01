@@ -319,4 +319,4 @@ git checkout b8ef0de
 
 > **Nota**: El commit `b8ef0de` está **pusheado a `origin/main`**. Si hiciste `git tag v0.0-mvp-complete && git push origin v0.0-mvp-complete`, el tag también está en el remoto y cualquiera puede clonar y hacer `git checkout v0.0-mvp-complete` directamente.
 
-> **Importante**: Este es el punto base para v1. Según el principio de bootstrapping (§0 spec), **v1 se construye 100% con forge v0 + modelo local** (sin OpenCode, sin OpenChamber, sin herramientas externas). Si algo no funciona en v1, volvé a `b8ef0de` y ajustá la estrategia antes de seguir.
+> **Importante (actualizado 2026-08-31, spec 0.9)**: el bootstrapping — construir con forge v0 + modelo local — es un **requerimiento deseable diferido** (§0 spec, changelog 0.9). El desarrollo se hace con herramientas externas (OpenCode + modelos frontera vía el adaptador OpenAI-compatible) hasta que la arquitectura esté afinada; la validación de rendimiento con modelos locales queda para esa etapa.

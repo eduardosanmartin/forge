@@ -132,5 +132,8 @@ Layout:
 ## Roadmap
 
 Version milestones, exit criteria per version, and deferred capabilities are
-tracked in `spec-harness-agentic.md` §6. Each future MVP is developed using the
-previous one (bootstrapping principle, spec §0); v0 is the seed.
+tracked in `spec-harness-agentic.md` §6. Development is driven with external
+tooling (OpenCode + frontier models via OpenAI-compatible endpoints); the
+guiding principle is context/token efficiency (RNF-2.x). Bootstrapping —
+building each MVP with the previous one — is a deferred, desirable requirement
+(spec §0, changelog 0.9); v0 remains the seed.
