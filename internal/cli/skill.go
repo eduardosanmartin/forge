@@ -32,12 +32,44 @@ func newSkillCommand() *cobra.Command {
 	cmd.AddCommand(newSkillNewCommand())
 	cmd.AddCommand(newSkillValidateCommand())
 	cmd.AddCommand(newSkillInstallCommand())
+	cmd.AddCommand(newSkillReloadCommand())
 	cmd.AddCommand(newSkillListCommand())
 	cmd.AddCommand(newSkillEnableCommand())
 	cmd.AddCommand(newSkillDisableCommand())
 	cmd.AddCommand(newSkillRemoveCommand())
 	cmd.AddCommand(newSkillMineCommand())
 	return cmd
+}
+
+// newSkillReloadCommand makes the daemon re-scan its skills root so installs
+// performed while the daemon is running become loadable (the boot-time Scan
+// does not see later installs).
+func newSkillReloadCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Re-scan the skills root via daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := client.Connect(cmd.Context(), "")
+			if err != nil {
+				return fmt.Errorf("daemon not reachable: %w", err)
+			}
+			defer cl.Close()
+			res, err := cl.SkillReload(cmd.Context())
+			if err != nil {
+				return err
+			}
+			loaded := 0
+			for _, r := range res.Results {
+				if r.Loaded {
+					loaded++
+				} else {
+					fmt.Fprintf(os.Stdout, "failed: %s: %s\n", r.Name, r.Error)
+				}
+			}
+			fmt.Fprintf(os.Stdout, "reloaded: %d loaded\n", loaded)
+			return nil
+		},
+	}
 }
 
 func newSkillNewCommand() *cobra.Command {

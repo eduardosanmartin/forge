@@ -49,6 +49,7 @@ function Add-Row {
 }
 
 function Cleanup {
+    try { Pop-Location } catch { }
     if ($proc -and -not $proc.HasExited) {
         try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
         Start-Sleep -Milliseconds 500
@@ -72,7 +73,10 @@ try {
     # --- Clone ------------------------------------------------------------
     $tmpClone = Join-Path ([System.IO.Path]::GetTempPath()) ("forge-v2-exit-" + [guid]::NewGuid().ToString("N"))
     Write-Host "== git clone $Repo -> $tmpClone"
-    & git clone $Repo $tmpClone 2>&1 | Out-Host
+    # NOTE: no 2>&1 here — under $ErrorActionPreference="Stop", PS 5.1 turns
+    # git's normal stderr progress ("Cloning into...") into a terminating error.
+    # --quiet keeps stderr empty on success; failures still set LASTEXITCODE.
+    & git clone --quiet $Repo $tmpClone
     if ($LASTEXITCODE -ne 0) { throw "git clone failed" }
     Add-Row "git clone" "PASS" "cloned $Repo"
 
@@ -108,7 +112,7 @@ try {
     New-Item -ItemType Directory -Path $cfgDir | Out-Null
     $config = @{
         schema_version = 4
-        default_provider = "openai-compatible"
+        default_provider = "test"
         providers = @{
             "test" = @{
                 kind = "openai-compatible"
@@ -145,6 +149,11 @@ try {
     Write-Host "   daemon at $addr"
     Add-Row "daemon start" "PASS" "forge serve at $addr"
 
+    # All forge CLI invocations run from the isolated workspace: install roots
+    # (./forge-plugins, ./.forge/skills) are CWD-relative and MUST land there,
+    # not in the invoking shell's directory.
+    Push-Location $tmpWs
+
     $thirdpartyPlugin = Join-Path $tmpClone "internal\e2e\testdata\thirdparty\urlcheck-ext"
     $thirdpartySkill = Join-Path $tmpClone "internal\e2e\testdata\thirdparty\deploy-notes"
 
@@ -170,7 +179,16 @@ try {
         }
     }
 
-    # --- Plugin: enable + list --------------------------------------------
+    # --- Plugin: reload + enable + list ------------------------------------
+    # The daemon scanned forge-plugins/ at boot (empty); reload makes it see
+    # the fresh install. urlcheck is external => loads disabled; enable uses
+    # the approved.flag record.
+    Write-Host "== forge plugin reload"
+    $out = & $exe plugin reload 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    Write-Host $out
+    if ($code -ne 0) { Add-Row "plugin reload after install" "FAIL" "exit $code" } else { Add-Row "plugin reload after install" "PASS" "daemon sees install" }
+
     Write-Host "== forge plugin enable urlcheck"
     $out = & $exe plugin enable urlcheck 2>&1 | Out-String
     $code = $LASTEXITCODE
@@ -202,6 +220,12 @@ try {
         }
     }
 
+    Write-Host "== forge skill reload"
+    $out = & $exe skill reload 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    Write-Host $out
+    if ($code -ne 0) { Add-Row "skill reload after install" "FAIL" "exit $code" } else { Add-Row "skill reload after install" "PASS" "daemon sees install" }
+
     Write-Host "== forge skill enable deploy-notes"
     $out = & $exe skill enable deploy-notes 2>&1 | Out-String
     $code = $LASTEXITCODE
@@ -225,7 +249,9 @@ try {
     # --- Wizard validity ----------------------------------------------------
     Write-Host "== Wizard: forge plugin new (scripted inputs)"
     $wizPluginDir = Join-Path $tmpWs "forge-plugins\wiz-verify"
-    $pluginAnswers = @("wiz-verify", "0.1.0", "Verify plugin", "y", "n", "n", "n", "n", "", "local") -join "`n"
+    # Wizard prompt sequence: name, version, description, FIVE permission
+    # Bools (fs.read, fs.write, shell.exec, git, net), entrypoint, source.
+    $pluginAnswers = @("wiz-verify", "0.1.0", "Verify plugin", "y", "n", "n", "n", "n", "n", "", "local") -join "`n"
     $pluginAnswers | & $exe plugin new 2>&1 | Out-String | Write-Host
     if (Test-Path (Join-Path $tmpWs "forge-plugins\wiz-verify\manifest.toml")) {
         $vOut = & $exe plugin validate (Join-Path $tmpWs "forge-plugins\wiz-verify") 2>&1 | Out-String

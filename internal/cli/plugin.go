@@ -30,11 +30,43 @@ func newPluginCommand() *cobra.Command {
 	cmd.AddCommand(newPluginNewCommand())
 	cmd.AddCommand(newPluginValidateCommand())
 	cmd.AddCommand(newPluginInstallCommand())
+	cmd.AddCommand(newPluginReloadCommand())
 	cmd.AddCommand(newPluginListCommand())
 	cmd.AddCommand(newPluginEnableCommand())
 	cmd.AddCommand(newPluginDisableCommand())
 	cmd.AddCommand(newPluginRemoveCommand())
 	return cmd
+}
+
+// newPluginReloadCommand makes the daemon re-scan its plugins root so
+// installs performed while the daemon is running become loadable (the
+// boot-time LoadAll does not see later installs).
+func newPluginReloadCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Re-scan the plugins root via daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, err := client.Connect(cmd.Context(), "")
+			if err != nil {
+				return fmt.Errorf("daemon not reachable: %w", err)
+			}
+			defer cl.Close()
+			res, err := cl.PluginReload(cmd.Context())
+			if err != nil {
+				return err
+			}
+			loaded := 0
+			for _, r := range res.Results {
+				if r.Loaded {
+					loaded++
+				} else {
+					fmt.Fprintf(os.Stdout, "failed: %s: %s\n", r.Name, r.Error)
+				}
+			}
+			fmt.Fprintf(os.Stdout, "reloaded: %d loaded\n", loaded)
+			return nil
+		},
+	}
 }
 
 // --- plugin new wizard ---
