@@ -49,6 +49,15 @@ type LoadResult struct {
 	Err    error
 }
 
+// SkillInfo describes a loaded skill for Info() / RPC listing.
+type SkillInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	Source      string `json:"source"`
+	Enabled     bool   `json:"enabled"`
+}
+
 // Manager loads, enables, and disables skills with semantic lazy-load.
 type Manager struct {
 	mu              sync.Mutex
@@ -61,6 +70,7 @@ type Manager struct {
 	minScore        float32
 	topK            int
 	closed          bool
+	root            string // remembered root for Reload()
 }
 
 // NewManager creates a Manager.
@@ -91,15 +101,51 @@ func NewManager(opts Options) *Manager {
 	}
 }
 
+// StripChecksumLine is exported for CLI install to compute the approval hash consistently.
+// It removes the line containing "checksum:" from data for hashing.
+// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
+func StripChecksumLine(data []byte) []byte {
+	return stripChecksumLine(data)
+}
+
+// isApprovedData verifies that dir/approved.flag contains "sha256:<hex>" matching
+// the hash of data (SKILL.md bytes) minus the checksum line.
+func isApprovedData(dir string, data []byte) bool {
+	cleaned := stripChecksumLine(data)
+	sum := sha256.Sum256(cleaned)
+	got := "sha256:" + hex.EncodeToString(sum[:])
+	flag, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
+	if err != nil {
+		return false
+	}
+	want := strings.TrimSpace(string(flag))
+	if !strings.HasPrefix(want, "sha256:") {
+		return false
+	}
+	return strings.EqualFold(want, got)
+}
+
+// isApproved verifies that dir/approved.flag contains "sha256:<hex>" matching
+// the hash of the current SKILL.md bytes minus the checksum line.
+// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
+func isApproved(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return false
+	}
+	return isApprovedData(dir, data)
+}
+
 // Scan discovers <root>/<name>/SKILL.md, parses and validates each skill.
 // Local skills are auto-enabled; external skills are loaded but remain disabled
-// unless ApproveExternal is true and Enable is called explicitly.
+// unless ApproveExternal is true (or per-skill approved.flag exists) and Enable is called explicitly.
 // Missing root directory is NOT an error (zero skills is valid).
 // It returns per-skill LoadResults and an aggregated error if any skill failed.
 func (m *Manager) Scan(root string) ([]LoadResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.root = root
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -165,9 +211,10 @@ func (m *Manager) loadOneLocked(skillDir, skillFile string) error {
 	}
 
 	// Checksum verification for external before any enable (RNF-4.6).
+	// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
 	if sk.Source == SourceExternal {
-		if !m.approveExternal {
-			return fmt.Errorf("%w: external skill %q requires explicit approval", ErrApprovalRequired, sk.Name)
+		if !m.approveExternal && !isApprovedData(skillDir, data) {
+			return fmt.Errorf("%w: external skill %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, sk.Name)
 		}
 		if err := verifySkillChecksum(data, sk.Checksum); err != nil {
 			return err
@@ -222,16 +269,15 @@ func stripChecksumLine(data []byte) []byte {
 }
 
 func (m *Manager) indexSkillLocked(sk *Skill) {
-	combined := sk.Description
-	if len(sk.ActivationKeywords) > 0 {
-		combined += " " + strings.Join(sk.ActivationKeywords, " ")
-	}
-	emb, _ := m.embedStore.GenerateEmbedding(combined)
-	_, _ = m.embedStore.Store(combined, emb)
-	// Also keep implicit map via store; manual cosine will regenerate.
+	// No-op: embeddings are pure functions of text and Relevant() regenerates
+	// per call via GenerateEmbedding on query + description+keywords. The
+	// previous Store() writes were dead code (never read back). Kept as a
+	// hook for future persistent backends; current in-memory store is unused.
+	_ = sk
 }
 
 // Enable registers the skill as enabled. The skill must have been loaded via Scan.
+// For external skills it requires either Options.ApproveExternal or an approved.flag file.
 func (m *Manager) Enable(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -241,6 +287,11 @@ func (m *Manager) Enable(name string) error {
 	}
 	if m.enabled[name] {
 		return fmt.Errorf("%w: %q", ErrAlreadyEnabled, name)
+	}
+	if sk.Source == SourceExternal {
+		if !m.approveExternal && !isApproved(sk.DirPath) {
+			return fmt.Errorf("%w: external skill %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name)
+		}
 	}
 	m.enabled[name] = true
 	m.indexSkillLocked(sk)
@@ -283,6 +334,35 @@ func (m *Manager) Enabled() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Info returns sorted SkillInfo for every loaded skill.
+func (m *Manager) Info() []SkillInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]SkillInfo, 0, len(m.skills))
+	for name, sk := range m.skills {
+		out = append(out, SkillInfo{
+			Name:        name,
+			Description: sk.Description,
+			Category:    sk.Category,
+			Source:      string(sk.Source),
+			Enabled:     m.enabled[name],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Reload re-scans the remembered root, discarding previous state, and returns LoadResults.
+func (m *Manager) Reload() ([]LoadResult, error) {
+	m.mu.Lock()
+	root := m.root
+	m.mu.Unlock()
+	if root == "" {
+		return nil, nil
+	}
+	return m.Scan(root)
 }
 
 // Relevant returns enabled skills whose description+keywords embedding is

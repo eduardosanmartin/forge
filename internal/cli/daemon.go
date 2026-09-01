@@ -18,6 +18,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/isolation"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/pluginwasm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
@@ -37,6 +38,7 @@ func init() {
 
 func newServeCommand() *cobra.Command {
 	var addr string
+	var approveExternal bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the forge daemon",
@@ -54,10 +56,11 @@ func newServeCommand() *cobra.Command {
 			}
 			_ = originalStoragePath
 
-			return runServe(cmd.Context(), app, addr)
+			return runServe(cmd.Context(), app, addr, approveExternal)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (host:port)")
+	cmd.Flags().BoolVar(&approveExternal, "approve-external-plugins", false, "allow external plugins/skills without per-plugin approved.flag (global override)")
 	return cmd
 }
 
@@ -119,7 +122,7 @@ func newStatusCommand() *cobra.Command {
 	return cmd
 }
 
-func runServe(ctx context.Context, app *App, addr string) error {
+func runServe(ctx context.Context, app *App, addr string, approveExternal bool) error {
 	// v0 workspace semantics: forge operates on the directory the daemon was
 	// launched from. Relative permission patterns ("./**") and tool paths
 	// resolve against this root. Storage.Path is the database location, not
@@ -186,7 +189,7 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	}
 	anchorStore := anchor.NewAnchorStoreSQL(st.DB())
 	// Skills manager: owns its own embedding store internally; missing directory is NOT an error.
-	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger})
+	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger, ApproveExternal: approveExternal})
 	defer skillsMgr.Close()
 	if results, err := skillsMgr.Scan(filepath.Join(workspaceRoot, ".forge", "skills")); err != nil {
 		app.Logger.Warn("skills scan: some skills failed to load", "error", err, "results", results)
@@ -203,6 +206,22 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	// Create tools registry (base five tools + the six v1 feature tools on
 	// their real dependencies)
 	toolsReg := tools.NewDefaultRegistryWithDeps(permsEng, workspaceRoot, app.Logger, retriever, compactor, anchorStore)
+
+	// Plugin manager: WASM runtime bridging tools into toolsReg; missing dir is NOT an error.
+	// AutoEnableLocal policy lives in the Manager: LoadAll and Reload auto-enable locals.
+	pluginMgr := pluginwasm.NewManager(toolsReg, pluginwasm.Options{
+		Perms:           permsEng,
+		NetAllowlist:    app.Config.Network.AllowedHosts,
+		Logger:          app.Logger,
+		ApproveExternal: approveExternal,
+		AutoEnableLocal: true,
+	})
+	defer pluginMgr.Close()
+	if results, err := pluginMgr.LoadAll(filepath.Join(workspaceRoot, "forge-plugins")); err != nil {
+		app.Logger.Warn("plugins scan: some plugins failed to load", "error", err, "results", results)
+	} else {
+		app.Logger.Info("plugins manager ready", "loaded", len(pluginMgr.Loaded()), "enabled", len(pluginMgr.Enabled()))
+	}
 
 	// OS-level shell isolation (spec RNF-4.7): shell children run through
 	// forge itself as an isolation wrapper (Landlock + seccomp on Linux)
@@ -228,7 +247,7 @@ func runServe(ctx context.Context, app *App, addr string) error {
 	toolsReg.SetRequireShellIsolation(app.Config.Permissions.Shell.RequireIsolation)
 
 	// Create daemon
-	d, err := daemon.New(app.Config, st, llmReg, toolsReg, permsEng, app.Logger, addr, v1Deps)
+	d, err := daemon.New(app.Config, st, llmReg, toolsReg, permsEng, app.Logger, addr, v1Deps, pluginMgr, skillsMgr)
 	if err != nil {
 		return fmt.Errorf("create daemon: %w", err)
 	}

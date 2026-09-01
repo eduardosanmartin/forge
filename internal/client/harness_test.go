@@ -326,7 +326,7 @@ func startTestDaemon(t *testing.T, script ...llm.ChatResponse) *daemonStack {
 	emergency := daemon.NewEmergencyState(logger)
 
 	mgr := daemon.NewSessionManager(st, reg, tl, emergency, logger, &config.Config{}, fakePerms{}, st)
-	handler := daemon.NewHandler(mgr, logger)
+	handler := daemon.NewHandler(mgr, logger, nil, nil)
 	tx := daemon.NewTransport("127.0.0.1:0", handler, logger)
 	if err := tx.Start(context.Background()); err != nil {
 		t.Fatalf("start transport: %v", err)

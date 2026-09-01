@@ -33,12 +33,12 @@
 //       Success JSON is the raw file bytes JSON-quoted or base64 envelope; for WU2 the
 //       greeter test uses plain UTF-8 bytes returned as JSON string via the same packed convention.
 //       Errors are returned as {"error":"..."} (capability or perms denied, or OS error).
-//   - fs_write(path_ptr i32, path_len i32, data_ptr i32, data_len i32) -> i32 (errno: 0 success, 1 error)
-//       Errno-only by design: the host logs the denial/error detail (path, perms rule)
-//       via the plugin-scoped logger, so plugin authors read failure causes from logs.
-//       Documented WU2 limitation: unlike the i64 imports, fs_write does not return a
-//       JSON error envelope; unifying to packed JSON is a registered WU4 prerequisite
-//       (must be finalized before the wizard generates plugins against this ABI).
+   //   - fs_write(path_ptr i32, path_len i32, data_ptr i32, data_len i32) -> i32 (errno: 0 success, 1 error)
+//       FROZEN (ABIVersion=1): errno-only by deliberate design. The host logs the
+//       denial/error detail (path, perms rule) via the plugin-scoped logger, so
+//       plugin authors read failure causes from logs. Any change to this convention
+//       requires ABIVersion bump + manifest schema review; ABIVersion=1 keeps the
+//       errno-only convention permanently.
 //   - shell_exec(cmd_ptr i32, cmd_len i32, args_json_ptr i32, args_json_len i32) -> i64 (packed JSON)
 //   - git_run(args_json_ptr i32, args_json_len i32) -> i64 (packed JSON)
 //   - net_fetch(url_ptr i32, url_len i32) -> i64 (packed JSON)

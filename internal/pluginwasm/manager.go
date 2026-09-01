@@ -30,6 +30,10 @@ type Options struct {
 	// ApproveExternal must be true to load any plugin whose manifest source is "external".
 	// This is the WU2 fail-closed human approval flag; WU4 UX will gate this.
 	ApproveExternal bool
+	// AutoEnableLocal when true makes LoadAll and Reload auto-enable every
+	// successfully loaded LOCAL plugin right after load. External plugins
+	// ALWAYS require explicit Enable regardless of this flag.
+	AutoEnableLocal bool
 }
 
 // LoadResult reports the outcome of loading one plugin directory discovered under the root.
@@ -42,17 +46,29 @@ type LoadResult struct {
 	Err error
 }
 
+// PluginInfo describes a loaded plugin for Info() / RPC listing.
+type PluginInfo struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Source    string `json:"source"`
+	Enabled   bool   `json:"enabled"`
+	ToolCount int    `json:"tool_count"`
+}
+
 // Manager loads, enables, and disables WASM plugins, bridging their tools into a tools.Registry.
+// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
 type Manager struct {
-	reg            *tools.Registry
-	permsEngine    *perms.Engine
-	netAllowlist   []string
-	logger         *slog.Logger
+	reg             *tools.Registry
+	permsEngine     *perms.Engine
+	netAllowlist    []string
+	logger          *slog.Logger
 	approveExternal bool
+	autoEnableLocal bool
 
 	mu      sync.Mutex
 	plugins map[string]*wasmPlugin // all loaded (instantiated) plugins by manifest name
 	enabled map[string]bool
+	root    string // remembered root for Reload()
 }
 
 // NewManager creates a Manager that will register plugin tools into reg.
@@ -67,20 +83,47 @@ func NewManager(reg *tools.Registry, opts Options) *Manager {
 		netAllowlist:    opts.NetAllowlist,
 		logger:          logger,
 		approveExternal: opts.ApproveExternal,
+		autoEnableLocal: opts.AutoEnableLocal,
 		plugins:         make(map[string]*wasmPlugin),
 		enabled:         make(map[string]bool),
 	}
 }
 
+// isApproved verifies that dir/approved.flag contains "sha256:<hex>" matching
+// the hash of wasmBytes. The approval record binds the artifact hash
+// (these exact bytes were approved), not the directory.
+func isApproved(dir string, wasmBytes []byte) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
+	if err != nil {
+		return false
+	}
+	want := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(want, "sha256:") {
+		return false
+	}
+	sum := sha256.Sum256(wasmBytes)
+	got := "sha256:" + hex.EncodeToString(sum[:])
+	return strings.EqualFold(want, got)
+}
+
 // LoadAll scans root (spec layout: forge-plugins/<name>/manifest.toml + entrypoint).
 // For each subdirectory it parses the manifest, verifies checksum before any load (RNF-4.6),
-// enforces external approval, compiles the wasm bytes, and instantiates the module.
+// enforces external approval (global flag OR per-plugin approved.flag), compiles the wasm bytes,
+// and instantiates the module.
 // It returns per-plugin LoadResults and an aggregated error if any plugin failed.
 // Successfully loaded plugins remain available for Enable; failed plugins are not inserted.
 // The scan skips non-directories and directories without a manifest.toml.
+// Missing root is NOT an error (zero plugins is valid).
 func (m *Manager) LoadAll(root string) ([]LoadResult, error) {
+	m.mu.Lock()
+	m.root = root
+	m.mu.Unlock()
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("plugin root %q: %w", root, err)
 	}
 	var results []LoadResult
@@ -105,6 +148,27 @@ func (m *Manager) LoadAll(root string) ([]LoadResult, error) {
 			res.Loaded = true
 		}
 		results = append(results, res)
+	}
+	// Auto-enable locals if policy is enabled. Collect per-plugin errors but do not fail the whole load.
+	if m.autoEnableLocal {
+		// Collect local names under lock, then Enable outside lock to respect locking.
+		m.mu.Lock()
+		var locals []string
+		for name, wp := range m.plugins {
+			if wp.manifest.Source == plugin.SourceLocal {
+				locals = append(locals, name)
+			}
+		}
+		m.mu.Unlock()
+		for _, name := range locals {
+			if err := m.Enable(name); err != nil {
+				// Log but do not aggregate into returned error; mirroring runServe's previous per-plugin log.
+				if m.logger != nil {
+					m.logger.Warn("auto-enable local plugin failed", "plugin", name, "error", err)
+				}
+				// Do not treat as load failure; the plugin is still loaded, just not enabled.
+			}
+		}
 	}
 	if len(errs) > 0 {
 		return results, fmt.Errorf("plugin load failures: %s", strings.Join(errs, "; "))
@@ -132,9 +196,10 @@ func (m *Manager) loadOne(ctx context.Context, pluginDir, manifestPath string) e
 		return fmt.Errorf("%w: entrypoint %q is empty", ErrCorruptedWASM, manifest.Entrypoint)
 	}
 	// RNF-4.6: checksum verified BEFORE any load for external plugins.
+	// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
 	if manifest.Source == plugin.SourceExternal {
-		if !m.approveExternal {
-			return fmt.Errorf("%w: external plugin %q requires explicit approval", ErrApprovalRequired, manifest.Name)
+		if !m.approveExternal && !isApproved(pluginDir, wasmBytes) {
+			return fmt.Errorf("%w: external plugin %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, manifest.Name)
 		}
 		if err := verifyChecksum(wasmBytes, manifest.Checksum); err != nil {
 			return err
@@ -145,6 +210,7 @@ func (m *Manager) loadOne(ctx context.Context, pluginDir, manifestPath string) e
 	if err != nil {
 		return err
 	}
+	wp.pluginDir = pluginDir
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// If a plugin with same name was already loaded, close the old one.
@@ -170,6 +236,7 @@ func verifyChecksum(wasmBytes []byte, checksum string) error {
 }
 
 // Enable registers the plugin's tools into the Registry. The plugin must have been loaded via LoadAll.
+// For external plugins it requires either Options.ApproveExternal or an approved.flag file in the plugin dir.
 // Enable is idempotent-safe: calling it twice on the same plugin returns ErrAlreadyEnabled.
 func (m *Manager) Enable(name string) error {
 	m.mu.Lock()
@@ -181,6 +248,12 @@ func (m *Manager) Enable(name string) error {
 	if m.enabled[name] {
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %q", ErrAlreadyEnabled, name)
+	}
+	if wp.manifest.Source == plugin.SourceExternal {
+		if !m.approveExternal && !isApproved(wp.pluginDir, wp.wasmBytes) {
+			m.mu.Unlock()
+			return fmt.Errorf("%w: external plugin %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name)
+		}
 	}
 	// Mark enabled before registering to avoid races; rollback on failure.
 	m.enabled[name] = true
@@ -238,6 +311,61 @@ func (m *Manager) Enabled() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Info returns sorted PluginInfo for every loaded plugin.
+func (m *Manager) Info() []PluginInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]PluginInfo, 0, len(m.plugins))
+	for name, wp := range m.plugins {
+		out = append(out, PluginInfo{
+			Name:      name,
+			Version:   wp.manifest.Version,
+			Source:    string(wp.manifest.Source),
+			Enabled:   m.enabled[name],
+			ToolCount: len(wp.manifest.Tools),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// Reload re-scans the remembered root, discarding previous state (fresh state), and returns LoadResults.
+// If no root has been set (LoadAll never called), it returns nil, nil.
+// It closes existing wasm runtimes and unregisters their tools before reloading.
+func (m *Manager) Reload() ([]LoadResult, error) {
+	m.mu.Lock()
+	root := m.root
+	m.mu.Unlock()
+	if root == "" {
+		return nil, nil
+	}
+	// Capture existing plugins to close after unlocking.
+	m.mu.Lock()
+	pluginsCopy := make(map[string]*wasmPlugin, len(m.plugins))
+	var enabledToolNames []string
+	for k, v := range m.plugins {
+		pluginsCopy[k] = v
+		if m.enabled[k] {
+			for _, te := range v.manifest.Tools {
+				enabledToolNames = append(enabledToolNames, te.Name)
+			}
+		}
+	}
+	// Reset maps for fresh state.
+	m.plugins = make(map[string]*wasmPlugin)
+	m.enabled = make(map[string]bool)
+	m.mu.Unlock()
+
+	for _, name := range enabledToolNames {
+		m.reg.Unregister(name)
+	}
+	ctx := context.Background()
+	for _, wp := range pluginsCopy {
+		_ = wp.close(ctx)
+	}
+	return m.LoadAll(root)
 }
 
 // Close closes all loaded wasm plugins and their wazero runtimes. It is idempotent.

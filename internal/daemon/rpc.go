@@ -45,6 +45,11 @@ const (
 	ErrCodeSessionNotFound = -32001
 	ErrCodeSessionHalted   = -32002
 	ErrCodeToolError       = -32003
+	ErrCodeNotLoaded       = -32010
+	ErrCodeAlreadyEnabled  = -32011
+	ErrCodeNotEnabled      = -32012
+	ErrCodeApprovalRequired = -32013
+	ErrCodeAlreadyExists   = -32014
 )
 
 // Method names for daemon -> client notifications.
@@ -103,6 +108,14 @@ const (
 	MethodHaltAll          = "emergency.halt_all"
 	MethodStatus           = "daemon.status"
 	MethodSwitchModel      = "session.switch_model"
+	MethodPluginList       = "plugin.list"
+	MethodPluginEnable     = "plugin.enable"
+	MethodPluginDisable    = "plugin.disable"
+	MethodPluginReload     = "plugin.reload"
+	MethodSkillList        = "skill.list"
+	MethodSkillEnable      = "skill.enable"
+	MethodSkillDisable     = "skill.disable"
+	MethodSkillReload      = "skill.reload"
 )
 
 // CreateSessionParams for session.create.
@@ -165,6 +178,71 @@ type ResumeSessionParams struct {
 type SwitchModelParams struct {
 	SessionID string `json:"session_id"` // session whose metadata records the choice
 	Model     string `json:"model"`
+}
+
+// PluginEnableParams for plugin.enable / plugin.disable.
+type PluginEnableParams struct {
+	Name string `json:"name"`
+}
+
+// PluginDisableParams for plugin.disable.
+type PluginDisableParams struct {
+	Name string `json:"name"`
+}
+
+// PluginInfoResult for plugin.list.
+type PluginInfoResult struct {
+	Name      string `json:"name"`
+	Version   string `json:"version"`
+	Source    string `json:"source"`
+	Enabled   bool   `json:"enabled"`
+	ToolCount int    `json:"tool_count"`
+}
+
+// PluginListResult for plugin.list.
+type PluginListResult struct {
+	Plugins []PluginInfoResult `json:"plugins"`
+}
+
+// PluginReloadResult for plugin.reload.
+type PluginReloadResult struct {
+	Results []LoadResultEntry `json:"results"`
+}
+
+// SkillEnableParams for skill.enable / skill.disable.
+type SkillEnableParams struct {
+	Name string `json:"name"`
+}
+
+// SkillDisableParams for skill.disable.
+type SkillDisableParams struct {
+	Name string `json:"name"`
+}
+
+// SkillInfoResult for skill.list.
+type SkillInfoResult struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	Source      string `json:"source"`
+	Enabled     bool   `json:"enabled"`
+}
+
+// SkillListResult for skill.list.
+type SkillListResult struct {
+	Skills []SkillInfoResult `json:"skills"`
+}
+
+// SkillReloadResult for skill.reload.
+type SkillReloadResult struct {
+	Results []LoadResultEntry `json:"results"`
+}
+
+// LoadResultEntry is the JSON form of a LoadResult.
+type LoadResultEntry struct {
+	Name   string `json:"name"`
+	Loaded bool   `json:"loaded"`
+	Error  string `json:"error,omitempty"`
 }
 
 // SessionResult for session operations.

@@ -34,7 +34,7 @@ func newTestHandler(t *testing.T) *testHandler {
 	emergency := NewEmergencyState(logger)
 
 	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, &config.Config{}, nil, nil)
-	handler := NewHandler(mgr, logger)
+	handler := NewHandler(mgr, logger, nil, nil)
 
 	return &testHandler{Handler: handler}
 }

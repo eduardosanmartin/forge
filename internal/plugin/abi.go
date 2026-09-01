@@ -21,6 +21,17 @@ package plugin
 
 // ABIVersion is the current plugin ABI version. WU2's WASM runtime checks
 // this value via the forge_abi_version export to reject mismatched plugins.
+//
+// FROZEN (WU4): ABIVersion=1 is now frozen.
+//
+//   - Host import `fs_write` returns i32 errno-only by deliberate design.
+//     Per-call failure detail is emitted through host logs (plugin-scoped logger),
+//     not through a JSON error envelope. This keeps the hot write path errno-only
+//     and avoids an extra allocation/JSON parse per write.
+//   - Any convention change to this ABI (signatures, packing, export names,
+//     error envelopes, or fs_write behavior) REQUIRES bumping ABIVersion and a
+//     manifest schema review. Plugins built against ABIVersion=1 must continue to
+//     validate against the WU1 manifest schema exactly.
 const ABIVersion = 1
 
 // PluginPermissionKinds is the allowed permission vocabulary for plugins.

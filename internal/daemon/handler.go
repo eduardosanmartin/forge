@@ -9,18 +9,22 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/pluginwasm"
+	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
 )
 
 // Handler dispatches JSON-RPC requests to the session manager.
 type Handler struct {
-	mgr    *SessionManager
-	logger *slog.Logger
+	mgr       *SessionManager
+	logger    *slog.Logger
+	pluginMgr *pluginwasm.Manager
+	skillMgr  *skill.Manager
 }
 
 // NewHandler creates a new Handler.
-func NewHandler(mgr *SessionManager, logger *slog.Logger) *Handler {
-	return &Handler{mgr: mgr, logger: logger}
+func NewHandler(mgr *SessionManager, logger *slog.Logger, pluginMgr *pluginwasm.Manager, skillMgr *skill.Manager) *Handler {
+	return &Handler{mgr: mgr, logger: logger, pluginMgr: pluginMgr, skillMgr: skillMgr}
 }
 
 // HandleRequest processes a JSON-RPC request and returns a response (or nil for notifications).
@@ -54,6 +58,22 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleStatus(ctx, req)
 	case MethodSwitchModel:
 		return h.handleSwitchModel(ctx, req)
+	case MethodPluginList:
+		return h.handlePluginList(ctx, req)
+	case MethodPluginEnable:
+		return h.handlePluginEnable(ctx, req)
+	case MethodPluginDisable:
+		return h.handlePluginDisable(ctx, req)
+	case MethodPluginReload:
+		return h.handlePluginReload(ctx, req)
+	case MethodSkillList:
+		return h.handleSkillList(ctx, req)
+	case MethodSkillEnable:
+		return h.handleSkillEnable(ctx, req)
+	case MethodSkillDisable:
+		return h.handleSkillDisable(ctx, req)
+	case MethodSkillReload:
+		return h.handleSkillReload(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -340,6 +360,186 @@ func (h *Handler) handleSwitchModel(ctx context.Context, req *JSONRPCRequest) *J
 	}
 
 	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "model": params.Model})
+}
+
+func (h *Handler) handlePluginList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.pluginMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "plugin manager not available", nil)
+	}
+	infos := h.pluginMgr.Info()
+	out := make([]PluginInfoResult, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, PluginInfoResult{
+			Name:      info.Name,
+			Version:   info.Version,
+			Source:    info.Source,
+			Enabled:   info.Enabled,
+			ToolCount: info.ToolCount,
+		})
+	}
+	return h.resultResponse(req.ID, PluginListResult{Plugins: out})
+}
+
+func (h *Handler) handlePluginEnable(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.pluginMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "plugin manager not available", nil)
+	}
+	var params PluginEnableParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Name == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "name is required", nil)
+	}
+	if err := h.pluginMgr.Enable(params.Name); err != nil {
+		switch {
+		case errors.Is(err, pluginwasm.ErrNotLoaded):
+			return NewErrorResponse(req.ID, ErrCodeNotLoaded, err.Error(), nil)
+		case errors.Is(err, pluginwasm.ErrAlreadyEnabled):
+			return NewErrorResponse(req.ID, ErrCodeAlreadyEnabled, err.Error(), nil)
+		case errors.Is(err, pluginwasm.ErrApprovalRequired):
+			return NewErrorResponse(req.ID, ErrCodeApprovalRequired, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"enabled": true, "name": params.Name})
+}
+
+func (h *Handler) handlePluginDisable(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.pluginMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "plugin manager not available", nil)
+	}
+	var params PluginDisableParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Name == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "name is required", nil)
+	}
+	if err := h.pluginMgr.Disable(params.Name); err != nil {
+		switch {
+		case errors.Is(err, pluginwasm.ErrNotLoaded):
+			return NewErrorResponse(req.ID, ErrCodeNotLoaded, err.Error(), nil)
+		case errors.Is(err, pluginwasm.ErrNotEnabled):
+			return NewErrorResponse(req.ID, ErrCodeNotEnabled, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"disabled": true, "name": params.Name})
+}
+
+func (h *Handler) handlePluginReload(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.pluginMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "plugin manager not available", nil)
+	}
+	results, err := h.pluginMgr.Reload()
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "plugin reload failed", err.Error())
+	}
+	out := make([]LoadResultEntry, 0, len(results))
+	for _, r := range results {
+		e := LoadResultEntry{Name: r.Name, Loaded: r.Loaded}
+		if r.Err != nil {
+			e.Error = r.Err.Error()
+		}
+		out = append(out, e)
+	}
+	if out == nil {
+		out = []LoadResultEntry{}
+	}
+	return h.resultResponse(req.ID, PluginReloadResult{Results: out})
+}
+
+func (h *Handler) handleSkillList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.skillMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "skill manager not available", nil)
+	}
+	infos := h.skillMgr.Info()
+	out := make([]SkillInfoResult, 0, len(infos))
+	for _, info := range infos {
+		out = append(out, SkillInfoResult{
+			Name:        info.Name,
+			Description: info.Description,
+			Category:    info.Category,
+			Source:      info.Source,
+			Enabled:     info.Enabled,
+		})
+	}
+	return h.resultResponse(req.ID, SkillListResult{Skills: out})
+}
+
+func (h *Handler) handleSkillEnable(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.skillMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "skill manager not available", nil)
+	}
+	var params SkillEnableParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Name == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "name is required", nil)
+	}
+	if err := h.skillMgr.Enable(params.Name); err != nil {
+		switch {
+		case errors.Is(err, skill.ErrNotLoaded):
+			return NewErrorResponse(req.ID, ErrCodeNotLoaded, err.Error(), nil)
+		case errors.Is(err, skill.ErrAlreadyEnabled):
+			return NewErrorResponse(req.ID, ErrCodeAlreadyEnabled, err.Error(), nil)
+		case errors.Is(err, skill.ErrApprovalRequired):
+			return NewErrorResponse(req.ID, ErrCodeApprovalRequired, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"enabled": true, "name": params.Name})
+}
+
+func (h *Handler) handleSkillDisable(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.skillMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "skill manager not available", nil)
+	}
+	var params SkillDisableParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Name == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "name is required", nil)
+	}
+	if err := h.skillMgr.Disable(params.Name); err != nil {
+		switch {
+		case errors.Is(err, skill.ErrNotLoaded):
+			return NewErrorResponse(req.ID, ErrCodeNotLoaded, err.Error(), nil)
+		case errors.Is(err, skill.ErrNotEnabled):
+			return NewErrorResponse(req.ID, ErrCodeNotEnabled, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"disabled": true, "name": params.Name})
+}
+
+func (h *Handler) handleSkillReload(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	if h.skillMgr == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "skill manager not available", nil)
+	}
+	results, err := h.skillMgr.Reload()
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "skill reload failed", err.Error())
+	}
+	out := make([]LoadResultEntry, 0, len(results))
+	for _, r := range results {
+		e := LoadResultEntry{Name: r.Name, Loaded: r.Loaded}
+		if r.Err != nil {
+			e.Error = r.Err.Error()
+		}
+		out = append(out, e)
+	}
+	if out == nil {
+		out = []LoadResultEntry{}
+	}
+	return h.resultResponse(req.ID, SkillReloadResult{Results: out})
 }
 
 func (h *Handler) messageToResult(msg store.Message) MessageResult {

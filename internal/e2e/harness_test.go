@@ -150,7 +150,7 @@ func newStack(t *testing.T, baseURL string, models []string) *stack {
 
 	emergency := daemon.NewEmergencyState(discardLogger())
 	mgr := daemon.NewSessionManager(st, llmReg, toolsReg, emergency, discardLogger(), cfg, permsEng, st)
-	handler := daemon.NewHandler(mgr, discardLogger())
+	handler := daemon.NewHandler(mgr, discardLogger(), nil, nil)
 	tx := daemon.NewTransport("127.0.0.1:0", handler, discardLogger())
 	if err := tx.Start(context.Background()); err != nil {
 		t.Fatalf("start transport: %v", err)

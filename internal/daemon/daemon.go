@@ -13,6 +13,8 @@ import (
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/pluginwasm"
+	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -31,6 +33,8 @@ type Daemon struct {
 	handler   *Handler
 	logger    *slog.Logger
 	addrFile  string
+	pluginMgr *pluginwasm.Manager
+	skillMgr  *skill.Manager
 	mu        sync.Mutex
 	running   bool
 }
@@ -45,6 +49,8 @@ func New(
 	logger *slog.Logger,
 	addr string,
 	v1Deps agent.V1Deps,
+	pluginMgr *pluginwasm.Manager,
+	skillMgr *skill.Manager,
 ) (*Daemon, error) {
 	if addr == "" {
 		addr = "127.0.0.1:0"
@@ -59,7 +65,7 @@ func New(
 
 	emergency := NewEmergencyState(logger)
 	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store, WithV1Deps(v1Deps))
-	handler := NewHandler(mgr, logger)
+	handler := NewHandler(mgr, logger, pluginMgr, skillMgr)
 	transport := NewTransport(addr, handler, logger)
 
 	d := &Daemon{
@@ -75,6 +81,8 @@ func New(
 		handler:   handler,
 		logger:    logger,
 		addrFile:  addrFile,
+		pluginMgr: pluginMgr,
+		skillMgr:  skillMgr,
 	}
 	return d, nil
 }

@@ -16,11 +16,12 @@ import (
 
 // wasmPlugin wraps a single instantiated WASM plugin and its wazero runtime.
 type wasmPlugin struct {
-	manifest plugin.Manifest
+	manifest  plugin.Manifest
 	wasmBytes []byte
 	runtime   wazero.Runtime
 	mod       api.Module
 	env       *hostEnv
+	pluginDir string
 
 	mu sync.Mutex
 
