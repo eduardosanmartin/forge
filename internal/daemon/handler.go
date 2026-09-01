@@ -58,6 +58,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleStatus(ctx, req)
 	case MethodSwitchModel:
 		return h.handleSwitchModel(ctx, req)
+	case MethodSessionMarkSuccess:
+		return h.handleMarkSuccess(ctx, req)
 	case MethodPluginList:
 		return h.handlePluginList(ctx, req)
 	case MethodPluginEnable:
@@ -360,6 +362,23 @@ func (h *Handler) handleSwitchModel(ctx context.Context, req *JSONRPCRequest) *J
 	}
 
 	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "model": params.Model})
+}
+
+func (h *Handler) handleMarkSuccess(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params SessionMarkSuccessParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SessionID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "session_id is required", nil)
+	}
+	if err := h.mgr.MarkSuccess(ctx, params.SessionID); err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "mark success failed", err.Error())
+	}
+	return h.resultResponse(req.ID, map[string]any{"marked": true, "session_id": params.SessionID})
 }
 
 func (h *Handler) handlePluginList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {

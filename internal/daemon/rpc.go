@@ -108,6 +108,7 @@ const (
 	MethodHaltAll          = "emergency.halt_all"
 	MethodStatus           = "daemon.status"
 	MethodSwitchModel      = "session.switch_model"
+	MethodSessionMarkSuccess = "session.mark_success"
 	MethodPluginList       = "plugin.list"
 	MethodPluginEnable     = "plugin.enable"
 	MethodPluginDisable    = "plugin.disable"
@@ -178,6 +179,11 @@ type ResumeSessionParams struct {
 type SwitchModelParams struct {
 	SessionID string `json:"session_id"` // session whose metadata records the choice
 	Model     string `json:"model"`
+}
+
+// SessionMarkSuccessParams for session.mark_success.
+type SessionMarkSuccessParams struct {
+	SessionID string `json:"session_id"`
 }
 
 // PluginEnableParams for plugin.enable / plugin.disable.

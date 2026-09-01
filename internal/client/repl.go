@@ -102,6 +102,8 @@ func (r *REPL) Run(ctx context.Context) error {
 			r.cmdNew(ctx)
 		case strings.HasPrefix(line, "/attach"):
 			r.cmdAttach(ctx, line)
+		case line == "/success" || strings.HasPrefix(line, "/success "):
+			r.cmdSuccess(ctx, line)
 		case strings.HasPrefix(line, "/halt"):
 			r.cmdHalt(ctx, line)
 		case strings.HasPrefix(line, "/resume"):
@@ -158,6 +160,7 @@ func (r *REPL) printHelp() {
 	r.writeln("  /sessions       list sessions")
 	r.writeln("  /new            start a new session")
 	r.writeln("  /attach <id>    switch to an existing session (replays last messages)")
+	r.writeln("  /success        mark current session as successful (human gate)")
 	r.writeln("  /halt [id]      emergency-halt current or given session")
 	r.writeln("  /resume <id>    resume a halted session")
 	r.writeln("  /exit           quit (Ctrl-D works too)")
@@ -280,6 +283,24 @@ func (r *REPL) cmdResume(ctx context.Context, line string) {
 		return
 	}
 	r.writef("resumed %s\n", arg)
+}
+
+func (r *REPL) cmdSuccess(ctx context.Context, line string) {
+	target := r.sessionID
+	if arg, ok := splitCommandArg(line); ok {
+		target = arg
+	}
+	if target == "" {
+		r.writeln("error: no session to mark (use /success <id>)")
+		return
+	}
+	var res map[string]any
+	if err := r.client.Call(ctx, daemon.MethodSessionMarkSuccess,
+		daemon.SessionMarkSuccessParams{SessionID: target}, &res); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	r.writef("session %s marked as successful\n", target)
 }
 
 // cmdTurn executes one agent turn and renders the outcome.

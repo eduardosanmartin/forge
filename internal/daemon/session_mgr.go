@@ -392,6 +392,18 @@ type modelSetter interface {
 	SetDefault(model string) error
 }
 
+// MarkSuccess marks a session as human-verified successful (RF-4.4 input gate).
+// It sets session metadata "success"=true via the store's merge semantics.
+func (m *SessionManager) MarkSuccess(ctx context.Context, sessionID string) error {
+	if _, err := m.store.GetSession(ctx, sessionID); err != nil {
+		return fmt.Errorf("mark success: %w", err)
+	}
+	if err := m.store.UpdateSessionMetadata(ctx, sessionID, map[string]any{"success": true}); err != nil {
+		return fmt.Errorf("mark success: %w", err)
+	}
+	return nil
+}
+
 // SwitchModel hot-swaps the daemon's default model and records the choice in
 // the session metadata under the "model" key. It fails if the session does
 // not exist or the registry rejects the model.

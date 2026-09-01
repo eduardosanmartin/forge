@@ -14,6 +14,8 @@ import (
 
 	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/logging"
+	"github.com/eduardosanmartin/forge/internal/mining"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +36,7 @@ func newSkillCommand() *cobra.Command {
 	cmd.AddCommand(newSkillEnableCommand())
 	cmd.AddCommand(newSkillDisableCommand())
 	cmd.AddCommand(newSkillRemoveCommand())
+	cmd.AddCommand(newSkillMineCommand())
 	return cmd
 }
 
@@ -527,4 +530,292 @@ func runSkillRemove(name, skillsRoot string, yes bool, prompter Prompter, out io
 		}
 	}
 	return nil
+}
+
+// --- skill mine ---
+
+func newSkillMineCommand() *cobra.Command {
+	var yes bool
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "mine",
+		Short: "Mine skill proposals from successful sessions (RF-4.3, requires human approval per RF-4.4)",
+		Long: "Analyzes sessions marked with 'forge session success' (the human input gate) and clusters similar successful trajectories. " +
+			"Each cluster with >=2 members becomes a proposal written to .forge/skill-proposals/<name>/SKILL.md. " +
+			"Proposals are NEVER auto-installed or auto-enabled; review the file, then run 'forge skill install <path>' (human confirmation -> approved.flag) and 'forge skill enable <name>'.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var prompter Prompter
+			if yes {
+				prompter = NewScriptedPrompter(nil)
+			} else {
+				prompter = NewStdPrompter(os.Stdin, os.Stdout)
+			}
+			return runSkillMine(cmd.Context(), yes, force, prompter, os.Stdout)
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "accept all defaults without prompting")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing proposal directory")
+	return cmd
+}
+
+func runSkillMine(ctx context.Context, yes, force bool, prompter Prompter, out io.Writer) error {
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		return daemonHint(err)
+	}
+	defer cl.Close()
+
+	list, err := cl.ListSessions(ctx, 1000, 0)
+	if err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+
+	var trajs []mining.Trajectory
+	for _, s := range list.Sessions {
+		if s.Metadata == nil {
+			continue
+		}
+		v, ok := s.Metadata["success"]
+		if !ok {
+			continue
+		}
+		isSuccess := false
+		switch vv := v.(type) {
+		case bool:
+			isSuccess = vv
+		case string:
+			isSuccess = vv == "true"
+		}
+		if !isSuccess {
+			continue
+		}
+		msgsRes, err := cl.GetMessages(ctx, s.ID, 1000, 0)
+		if err != nil {
+			continue
+		}
+		traj := buildMiningTrajectory(s.ID, msgsRes.Messages)
+		if len(traj.Turns) == 0 {
+			continue
+		}
+		trajs = append(trajs, traj)
+	}
+
+	if len(trajs) == 0 {
+		fmt.Fprintln(out, "No successful sessions found. Mark sessions with 'forge session success <id>' first.")
+		return nil
+	}
+
+	opts := mining.Options{MinClusterSize: 2, Threshold: 0.4}
+	proposals := mining.Mine(trajs, opts)
+
+	if len(proposals) == 0 {
+		fmt.Fprintln(out, "No recurring workflows found (need at least 2 similar successful sessions).")
+		return nil
+	}
+
+	proposalsRoot := filepath.Join(".", ".forge", "skill-proposals")
+	for _, p := range proposals {
+		writeProposalIfAccepted(p, proposalsRoot, yes, force, prompter, out)
+	}
+
+	return nil
+}
+
+// writeProposalIfAccepted prints one mined proposal, asks the human for
+// confirmation (unless yes), and on acceptance writes its SKILL.md under
+// proposalsRoot. It reports whether a proposal file was written.
+// Proposals are NEVER auto-installed or auto-enabled (RF-4.4): activation
+// requires 'forge skill install <path>' (human confirmation -> approved.flag)
+// followed by 'forge skill enable <name>'.
+func writeProposalIfAccepted(p mining.Proposal, proposalsRoot string, yes, force bool, prompter Prompter, out io.Writer) bool {
+	fmt.Fprintf(out, "\nProposal: %s\n", p.Name)
+	fmt.Fprintf(out, "  Description: %s\n", p.Description)
+	fmt.Fprintf(out, "  Steps: %s\n", strings.Join(p.Steps, " -> "))
+	fmt.Fprintf(out, "  Source sessions: %s\n", strings.Join(p.SourceSessions, ", "))
+	fmt.Fprintf(out, "  Keywords: %s\n", strings.Join(p.ActivationKeywords, ", "))
+
+	ask := true
+	if !yes {
+		ask = prompter.Bool("Propose skill? [y/N]", false)
+	}
+	if !ask {
+		fmt.Fprintf(out, "  Skipped.\n")
+		return false
+	}
+
+	name := p.Name
+	desc := p.Description
+	category := p.Category
+	keywordsStr := strings.Join(p.ActivationKeywords, ", ")
+	if !yes {
+		name = prompter.Line("Skill name", name)
+		if !skillNameRe.MatchString(name) {
+			fmt.Fprintf(out, "  Invalid name %q: must match ^[a-z][a-z0-9_-]{1,63}$ — skipping.\n", name)
+			return false
+		}
+		desc = prompter.Line("Description", desc)
+		category = prompter.Line("Category", category)
+		if category == "" {
+			category = "custom"
+		}
+		keywordsStr = prompter.Line("Activation keywords (comma-separated)", keywordsStr)
+	} else {
+		if !skillNameRe.MatchString(name) {
+			fmt.Fprintf(out, "  Invalid derived name %q — skipping.\n", name)
+			return false
+		}
+	}
+
+	var keywords []string
+	if strings.TrimSpace(keywordsStr) != "" {
+		for _, part := range strings.Split(keywordsStr, ",") {
+			kw := strings.TrimSpace(part)
+			if kw != "" {
+				keywords = append(keywords, kw)
+			}
+		}
+	}
+
+	dir := filepath.Join(proposalsRoot, name)
+	if _, err := os.Stat(dir); err == nil && !force {
+		fmt.Fprintf(out, "  Proposal dir %q already exists (use --force to overwrite) — skipping.\n", dir)
+		return false
+	}
+	if force {
+		_ = os.RemoveAll(dir)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Fprintf(out, "  Failed to create dir: %v\n", err)
+		return false
+	}
+
+	var fm strings.Builder
+	fm.WriteString("---\n")
+	fm.WriteString(fmt.Sprintf("name: %q\n", name))
+	fm.WriteString(fmt.Sprintf("description: %q\n", desc))
+	if category != "" {
+		fm.WriteString(fmt.Sprintf("category: %q\n", category))
+	}
+	fm.WriteString("source: \"local\"\n")
+	if len(keywords) > 0 {
+		quoted := make([]string, len(keywords))
+		for i, k := range keywords {
+			quoted[i] = fmt.Sprintf("%q", k)
+		}
+		fm.WriteString(fmt.Sprintf("activation_keywords: [%s]\n", strings.Join(quoted, ", ")))
+	}
+	fm.WriteString("---\n")
+	body := p.Instructions + "\n"
+	fullContent := fm.String() + body
+
+	skillFile := filepath.Join(dir, "SKILL.md")
+	if err := os.WriteFile(skillFile, []byte(fullContent), 0o644); err != nil {
+		fmt.Fprintf(out, "  Failed to write SKILL.md: %v\n", err)
+		return false
+	}
+
+	tmpMgr := skill.NewManager(skill.Options{ApproveExternal: true})
+	if _, err := tmpMgr.Scan(proposalsRoot); err != nil {
+		loaded := tmpMgr.Loaded()
+		found := false
+		for _, n := range loaded {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			_ = os.RemoveAll(dir)
+			tmpMgr.Close()
+			fmt.Fprintf(out, "  Generated SKILL.md failed validation: %v — removed.\n", err)
+			return false
+		}
+	} else {
+		found := false
+		for _, n := range tmpMgr.Loaded() {
+			if n == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			_ = os.RemoveAll(dir)
+			tmpMgr.Close()
+			fmt.Fprintf(out, "  Generated skill not loaded after scan — removed.\n")
+			return false
+		}
+	}
+	tmpMgr.Close()
+
+	fmt.Fprintf(out, "  Wrote proposal to %s\n", skillFile)
+	fmt.Fprintf(out, "  Next steps: review the file, then 'forge skill install %s' (human confirmation -> approved.flag) and 'forge skill enable %s'\n", dir, name)
+	return true
+}
+
+func buildMiningTrajectory(sessionID string, msgs []daemon.MessageResult) mining.Trajectory {
+	ordered := make([]daemon.MessageResult, len(msgs))
+	copy(ordered, msgs)
+	if len(ordered) > 1 && ordered[0].Seq > ordered[len(ordered)-1].Seq {
+		for i, j := 0, len(ordered)-1; i < j; i, j = i+1, j-1 {
+			ordered[i], ordered[j] = ordered[j], ordered[i]
+		}
+	}
+
+	var traj mining.Trajectory
+	traj.SessionID = sessionID
+	var current *mining.Turn
+	var pendingToolCalls []string
+	var pendingSteps []*mining.Step
+
+	for _, m := range ordered {
+		switch m.Role {
+		case "user":
+			if current != nil {
+				traj.Turns = append(traj.Turns, *current)
+			}
+			current = &mining.Turn{UserPrompt: m.Content}
+			pendingSteps = nil
+			pendingToolCalls = nil
+		case "assistant":
+			if current == nil {
+				current = &mining.Turn{}
+			}
+			for _, tc := range m.ToolCalls {
+				step := mining.Step{
+					ToolName:    tc.Function.Name,
+					ArgsSummary: logging.Redact(tc.Function.Arguments),
+				}
+				current.Steps = append(current.Steps, step)
+				pendingToolCalls = append(pendingToolCalls, tc.ID)
+				pendingSteps = append(pendingSteps, &current.Steps[len(current.Steps)-1])
+			}
+		case "tool":
+			found := false
+			for i, id := range pendingToolCalls {
+				if id == m.ToolCallID && i < len(pendingSteps) {
+					pendingSteps[i].ResultSummary = logging.Redact(m.Content)
+					found = true
+					break
+				}
+			}
+			if !found && current != nil && len(current.Steps) > 0 {
+				last := &current.Steps[len(current.Steps)-1]
+				if last.ResultSummary == "" {
+					last.ResultSummary = logging.Redact(m.Content)
+				}
+			}
+		}
+	}
+	if current != nil {
+		traj.Turns = append(traj.Turns, *current)
+	}
+	var filtered []mining.Turn
+	for _, t := range traj.Turns {
+		if t.UserPrompt == "" && len(t.Steps) == 0 {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	traj.Turns = filtered
+	return traj
 }
