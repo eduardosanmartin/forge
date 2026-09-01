@@ -34,7 +34,16 @@ import (
 // change to be valid v4.
 const CurrentSchemaVersion = 4
 
-// Provider describes a single OpenAI-compatible inference endpoint.
+// Provider describes a single inference endpoint.
+// Supported kinds (config providers.<name>.kind):
+//   - "openai-compatible" — OpenAI-compatible chat completions (Ollama, OpenCode Zen, etc.)
+//     Example: {"kind":"openai-compatible","base_url":"http://127.0.0.1:11434/v1","models":["qwen2.5-coder:7b"]}
+//   - "anthropic" — Anthropic Messages API (https://api.anthropic.com)
+//     Example: {"kind":"anthropic","base_url":"https://api.anthropic.com","models":["claude-3-5-sonnet-20241022"],"api_key":"sk-ant-..."}
+//     Default base_url https://api.anthropic.com when empty. Requires x-api-key + anthropic-version:2023-06-01 headers.
+//   - "gemini" — Google Gemini generateContent API (https://generativelanguage.googleapis.com)
+//     Example: {"kind":"gemini","base_url":"https://generativelanguage.googleapis.com","models":["gemini-1.5-pro"],"api_key":"AIza..."}
+//     Default base_url https://generativelanguage.googleapis.com when empty. Auth via x-goog-api-key header (never query param).
 type Provider struct {
 	Kind       string            `json:"kind"`
 	BaseURL    string            `json:"base_url"`
@@ -476,9 +485,11 @@ func (c *Config) Validate() error {
 
 	for name, p := range c.Providers {
 		label := fmt.Sprintf("provider %q", name)
-		if p.Kind != "openai-compatible" {
+		switch p.Kind {
+		case "openai-compatible", "anthropic", "gemini":
+		default:
 			violations = append(violations, fmt.Errorf(
-				"%s: kind must be \"openai-compatible\", got %q", label, p.Kind))
+				"%s: kind must be one of \"openai-compatible\", \"anthropic\", \"gemini\", got %q", label, p.Kind))
 		}
 		u, err := url.Parse(p.BaseURL)
 		switch {

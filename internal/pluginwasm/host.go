@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 
@@ -316,6 +319,15 @@ func (h *hostEnv) gitRunHost() api.GoModuleFunc {
 }
 
 // netFetchHost implements forge_host.net_fetch(url_ptr,len) -> i64 packed.
+// Semantics (WU6 — real net_fetch):
+//   - After allowlist check, performs a real HTTP GET with context and 30s timeout.
+//   - Redirects are followed only if each redirect URL's host is in h.netAllowlist
+//     (same isHostAllowed check, port-stripped suffix match). Denied redirect aborts.
+//   - Response body is capped at 2 MiB via io.LimitReader; truncation is silent but
+//     documented (plugin receives truncated body).
+//   - Returns JSON {"url":..., "status": <int>, "content_type": "...", "body": "<truncated>"}.
+//     HTTP error statuses (4xx/5xx) are DATA, not Go errors — the plugin decides.
+//   - Transport errors return {"error":"..."} envelope.
 func (h *hostEnv) netFetchHost() api.GoModuleFunc {
 	return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		urlPtr := api.DecodeU32(stack[0])
@@ -333,9 +345,43 @@ func (h *hostEnv) netFetchHost() api.GoModuleFunc {
 			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: host not in allowlist: %q", rawURL))
 			return
 		}
-		// WU2 does not perform real fetch beyond allowlist; return stub for test.
-		// Real network fetch would require net/http with context and timeout; deferred until WU3+ if needed.
-		stack[0] = writeJSONResponse(ctx, mod, map[string]string{"url": rawURL, "content": "net_fetch stub: allowlisted"})
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if !isHostAllowed(req.URL.String(), h.netAllowlist) {
+					return fmt.Errorf("net_fetch denied: redirect host not in allowlist: %q", req.URL.String())
+				}
+				if len(via) >= 10 {
+					return fmt.Errorf("net_fetch: too many redirects")
+				}
+				return nil
+			},
+		}
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch: create request: %v", err))
+			return
+		}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch: %v", err))
+			return
+		}
+		defer resp.Body.Close()
+		const maxBody = 2 * 1024 * 1024 // 2 MiB cap, documented.
+		limited := io.LimitReader(resp.Body, maxBody)
+		bodyBytes, err := io.ReadAll(limited)
+		if err != nil {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch: read body: %v", err))
+			return
+		}
+		contentType := resp.Header.Get("Content-Type")
+		stack[0] = writeJSONResponse(ctx, mod, map[string]any{
+			"url":          rawURL,
+			"status":       resp.StatusCode,
+			"content_type": contentType,
+			"body":         string(bodyBytes),
+		})
 	})
 }
 

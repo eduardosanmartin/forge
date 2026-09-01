@@ -1,0 +1,11 @@
+name = "urlcheck"
+version = "0.1.0"
+description = "Dogfood urlcheck plugin proving net_fetch via WU6"
+source = "local"
+entrypoint = "urlcheck.wasm"
+permissions = ["net"]
+
+[[tools]]
+name = "urlcheck_status"
+description = "Checks URL status via net_fetch"
+permission = "net"

@@ -23,6 +23,7 @@ type ModelInfo struct {
 // Registry manages multiple LLM providers and supports hot-swapping the default model.
 type Registry struct {
 	providers       map[string]Provider
+	providerKinds   map[string]string
 	defaultProvider string
 	defaultModel    string
 	router          *routing.ModelRouter
@@ -44,6 +45,7 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 
 	r := &Registry{
 		providers:       make(map[string]Provider),
+		providerKinds:   make(map[string]string),
 		defaultProvider: cfg.DefaultProvider,
 		defaultModel:    "",
 		allowedHosts:    allowedHosts,
@@ -61,6 +63,7 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 			return nil, fmt.Errorf("create provider %q: %w", name, err)
 		}
 		r.providers[name] = provider
+		r.providerKinds[name] = p.Kind
 	}
 
 	// Validate default provider exists
@@ -120,6 +123,10 @@ func (r *Registry) createProvider(name string, p config.Provider) (Provider, err
 	switch p.Kind {
 	case "openai-compatible":
 		return NewOllamaProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+	case "anthropic":
+		return NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+	case "gemini":
+		return NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", p.Kind)
 	}
@@ -209,10 +216,14 @@ func (r *Registry) ListAll() []ModelInfo {
 			continue
 		}
 		for _, m := range models {
+			kind := r.providerKinds[name]
+			if kind == "" {
+				kind = "openai-compatible"
+			}
 			result = append(result, ModelInfo{
 				Name:     m,
 				Provider: name,
-				Kind:     "openai-compatible",
+				Kind:     kind,
 			})
 		}
 	}
