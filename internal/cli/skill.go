@@ -195,6 +195,16 @@ func runSkillWizard(p Prompter, out io.Writer, skillsRoot string, force bool) er
 	return nil
 }
 
+// RunSkillInstallForTest is an exported wrapper for runSkillInstall (used for WU7 exit verification).
+func RunSkillInstallForTest(src, skillsRoot string, force, yes bool, prompter Prompter, out io.Writer) error {
+	return runSkillInstall(src, skillsRoot, force, yes, prompter, out)
+}
+
+// RunSkillWizardForTest is an exported wrapper for runSkillWizard (used for WU7 wizard validity check).
+func RunSkillWizardForTest(p Prompter, out io.Writer, skillsRoot string, force bool) error {
+	return runSkillWizard(p, out, skillsRoot, force)
+}
+
 func stripChecksumLineBytes(data []byte) []byte {
 	lines := strings.Split(string(data), "\n")
 	var kept []string
