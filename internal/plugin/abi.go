@@ -82,4 +82,11 @@ const (
 	// ExportToolInvoke is the exported function invoked to execute a tool.
 	// WU2 dispatches tool calls through this entry point.
 	ExportToolInvoke = "forge_tool_invoke"
+
+	// ExportAlloc is the exported function the host calls to allocate buffers
+	// inside plugin linear memory. Signature: forge_alloc(size i32) i32 (ptr).
+	// The plugin implements a bump or heap allocator; the host writes arguments
+	// into the returned region and passes its ptr/len to forge_tool_invoke.
+	// Added in WU2 as an additive extension of the ABI (RNF-3.2).
+	ExportAlloc = "forge_alloc"
 )

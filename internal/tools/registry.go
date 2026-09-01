@@ -111,6 +111,14 @@ func (r *Registry) List() []Tool {
 	return list
 }
 
+// PermRequestSource lets a tool supply its own permission request instead of
+// the name-based mapping in BuildPermsRequest. WU2 plugin tools implement
+// this to map their declared manifest permission kind to a perms.Request;
+// native tools continue using BuildPermsRequest unchanged.
+type PermRequestSource interface {
+	PermsRequest(args map[string]any) (perms.Request, error)
+}
+
 // Execute validates args, checks permissions, executes the tool, and applies fencing + redaction.
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (Result, error) {
 	tool, ok := r.Get(name)
@@ -123,10 +131,19 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		return Result{Content: "ERROR: " + err.Error()}, nil
 	}
 
-	// 2. Build perms.Request
-	permsReq, err := BuildPermsRequest(name, args)
-	if err != nil {
-		return Result{Content: "ERROR: " + err.Error()}, nil
+	// 2. Build perms.Request (plugin tools supply their own via PermRequestSource)
+	var permsReq perms.Request
+	var err error
+	if src, ok := tool.(PermRequestSource); ok {
+		permsReq, err = src.PermsRequest(args)
+		if err != nil {
+			return Result{Content: "ERROR: " + err.Error()}, nil
+		}
+	} else {
+		permsReq, err = BuildPermsRequest(name, args)
+		if err != nil {
+			return Result{Content: "ERROR: " + err.Error()}, nil
+		}
 	}
 
 	// Args delivery channel for the v1 custom tools: Registry.Execute is
@@ -206,6 +223,24 @@ func NewDefaultRegistry(permsEngine *perms.Engine, workspaceRoot string, logger 
 		r.Register(tool)
 	}
 	return r
+}
+
+// Unregister removes a tool by name. It is mutex-safe and idempotent: removing
+// a non-existent tool is a no-op. WU2's plugin manager calls this on Disable.
+func (r *Registry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.tools[name]; !exists {
+		return
+	}
+	delete(r.tools, name)
+	// Remove from toolOrder preserving order of remaining tools.
+	for i, n := range r.toolOrder {
+		if n == name {
+			r.toolOrder = append(r.toolOrder[:i], r.toolOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 // NewDefaultRegistryWithDeps creates a registry with the base tools plus the

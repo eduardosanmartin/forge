@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/spf13/cobra v1.10.2
+	github.com/tetratelabs/wazero v1.12.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.57.0
 )
