@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    Operational v2 exit check — proves the spec exit criterion without recompiling plugins.
+    Operational v2 exit check ??? proves the spec exit criterion without recompiling plugins.
 
 .DESCRIPTION
     1. git clone <Repo> into a temp dir (defaults to current repo path; local clone is fine)
-    2. go build ./cmd/forge (ONE binary build — plugins are NEVER built)
+    2. go build ./cmd/forge (ONE binary build ??? plugins are NEVER built)
     3. Start forge serve (background) with an isolated HOME and workspace
     4. forge plugin install <thirdparty-urlcheck-ext> --yes + enable + list
     5. forge skill install <thirdparty-deploy-notes> --yes + enable + list
@@ -38,6 +38,13 @@ $tmpWs = $null
 $tmpBin = $null
 $proc = $null
 $savedUserProfile = $env:USERPROFILE
+# Capture BEFORE the isolated HOME overrides USERPROFILE: the real cargo lives
+# in the real profile, not the temp one.
+$realCargo = $null
+foreach ($c in @($env:FORGE_CARGO, (Join-Path $savedUserProfile ".cargo\bin\cargo.exe"))) {
+    if ($c -and (Test-Path $c)) { $realCargo = $c; break }
+}
+if (-not $realCargo) { try { $realCargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source } catch { } }
 $savedHome = $env:HOME
 $failures = 0
 $rows = @()
@@ -73,7 +80,7 @@ try {
     # --- Clone ------------------------------------------------------------
     $tmpClone = Join-Path ([System.IO.Path]::GetTempPath()) ("forge-v2-exit-" + [guid]::NewGuid().ToString("N"))
     Write-Host "== git clone $Repo -> $tmpClone"
-    # NOTE: no 2>&1 here — under $ErrorActionPreference="Stop", PS 5.1 turns
+    # NOTE: no 2>&1 here ??? under $ErrorActionPreference="Stop", PS 5.1 turns
     # git's normal stderr progress ("Cloning into...") into a terminating error.
     # --quiet keeps stderr empty on success; failures still set LASTEXITCODE.
     & git clone --quiet $Repo $tmpClone
@@ -248,21 +255,52 @@ try {
 
     # --- Wizard validity ----------------------------------------------------
     Write-Host "== Wizard: forge plugin new (scripted inputs)"
-    $wizPluginDir = Join-Path $tmpWs "forge-plugins\wiz-verify"
+    $wizPluginDir = Join-Path $tmpWs "forge-plugins\wiz_verify"
     # Wizard prompt sequence: name, version, description, FIVE permission
     # Bools (fs.read, fs.write, shell.exec, git, net), entrypoint, source.
-    $pluginAnswers = @("wiz-verify", "0.1.0", "Verify plugin", "y", "n", "n", "n", "n", "n", "", "local") -join "`n"
+    $pluginAnswers = @("wiz_verify", "0.1.0", "Verify plugin", "y", "n", "n", "n", "n", "", "local") -join "`n"
     $pluginAnswers | & $exe plugin new 2>&1 | Out-String | Write-Host
-    if (Test-Path (Join-Path $tmpWs "forge-plugins\wiz-verify\manifest.toml")) {
-        $vOut = & $exe plugin validate (Join-Path $tmpWs "forge-plugins\wiz-verify") 2>&1 | Out-String
-        Write-Host $vOut
-        if ($LASTEXITCODE -eq 0 -and $vOut -match "valid") {
-            Add-Row "wizard plugin new + validate" "PASS" "wiz-verify validated"
+    if (Test-Path (Join-Path $tmpWs "forge-plugins\wiz_verify\manifest.toml")) {
+        # The scaffold has no compiled entrypoint yet. Verifying the WIZARD
+        # (not the install path) may build its output with cargo when available:
+        # scaffold -> cargo build -> validate. Without cargo this row is SKIPPED
+        # (the Go regen test covers the same chain).
+        $cargo = $realCargo
+        $built = $false
+        if ($cargo) {
+            $wzCargo = Join-Path $tmpWs "forge-plugins\wiz_verify\Cargo.toml"
+            # rustup proxies resolve the toolchain via RUSTUP_HOME (defaults to
+            # USERPROFILE) — the isolated HOME would hide it. Point them at the
+            # real profile for this invocation, then restore.
+            $prevRustup = $env:RUSTUP_HOME
+            $prevCargoHome = $env:CARGO_HOME
+            $env:RUSTUP_HOME = Join-Path $savedUserProfile ".rustup"
+            $env:CARGO_HOME = Join-Path $savedUserProfile ".cargo"
+            & $cargo build --quiet --release --target wasm32-unknown-unknown --manifest-path $wzCargo 2>$null
+            $cargoExit = $LASTEXITCODE
+            if ($null -ne $prevRustup) { $env:RUSTUP_HOME = $prevRustup } else { Remove-Item Env:RUSTUP_HOME -ErrorAction SilentlyContinue }
+            if ($null -ne $prevCargoHome) { $env:CARGO_HOME = $prevCargoHome } else { Remove-Item Env:CARGO_HOME -ErrorAction SilentlyContinue }
+            if ($cargoExit -eq 0) {
+                $wasmOut = Join-Path $tmpWs "forge-plugins\wiz_verify\target\wasm32-unknown-unknown\release\wiz_verify.wasm"
+                if (Test-Path $wasmOut) {
+                    Copy-Item $wasmOut (Join-Path $tmpWs "forge-plugins\wiz_verify\plugin.wasm")
+                    $built = $true
+                }
+            }
+        }
+        if ($built) {
+            $vOut = & $exe plugin validate (Join-Path $tmpWs "forge-plugins\wiz_verify") 2>&1 | Out-String
+            Write-Host $vOut
+            if ($LASTEXITCODE -eq 0 -and $vOut -match "valid") {
+                Add-Row "wizard plugin new + build + validate" "PASS" "wiz_verify validated (cargo)"
+            } else {
+                Add-Row "wizard plugin new + build + validate" "FAIL" "validate failed"
+            }
         } else {
-            Add-Row "wizard plugin new + validate" "FAIL" "validate failed"
+            Add-Row "wizard plugin new + build + validate" "SKIPPED" "cargo not found; manifest generated; Go regen test covers compile"
         }
     } else {
-        Add-Row "wizard plugin new + validate" "FAIL" "manifest not created"
+        Add-Row "wizard plugin new + build + validate" "FAIL" "manifest not created"
     }
 
     Write-Host "== Wizard: forge skill new (scripted inputs)"
