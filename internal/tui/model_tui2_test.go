@@ -477,6 +477,14 @@ func TestEchoReplacedEvenWithToolEventInBetween(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("entries after turn = %d (echo duplicated?): %+v", len(got), got)
 	}
+	// Order: the confirmed user message must sit BEFORE the tool line that
+	// interleaved mid-turn (in-place echo replacement preserves chronology).
+	if got[0].Role != "user" || got[0].Content != "hello" {
+		t.Fatalf("first entry should be the confirmed user message, got %+v", got[0])
+	}
+	if !got[1].IsTool {
+		t.Fatalf("second entry should be the tool line, got %+v", got[1])
+	}
 	helloCount := 0
 	for _, e := range got {
 		if e.Role == "user" && e.Content == "hello" {
