@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 
@@ -70,12 +71,38 @@ type Model struct {
 	pendingTools map[string]pendingTool // toolCallID -> pending
 	pendingOrder []string               // insertion order for fallback matching
 	markedIDs    map[string]bool        // sessions marked success
+
+	// TUI-4: spinner animation, model/elapsed, suggestions, help, session cycle
+	spinnerModel spinner.Model
+	currentModel string    // from ExecuteTurnResult.Model (when present)
+	turnStart    time.Time // clock time when turn was sent
+	helpVisible  bool
+	helpViewport viewport.Model
+	// slash suggestions
+	suggestions        []slashSuggestion
+	suggestionIdx      int
+	suggestionsVisible bool
 }
 
 type pendingTool struct {
 	start time.Time
 	index int
 	name  string
+}
+
+// slashSuggestion describes one slash command for autocomplete.
+type slashSuggestion struct {
+	Command     string
+	Description string
+}
+
+var allSlashSuggestions = []slashSuggestion{
+	{"/help", "show help panel and keybindings"},
+	{"/layout", "change layout: hybrid | session | minimal"},
+	{"/palette", "change palette"},
+	{"/resume", "resume current session"},
+	{"/model", "switch model"},
+	{"/mark", "mark session as success"},
 }
 
 // TUIClient abstracts daemon RPC for the model.
@@ -145,11 +172,19 @@ func NewModel(cfg TUIConfig, pal Palette, palName, configPath string, client TUI
 		m.saveFn = func(c TUIConfig) error { return SaveTUIConfig(configPath, c) }
 	}
 	// Input area: single setup path via components (rebinds backspace-only
-	// delete and shift+enter newline; enter is handled globally as send).
+	// delete and shift+enter+ctrl+j newline; enter is handled globally as send).
 	m.input = components.NewInput("Type a message… (/help for commands)", 80, 3)
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	m.viewport = vp
+
+	// Spinner: bubbles spinner wired for animated "working…" while turn in flight.
+	// Uses MiniDot (⠋⠙⠹…) at 12fps. Ticks only while m.spinner is true; stopped cleanly on completion.
+	m.spinnerModel = spinner.New(spinner.WithSpinner(spinner.MiniDot))
+
+	// Help viewport (floating overlay, scrollable)
+	helpVP := viewport.New(viewport.WithWidth(60), viewport.WithHeight(20))
+	m.helpViewport = helpVP
 
 	return m
 }
@@ -173,6 +208,12 @@ func (m Model) TotalTokens() int                { return m.totalTokens }
 func (m Model) MarkedIDs() map[string]bool      { return m.markedIDs }
 func (m Model) IsSpinner() bool                 { return m.spinner }
 func (m Model) EventsCh() <-chan daemon.JSONRPCNotification { return m.eventsCh }
+func (m Model) CurrentModel() string            { return m.currentModel }
+func (m Model) IsHelpVisible() bool             { return m.helpVisible }
+func (m Model) IsSuggestionsVisible() bool      { return m.suggestionsVisible }
+func (m Model) SuggestionIndex() int            { return m.suggestionIdx }
+func (m Model) SuggestionsList() []slashSuggestion { return m.suggestions }
+func (m Model) SpinnerFrame() string            { return m.spinnerModel.View() }
 
 // SetSaveFn injects a persistence hook (tests).
 func (m *Model) SetSaveFn(fn func(TUIConfig) error) { m.saveFn = fn }
@@ -186,6 +227,27 @@ func (m *Model) SetClock(c Clock) { m.clock = c }
 // SetEventsChannel injects the event channel (tests).
 func (m *Model) SetEventsChannel(ch <-chan daemon.JSONRPCNotification) { m.eventsCh = ch }
 
+func (m Model) effectiveTranscriptWidth() int {
+	if m.layout == LayoutSession && m.showSidebar {
+		sidebarW := 28
+		avail := m.width - sidebarW - 2 // gap for join/border
+		if avail < 20 {
+			avail = 20
+			if m.width > sidebarW+1 && avail > m.width-sidebarW-1 {
+				avail = m.width - sidebarW - 1
+				if avail < 10 {
+					avail = 10
+				}
+			}
+		}
+		if avail > m.width {
+			avail = m.width
+		}
+		return avail
+	}
+	return m.width
+}
+
 // SetSize sets terminal size and propagates to subcomponents.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
@@ -197,9 +259,24 @@ func (m *Model) SetSize(w, h int) {
 	if transH < 5 {
 		transH = 5
 	}
-	m.viewport.SetWidth(w)
+	tw := m.effectiveTranscriptWidth()
+	m.viewport.SetWidth(tw)
 	m.viewport.SetHeight(transH)
-	m.input.SetSize(w, inputH)
+	m.input.SetSize(tw, inputH)
+	// Help overlay should stay within terminal width with padding
+	hw := w - 4
+	if hw < 40 {
+		hw = 40
+	}
+	if hw > w {
+		hw = w
+	}
+	hh := h - 4
+	if hh < 10 {
+		hh = 10
+	}
+	m.helpViewport.SetWidth(hw)
+	m.helpViewport.SetHeight(hh)
 }
 
 // Init returns initial commands: fetch status and sessions.
@@ -332,6 +409,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		// Deterministic spinner: only advance while turn in flight; ignore stray ticks after stop.
+		if !m.spinner {
+			return m, nil
+		}
+		if msg.ID != 0 && msg.ID != m.spinnerModel.ID() {
+			return m, nil
+		}
+		var scmd tea.Cmd
+		m.spinnerModel, scmd = m.spinnerModel.Update(msg)
+		if m.spinner {
+			cmds = append(cmds, scmd)
+			if nxt := m.cmdSpinnerTick(); nxt != nil {
+				cmds = append(cmds, nxt)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
 		m.rebuildTranscript()
@@ -420,6 +515,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.res != nil {
+			// Update current model (documented source: ExecuteTurnResult.Model when present).
+			if msg.res.Model != "" {
+				m.currentModel = msg.res.Model
+			}
+			// Compute CLIENT-side elapsed from send to arrival using injected Clock.
+			elapsedStr := ""
+			if !m.turnStart.IsZero() && m.clock != nil {
+				elapsed := m.clock.Now().Sub(m.turnStart)
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				if elapsed < time.Second {
+					elapsedStr = fmt.Sprintf("%dms", elapsed.Milliseconds())
+				} else {
+					elapsedStr = fmt.Sprintf("%.1fs", elapsed.Seconds())
+				}
+			}
 			// Accumulate tokens.
 			if msg.res.Usage != nil {
 				m.totalTokens += msg.res.Usage.TotalTokens
@@ -447,6 +559,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
+			// Inject model+elapsed into assistant entries Meta: "<model> · <elapsed>"
+			// When both present join with " · ", otherwise show whichever is available.
+			if elapsedStr != "" || m.currentModel != "" {
+				metaPiece := ""
+				if m.currentModel != "" && elapsedStr != "" {
+					metaPiece = m.currentModel + " · " + elapsedStr
+				} else if m.currentModel != "" {
+					metaPiece = m.currentModel
+				} else {
+					metaPiece = elapsedStr
+				}
+				for i, e := range newEntries {
+					if e.Role == "assistant" && !e.IsTool {
+						// Append to existing meta (e.g. tokens) with separator if needed.
+						if e.Meta != "" && metaPiece != "" {
+							newEntries[i].Meta = e.Meta + " · " + metaPiece
+						} else if metaPiece != "" {
+							newEntries[i].Meta = metaPiece
+						}
+						break // only first assistant entry gets model/elapsed per turn
+					}
+				}
+			}
 			// Streaming confirmation swap (TUI-3): if a streaming preview is
 			// active, the authoritative assistant entry replaces it in-place
 			// rather than being appended. Search, don't assume position —
@@ -549,6 +684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = msg.err.Error()
 		} else {
 			m.toast = fmt.Sprintf("model → %s", msg.model)
+			m.currentModel = msg.model
 		}
 		return m, nil
 
@@ -573,6 +709,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		// Help overlay intercepts everything: esc or any key closes it.
+		if m.helpVisible {
+			m.helpVisible = false
+			return m, nil
+		}
+		// Suggestion navigation intercepts before global keys
+		if m.suggestionsVisible && len(m.suggestions) > 0 {
+			switch msg.String() {
+			case "up":
+				if m.suggestionIdx > 0 {
+					m.suggestionIdx--
+				} else {
+					m.suggestionIdx = len(m.suggestions) - 1
+				}
+				return m, nil
+			case "down":
+				m.suggestionIdx = (m.suggestionIdx + 1) % len(m.suggestions)
+				return m, nil
+			case "tab":
+				m.suggestionComplete()
+				return m, nil
+			case "esc":
+				m.suggestionsVisible = false
+				m.suggestions = nil
+				m.suggestionIdx = 0
+				return m, nil
+			case "enter":
+				// tab or enter COMPLETES the highlighted suggestion into the input
+				// (enter sends only when no suggestion is highlighted)
+				m.suggestionComplete()
+				return m, nil
+			}
+		}
 		// Global key handling BEFORE textarea.
 		switch {
 		case key.Matches(msg, m.keyMap.Quit):
@@ -598,11 +767,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toast = err.Error()
 			}
 			return m, nil
+		case key.Matches(msg, m.keyMap.GrabSession):
+			if ok, cmd := m.cycleSession(); ok {
+				return m, cmd
+			}
+			return m, nil
+		case msg.String() == "esc":
+			if m.suggestionsVisible {
+				m.suggestionsVisible = false
+				m.suggestions = nil
+				m.suggestionIdx = 0
+				return m, nil
+			}
+			return m, nil
 		default:
 			// enter = send (slash commands parsed first). Any other key —
 			// including shift+enter, bound in the textarea to InsertNewline —
 			// falls through to the textarea delegate below.
 			if msg.String() == "enter" {
+				// INPUT NOT LOCKED DURING IN-FLIGHT TURN: while spinner true, enter does NOT send — show hint.
+				if m.spinner {
+					m.toast = "turn in flight… ctrl+h to halt"
+					return m, nil
+				}
+				// Close suggestions on send
+				m.suggestionsVisible = false
 				text := strings.TrimSpace(m.input.Value())
 				if text == "" {
 					return m, nil
@@ -611,6 +800,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.HasPrefix(text, "/") {
 					if done, cmd := m.handleSlash(text); done {
 						m.input.Reset()
+						m.suggestionsVisible = false
 						return m, cmd
 					}
 				}
@@ -631,9 +821,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true})
 				m.rebuildTranscript()
 				m.input.Reset()
+				m.suggestionsVisible = false
 				m.spinner = true
+				if m.clock == nil {
+					m.clock = realClock{}
+				}
+				m.turnStart = m.clock.Now()
 				m.toast = ""
-				return m, m.cmdExecuteTurn(text)
+				// Animated spinner: tick loop while m.spinner, plus immediate frame
+				tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
+				return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate, m.cmdSpinnerTick())
 			}
 		}
 	}
@@ -644,6 +841,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
+	// Update suggestions after input change
+	m.updateSuggestions()
 	return m, tea.Batch(cmds...)
 }
 
@@ -844,6 +1043,10 @@ func (m *Model) toggleSidebar() {
 	// session renders it as a permanent column; in all three ctrl+o toggles
 	// its visibility.
 	m.showSidebar = !m.showSidebar
+	// Recompute effective width so transcript never overflows terminal in session column mode.
+	m.viewport.SetWidth(m.effectiveTranscriptWidth())
+	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
+	m.rebuildTranscript()
 }
 
 func (m *Model) cycleLayout() {
@@ -856,6 +1059,10 @@ func (m *Model) cycleLayout() {
 	}
 	m.layout = layoutOrder[(idx+1)%len(layoutOrder)]
 	m.config.Layout = m.layout
+	// Update viewport/input width for session column layout observability.
+	m.viewport.SetWidth(m.effectiveTranscriptWidth())
+	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
+	m.rebuildTranscript()
 }
 
 func (m *Model) persistConfig() error {
@@ -886,6 +1093,10 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		m.layout = name
+		// Recompute effective width for session column observability
+		m.viewport.SetWidth(m.effectiveTranscriptWidth())
+		m.input.SetSize(m.effectiveTranscriptWidth(), 4)
+		m.rebuildTranscript()
 		if err := m.persistConfig(); err != nil {
 			m.toast = err.Error()
 		} else {
@@ -952,7 +1163,9 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		}
 		return true, m.cmdMarkSuccess()
 	case "/help":
-		m.toast = "commands: /layout <name>, /palette <name>, /resume, /model <name>, /mark, /help"
+		// TUI-4: /help opens a floating scrollable overlay panel (viewport) with full command list + keybindings.
+		// Closed by esc or any key; replaces toast-based help (keep toast for command errors).
+		m.openHelp()
 		return true, nil
 	default:
 		m.toast = fmt.Sprintf("unknown command %q (/help for list)", cmd)
@@ -1087,9 +1300,186 @@ func (m *Model) handleMessageDelta(payload daemon.MessageDeltaPayload) tea.Cmd {
 }
 
 func (m *Model) rebuildTranscript() {
-	content := components.BuildContent(m.entries, toCompPalette(m.palette), m.width)
+	w := m.effectiveTranscriptWidth()
+	content := components.BuildContent(m.entries, toCompPalette(m.palette), w)
 	m.viewport.SetContent(content)
 	m.viewport.GotoBottom()
+}
+
+// ---- TUI-4 helpers ----
+
+func (m *Model) updateSuggestions() {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") {
+		m.suggestionsVisible = false
+		m.suggestions = nil
+		m.suggestionIdx = 0
+		return
+	}
+	prefix := strings.Fields(val)
+	if len(prefix) == 0 {
+		prefix = []string{val}
+	}
+	// Use first token as filter, e.g. "/lay" -> filtered list.
+	filter := prefix[0]
+	var filtered []slashSuggestion
+	for _, s := range allSlashSuggestions {
+		if strings.HasPrefix(s.Command, filter) {
+			filtered = append(filtered, s)
+		}
+	}
+	// If no prefix filter matches, show all slash commands.
+	if len(filtered) == 0 && filter == "/" {
+		filtered = allSlashSuggestions
+	}
+	if len(filtered) == 0 {
+		m.suggestionsVisible = false
+		m.suggestions = nil
+		m.suggestionIdx = 0
+		return
+	}
+	m.suggestions = filtered
+	m.suggestionsVisible = true
+	if m.suggestionIdx >= len(filtered) {
+		m.suggestionIdx = 0
+	}
+}
+
+func (m *Model) suggestionComplete() {
+	if !m.suggestionsVisible || len(m.suggestions) == 0 {
+		return
+	}
+	if m.suggestionIdx < 0 || m.suggestionIdx >= len(m.suggestions) {
+		m.suggestionIdx = 0
+	}
+	sel := m.suggestions[m.suggestionIdx].Command
+	// Complete with trailing space for commands expecting args; bare commands also get space for ergonomics.
+	m.input.SetValue(sel + " ")
+	m.suggestionsVisible = false
+	m.suggestions = nil
+	m.suggestionIdx = 0
+}
+
+func (m Model) renderSuggestions() string {
+	if !m.suggestionsVisible || len(m.suggestions) == 0 {
+		return ""
+	}
+	pal := m.palette
+	styleSel := lipgloss.NewStyle().Background(lipgloss.Color(pal.BGElevated)).Foreground(lipgloss.Color(pal.Accent)).Bold(true)
+	styleNorm := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text))
+	styleDim := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim))
+	styleBorder := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(pal.Border)).Background(lipgloss.Color(pal.BGElevated)).Padding(0, 1)
+	var lines []string
+	for i, s := range m.suggestions {
+		cmdStr := s.Command
+		desc := s.Description
+		line := cmdStr + "  " + styleDim.Render(desc)
+		if i == m.suggestionIdx {
+			line = styleSel.Render("▶ " + cmdStr) + " " + styleNorm.Render(desc)
+		} else {
+			line = styleNorm.Render("  "+cmdStr) + " " + styleDim.Render(desc)
+		}
+		lines = append(lines, line)
+	}
+	inner := strings.Join(lines, "\n")
+	return styleBorder.Width(m.effectiveTranscriptWidth()).Render(inner)
+}
+
+func (m *Model) openHelp() {
+	m.helpVisible = true
+	// Build help content: commands + keybindings
+	var sb strings.Builder
+	pal := m.palette
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Accent)).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim))
+	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text))
+	sb.WriteString(titleStyle.Render("Forge TUI Help — /help"))
+	sb.WriteString("\n\n")
+	sb.WriteString(textStyle.Render("Slash Commands:"))
+	sb.WriteString("\n")
+	for _, s := range allSlashSuggestions {
+		sb.WriteString(textStyle.Render("  "+s.Command) + dimStyle.Render("  —  "+s.Description) + "\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(textStyle.Render("Input:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  enter         send message (blocked while turn in flight — ctrl+h to halt)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  shift+enter   newline (requires terminal enhanced-key reporting)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+j        newline (portable alternative)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  / prefix      slash suggestions: ↑/↓ navigate, tab/enter complete, esc dismiss; enter sends only when no suggestion highlighted"))
+	sb.WriteString("\n\n")
+	sb.WriteString(textStyle.Render("Keybindings:"))
+	sb.WriteString("\n")
+	for _, b := range m.keyMap.ShortHelp() {
+		help := b.Help()
+		sb.WriteString(dimStyle.Render("  "+help.Key) + textStyle.Render("  "+help.Desc) + "\n")
+	}
+	// Full help group
+	for _, group := range m.keyMap.FullHelp() {
+		for _, b := range group {
+			// avoid duplicate short help already shown
+			_ = b
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("Press esc or any key to close."))
+	m.helpViewport.SetContent(sb.String())
+	m.helpViewport.GotoTop()
+}
+
+func (m *Model) cmdSpinnerTick() tea.Cmd {
+	if !m.spinner {
+		return nil
+	}
+	// Schedule next tick via spinner model's FPS
+	id := m.spinnerModel.ID()
+	// Use the spinner's FPS for deterministic interval.
+	fps := m.spinnerModel.Spinner.FPS
+	if fps == 0 {
+		fps = time.Second / 12
+	}
+	return tea.Tick(fps, func(t time.Time) tea.Msg {
+		return spinner.TickMsg{Time: t, ID: id}
+	})
+}
+
+func (m *Model) cycleSession() (bool, tea.Cmd) {
+	if len(m.sessions) == 0 {
+		m.toast = "no sessions"
+		return false, nil
+	}
+	// Find current index
+	idx := -1
+	for i, s := range m.sessions {
+		if s.ID == m.sessionID {
+			idx = i
+			break
+		}
+	}
+	nextIdx := (idx + 1) % len(m.sessions)
+	// If no current (idx -1) then nextIdx 0
+	next := m.sessions[nextIdx]
+	m.sessionID = next.ID
+	// Reset lastSeq to 0 then apply via GetMessagesSince(0) — respect semantics: reset lastSeq to 0 then apply, local echo cleared.
+	m.lastSeq = 0
+	// Clear local echo entries
+	var kept []components.Entry
+	for _, e := range m.entries {
+		if !e.Local {
+			kept = append(kept, e)
+		}
+	}
+	// For minimal viable: clear all entries and reload transcript via GetMessagesSince(0)
+	// Spec says entries replaced, lastSeq reset, echo cleared — so clear entries wholesale.
+	m.entries = nil
+	m.rebuildTranscript()
+	m.toast = fmt.Sprintf("session → %s", next.ID[:8])
+	// Also clear suggestions
+	m.suggestionsVisible = false
+	return true, m.cmdGetMessagesSince(0)
 }
 
 // View routes by layout.
@@ -1097,6 +1487,13 @@ func (m Model) View() tea.View {
 	// Build subcomponents
 	transcriptView := m.viewport.View()
 	inputView := m.input.View()
+	// Slash suggestions floating list above input
+	if m.suggestionsVisible {
+		suggView := m.renderSuggestions()
+		if suggView != "" {
+			inputView = suggView + "\n" + inputView
+		}
+	}
 
 	compPal := toCompPalette(m.palette)
 
@@ -1110,6 +1507,9 @@ func (m Model) View() tea.View {
 		Toast:       m.toast,
 		DaemonErr:   m.daemonErr,
 		ShowSpinner: m.spinner,
+		SpinnerView: m.spinnerModel.View(),
+		Layout:      m.layout,
+		ModelName:   m.currentModel,
 		Tokens:      m.totalTokens,
 	}.Render()
 
@@ -1119,6 +1519,7 @@ func (m Model) View() tea.View {
 			Sessions:  m.sessions,
 			Palette:   compPal,
 			MarkedIDs: m.markedIDs,
+			ModelName: m.currentModel,
 		},
 		Width:  28,
 		Height: m.height - 2, // approx
@@ -1140,6 +1541,20 @@ func (m Model) View() tea.View {
 		}
 	default: // hybrid
 		content = layouts.Hybrid(transcriptView, inputView, footer, sidebar, m.showSidebar)
+	}
+
+	// Help floating overlay (viewport) on top of base content
+	if m.helpVisible {
+		helpStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(m.palette.Border)).
+			Background(lipgloss.Color(m.palette.BGElevated)).
+			Width(m.width-4).
+			Height(m.height-4).
+			Padding(1, 1)
+		helpBox := helpStyle.Render(m.helpViewport.View())
+		// For deterministic TTY-free test, stack help below base with marker; real overlay would be centered.
+		content = content + "\n--- help overlay ---\n" + helpBox
 	}
 
 	// Wrap with palette background

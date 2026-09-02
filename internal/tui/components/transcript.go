@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/lipgloss/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 )
 
@@ -64,11 +65,32 @@ func (m *TranscriptModel) SetEntries(entries []Entry) {
 	m.Viewport.GotoBottom()
 }
 
+// wrapPlain word-wraps plain text to width, breaking long tokens/URLs.
+// Uses lipgloss.Wrap which hard-wraps words exceeding the limit.
+func wrapPlain(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	if width < 10 {
+		width = 10
+	}
+	return lipgloss.Wrap(s, width, "")
+}
+
 // BuildContent is a pure function that renders entries into a string using the
 // palette tokens. User messages get an accent left-border block.
+// All content is word-wrapped to width (accounting for the 2-rune accent prefix
+// on user entries) and long tokens/URLs are hard-broken so no line exceeds width.
 func BuildContent(entries []Entry, pal Palette, width int) string {
 	if len(entries) == 0 {
-		return pal.FaintStyle().Render("No messages yet. Type a prompt to begin.")
+		msg := "No messages yet. Type a prompt to begin."
+		if width > 0 {
+			msg = wrapPlain(msg, width)
+		}
+		return pal.FaintStyle().Render(msg)
+	}
+	if width <= 0 {
+		width = 80
 	}
 	var sb strings.Builder
 	for i, e := range entries {
@@ -81,28 +103,105 @@ func BuildContent(entries []Entry, pal Palette, width int) string {
 			if e.Meta != "" {
 				line += " · " + e.Meta
 			}
-			sb.WriteString(pal.DimStyle().Render(line))
+			wrapped := wrapPlain(line, width)
+			wLines := strings.Split(wrapped, "\n")
+			for li, wl := range wLines {
+				if li > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(pal.DimStyle().Render(wl))
+			}
 		case e.Role == "user":
-			// Accent left-border block.
-			block := pal.AccentStyle().Render("▎ ") + pal.TextStyle().Render(e.Content)
-			sb.WriteString(block)
-		case e.Role == "assistant":
-			if e.Streaming {
-				// Deterministic caret marker for in-flight streaming preview.
-				// Static "▌" in accent color — no time-based blinking, so goldens/tests are stable.
-				sb.WriteString(pal.TextStyle().Render(e.Content))
-				sb.WriteString(pal.AccentStyle().Render("▌"))
-			} else {
-				sb.WriteString(pal.TextStyle().Render(e.Content))
+			// Accent left-border block. Content width is reduced by prefix width (2).
+			avail := width - 2
+			if avail < 10 {
+				avail = 10
+			}
+			plainWrapped := wrapPlain(e.Content, avail)
+			lines := strings.Split(plainWrapped, "\n")
+			for li, ln := range lines {
+				if li > 0 {
+					sb.WriteString("\n")
+				}
+				if li == 0 {
+					sb.WriteString(pal.AccentStyle().Render("▎ ") + pal.TextStyle().Render(ln))
+				} else {
+					// Continuation indent aligns with content, not prefix.
+					sb.WriteString(pal.AccentStyle().Render("  ") + pal.TextStyle().Render(ln))
+				}
 			}
 			if e.Meta != "" {
 				sb.WriteString("\n")
-				sb.WriteString(pal.DimStyle().Render(e.Meta))
+				metaWrapped := wrapPlain(e.Meta, width)
+				mLines := strings.Split(metaWrapped, "\n")
+				for mi, ml := range mLines {
+					if mi > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(pal.DimStyle().Render(ml))
+				}
+			}
+		case e.Role == "assistant":
+			// Reserve 1 column for the streaming caret so the last wrapped
+			// line never exceeds width when the caret is appended.
+			avail := width
+			if e.Streaming {
+				avail = width - 1
+				if avail < 10 {
+					avail = 10
+				}
+			}
+			contentWrapped := wrapPlain(e.Content, avail)
+			lines := strings.Split(contentWrapped, "\n")
+			if e.Streaming {
+				for li, ln := range lines {
+					if li > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(pal.TextStyle().Render(ln))
+					if li == len(lines)-1 {
+						sb.WriteString(pal.AccentStyle().Render("▌"))
+					}
+				}
+			} else {
+				for li, ln := range lines {
+					if li > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(pal.TextStyle().Render(ln))
+				}
+			}
+			if e.Meta != "" {
+				sb.WriteString("\n")
+				metaWrapped := wrapPlain(e.Meta, width)
+				mLines := strings.Split(metaWrapped, "\n")
+				for mi, ml := range mLines {
+					if mi > 0 {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(pal.DimStyle().Render(ml))
+				}
 			}
 		case e.Role == "tool":
-			sb.WriteString(pal.DimStyle().Render(fmt.Sprintf("⏺ %s · %s", e.ToolName, e.Content)))
+			line := fmt.Sprintf("⏺ %s · %s", e.ToolName, e.Content)
+			wrapped := wrapPlain(line, width)
+			wLines := strings.Split(wrapped, "\n")
+			for li, wl := range wLines {
+				if li > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(pal.DimStyle().Render(wl))
+			}
 		default:
-			sb.WriteString(pal.TextStyle().Render(fmt.Sprintf("%s: %s", e.Role, e.Content)))
+			line := fmt.Sprintf("%s: %s", e.Role, e.Content)
+			wrapped := wrapPlain(line, width)
+			wLines := strings.Split(wrapped, "\n")
+			for li, wl := range wLines {
+				if li > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(pal.TextStyle().Render(wl))
+			}
 		}
 	}
 	return sb.String()

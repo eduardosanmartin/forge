@@ -23,10 +23,12 @@ func NewInput(placeholder string, w, h int) InputModel {
 	ta.Focus()
 
 	// Rebind DeleteCharacterBackward to backspace only (free ctrl+h) and
-	// InsertNewline to shift+enter only (enter is handled globally as send).
+	// InsertNewline to shift+enter + ctrl+j (enter is handled globally as send).
+	// ctrl+j is the standard emacs "accept-line" alternative for terminals
+	// that do not distinguish shift+enter via enhanced-key reporting.
 	km := ta.KeyMap
 	km.DeleteCharacterBackward = key.NewBinding(key.WithKeys("backspace"), key.WithHelp("backspace", "delete character backward"))
-	km.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "newline"))
+	km.InsertNewline = key.NewBinding(key.WithKeys("shift+enter", "ctrl+j"), key.WithHelp("shift+enter, ctrl+j", "newline (shift+enter requires enhanced keys)"))
 	ta.KeyMap = km
 
 	return InputModel{TA: ta}

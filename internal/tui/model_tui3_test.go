@@ -409,13 +409,33 @@ func TestNewTurnWhileStreamingUnresolved(t *testing.T) {
 	// Start streaming
 	model, _ := m.Update(deltaNotif("sess-xyz", "unresolved"))
 	mm := model.(Model)
-	// User starts new turn (enter) while previous streaming unresolved
+	// User attempts new turn while spinner true — blocked per TUI-4 input lock
 	mm.input.SetValue("new message")
 	model, _ = mm.Update(keyPress("enter"))
+	mmBlocked := model.(Model)
+	if !strings.Contains(mmBlocked.Toast(), "turn in flight") {
+		t.Fatalf("enter during spinner should show hint, got toast %q", mmBlocked.Toast())
+	}
+	if mmBlocked.findStreamingIndex() == -1 {
+		t.Fatal("streaming should remain while blocked")
+	}
+	hasEcho := false
+	for _, e := range mmBlocked.Entries() {
+		if e.Local && e.Content == "new message" {
+			hasEcho = true
+		}
+	}
+	if hasEcho {
+		t.Fatal("blocked enter should not create echo")
+	}
+	// Now spinner completes (no longer in flight) — defensive reset should finalize streaming on next turn
+	mmBlocked.spinner = false
+	mmBlocked.input.SetValue("new message")
+	model, _ = mmBlocked.Update(keyPress("enter"))
 	mm2 := model.(Model)
 	// Previous streaming should be finalized as interrupted, not still streaming
 	if mm2.findStreamingIndex() != -1 {
-		t.Fatal("streaming should be cleared on new turn")
+		t.Fatal("streaming should be cleared on new turn after spinner cleared")
 	}
 	found := false
 	for _, e := range mm2.Entries() {
@@ -432,17 +452,18 @@ func TestNewTurnWhileStreamingUnresolved(t *testing.T) {
 	if !found {
 		t.Fatalf("old streaming content should be preserved, entries %+v", mm2.Entries())
 	}
-	// Should have local echo for new message
-	hasEcho := false
+	// Should have local echo for new message after unblocked
+	hasEcho = false
 	for _, e := range mm2.Entries() {
 		if e.Local && e.Content == "new message" {
 			hasEcho = true
 		}
 	}
 	if !hasEcho {
-		t.Fatalf("new turn echo missing %+v", mm2.Entries())
+		t.Fatalf("new turn echo missing after unblock %+v", mm2.Entries())
 	}
-	// New deltas should create fresh streaming entry after reset
+	// New deltas should create fresh streaming entry after reset (need spinner true again)
+	mm2.spinner = true
 	model, _ = mm2.Update(deltaNotif("sess-xyz", "fresh"))
 	mm3 := model.(Model)
 	streamCount := 0

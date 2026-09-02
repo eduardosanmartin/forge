@@ -8,6 +8,9 @@ import (
 )
 
 // FooterModel renders the footer bar.
+// Layout is always shown (hybrid/session/minimal) for TUI-4 observability.
+// ModelName is the current model (from ExecuteTurnResult.Model or config default).
+// When ShowSpinner is true, SpinnerView holds the animated frame (bubbles spinner); falls back to "⠋".
 type FooterModel struct {
 	Palette     Palette
 	Width       int
@@ -18,6 +21,9 @@ type FooterModel struct {
 	Toast       string
 	DaemonErr   string
 	ShowSpinner bool
+	SpinnerView string
+	Layout      string
+	ModelName   string
 	Tokens      int // cumulative session tokens; 0 hides the field
 }
 
@@ -40,8 +46,14 @@ func (m FooterModel) Render() string {
 
 	// Left: cwd
 	left := styleDim.Render(m.Cwd)
-	// Right: session short + daemon addr + tokens
+	// Right: layout (always), model, session short, daemon addr, tokens, etc.
 	rightParts := []string{}
+	if m.Layout != "" {
+		rightParts = append(rightParts, styleAccent.Render(m.Layout))
+	}
+	if m.ModelName != "" {
+		rightParts = append(rightParts, styleFaint.Render(m.ModelName))
+	}
 	if m.SessionID != "" {
 		short := m.SessionID
 		if len(short) > 8 {
@@ -75,7 +87,11 @@ func (m FooterModel) Render() string {
 	}
 	spinner := ""
 	if m.ShowSpinner {
-		spinner = styleAccent.Render(" ⠋ working…") + " "
+		frame := m.SpinnerView
+		if frame == "" {
+			frame = "⠋"
+		}
+		spinner = styleAccent.Render(" "+frame+" working…") + " "
 	}
 
 	// Simple two-column layout within width

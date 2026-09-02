@@ -1,11 +1,36 @@
 package components
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/daemon"
 )
+
+// Regression (TUI-4, orchestrator): no rendered line may exceed the given
+// width after stripping ANSI — overflowing lines break the panel borders and
+// bleed into the sidebar (owner's manual test block 1).
+func TestBuildContentWrapNeverExceedsWidth(t *testing.T) {
+	pal := testPalette()
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	longURL := "https://example.com/aaaaaaaaaa/bbbbbbbbbb/cccccccccc/dddddddddd"
+	entries := []Entry{
+		{Role: "user", Content: "un mensaje bastante largo que deberia envolverse en varias lineas " + strings.Repeat("x", 120)},
+		{Role: "assistant", Content: strings.Repeat("palabra ", 40) + longURL},
+		{Role: "assistant", Content: strings.Repeat("streaming ", 30), Streaming: true},
+		{IsTool: true, ToolName: "fs_read", Meta: strings.Repeat("y", 100)},
+	}
+	for _, width := range []int{20, 40, 80, 120} {
+		out := BuildContent(entries, pal, width)
+		for i, line := range strings.Split(out, "\n") {
+			plain := ansi.ReplaceAllString(line, "")
+			if got := len([]rune(plain)); got > width {
+				t.Fatalf("width %d: line %d has %d runes > %d (%q)", width, i, got, width, plain)
+			}
+		}
+	}
+}
 
 func testPalette() Palette {
 	return Palette{

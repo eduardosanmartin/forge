@@ -8,11 +8,14 @@ import (
 )
 
 // SidebarData is the single data model for the sidebar panel.
+// ModelName is the current model (from ExecuteTurnResult.Model or fallback).
+// Documented source: last successful ExecuteTurnResult.Model when present; otherwise empty (no config model schema in TUI-4).
 type SidebarData struct {
 	SessionID string
 	Sessions  []daemon.SessionResult
 	Palette   Palette
 	MarkedIDs map[string]bool // sessions flagged as success via /mark
+	ModelName string
 }
 
 // SidebarModel renders the sidebar in two presentations: column vs overlay.
@@ -80,9 +83,16 @@ func (m SidebarModel) renderContent() string {
 		}
 		current = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render("current: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(short)
 	}
+	modelLine := ""
+	if m.Data.ModelName != "" {
+		modelLine = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render("model: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(m.Data.ModelName)
+	}
 	content := title + "\n" + body
 	if current != "" {
 		content += "\n" + current
+	}
+	if modelLine != "" {
+		content += "\n" + modelLine
 	}
 	return content
 }

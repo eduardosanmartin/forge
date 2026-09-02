@@ -32,25 +32,33 @@ func TestDefaultKeyMapBindings(t *testing.T) {
 func TestKeyMapShortHelp(t *testing.T) {
 	km := DefaultKeyMap()
 	sh := km.ShortHelp()
-	if len(sh) != 4 {
+	if len(sh) != 5 {
 		t.Fatalf("ShortHelp len %d", len(sh))
 	}
 	fh := km.FullHelp()
-	if len(fh) == 0 || len(fh[0]) != 5 {
+	if len(fh) == 0 || len(fh[0]) != 6 {
 		t.Fatalf("FullHelp shape %v", fh)
 	}
 }
 
 func TestKeyMapDistinct(t *testing.T) {
 	km := DefaultKeyMap()
-	// Ensure no duplicate keys across bindings
+	// Ensure no duplicate keys across bindings (including ctrl+g); must avoid reserved set ctrl+h, ctrl+o, ctrl+l, ctrl+c, ctrl+p
 	seen := map[string]string{}
-	for _, b := range []key.Binding{km.ToggleSidebar, km.CycleLayout, km.Quit, km.Halt} {
+	for _, b := range []key.Binding{km.ToggleSidebar, km.CycleLayout, km.Quit, km.Halt, km.GrabSession} {
 		for _, k := range b.Keys() {
 			if prev, ok := seen[k]; ok {
 				t.Fatalf("duplicate key %q in %q and previous %q", k, b.Help().Desc, prev)
 			}
 			seen[k] = b.Help().Desc
+		}
+	}
+	// Verify ctrl+p not used (reserved for suggestion nav)
+	for _, b := range []key.Binding{km.ToggleSidebar, km.CycleLayout, km.Quit, km.Halt, km.GrabSession} {
+		for _, k := range b.Keys() {
+			if k == "ctrl+p" {
+				t.Fatal("ctrl+p is reserved and should not be used")
+			}
 		}
 	}
 }

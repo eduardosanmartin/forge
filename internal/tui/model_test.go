@@ -133,15 +133,16 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 		wantLayout string
 		wantPal    string
 		wantToast  string
+		wantHelp   bool
 		shouldPersist bool
 	}{
-		{"valid layout", "/layout minimal", LayoutMinimal, "", "layout", true},
-		{"invalid layout", "/layout bad", "", "", "unknown layout", false},
-		{"valid palette", "/palette ember", "", "ember", "palette", true},
-		{"invalid palette", "/palette unknown", "", "", "unknown palette", false},
-		{"help", "/help", "", "", "commands:", false},
-		{"unknown", "/unknown", "", "", "unknown command", false},
-		{"missing arg layout", "/layout", "", "", "usage:", false},
+		{"valid layout", "/layout minimal", LayoutMinimal, "", "layout", false, true},
+		{"invalid layout", "/layout bad", "", "", "unknown layout", false, false},
+		{"valid palette", "/palette ember", "", "ember", "palette", false, true},
+		{"invalid palette", "/palette unknown", "", "", "unknown palette", false, false},
+		{"help", "/help", "", "", "", true, false},
+		{"unknown", "/unknown", "", "", "unknown command", false, false},
+		{"missing arg layout", "/layout", "", "", "usage:", false, false},
 	}
 
 	for _, tc := range cases {
@@ -157,7 +158,11 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 			if tc.wantPal != "" && mm.PaletteName() != tc.wantPal {
 				t.Fatalf("palette got %q want %q", mm.PaletteName(), tc.wantPal)
 			}
-			if tc.wantToast != "" && !strings.Contains(strings.ToLower(mm.Toast()), strings.ToLower(tc.wantToast)) {
+			if tc.wantHelp {
+				if !mm.IsHelpVisible() {
+					t.Fatal("help should be visible after /help")
+				}
+			} else if tc.wantToast != "" && !strings.Contains(strings.ToLower(mm.Toast()), strings.ToLower(tc.wantToast)) {
 				t.Fatalf("toast %q should contain %q", mm.Toast(), tc.wantToast)
 			}
 			// input should be cleared on slash handling
