@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +28,7 @@ type hostEnv struct {
 	netAllowlist []string
 	logger       *slog.Logger
 	pluginName   string
+	resolver     HostResolver
 }
 
 // newHostEnv builds a hostEnv from the plugin manifest and manager options.
@@ -45,7 +47,17 @@ func newHostEnv(m plugin.Manifest, permsEngine *perms.Engine, netAllowlist []str
 		netAllowlist: netAllowlist,
 		logger:       logger.With(slog.String("plugin", m.Name)),
 		pluginName:   m.Name,
+		resolver:     &defaultResolver{},
 	}
+}
+
+// newHostEnvWithResolver builds a hostEnv with an explicit resolver (for tests).
+func newHostEnvWithResolver(m plugin.Manifest, permsEngine *perms.Engine, netAllowlist []string, logger *slog.Logger, resolver HostResolver) *hostEnv {
+	h := newHostEnv(m, permsEngine, netAllowlist, logger)
+	if resolver != nil {
+		h.resolver = resolver
+	}
+	return h
 }
 
 // hasPerm reports whether the manifest declares the given permission kind.
@@ -319,15 +331,23 @@ func (h *hostEnv) gitRunHost() api.GoModuleFunc {
 }
 
 // netFetchHost implements forge_host.net_fetch(url_ptr,len) -> i64 packed.
-// Semantics (WU6 — real net_fetch):
-//   - After allowlist check, performs a real HTTP GET with context and 30s timeout.
-//   - Redirects are followed only if each redirect URL's host is in h.netAllowlist
-//     (same isHostAllowed check, port-stripped suffix match). Denied redirect aborts.
-//   - Response body is capped at 2 MiB via io.LimitReader; truncation is silent but
-//     documented (plugin receives truncated body).
-//   - Returns JSON {"url":..., "status": <int>, "content_type": "...", "body": "<truncated>"}.
-//     HTTP error statuses (4xx/5xx) are DATA, not Go errors — the plugin decides.
-//   - Transport errors return {"error":"..."} envelope.
+// Semantics (WU6 — real net_fetch) + WU5 DNS rebinding mitigation (resolve-then-pin):
+//   - FIRST gate: hostname allowlist check via isHostAllowed (suffix, port-strip, empty denies, IPv6, CIDR-aware).
+//   - SECOND gate: resolve-then-pin. Resolve target host to IPs BEFORE dialing;
+//     derive allowed-IP set from allowlist (IP literal, CIDR, or hostname resolved via same resolver;
+//     resolve errors on allowlist entries contribute nothing, debug logged). Every resolved IP of
+//     the target must be in the allowed set (strict all-of). If any IP is not allowed, deny.
+//     Dial uses a custom net.Dialer that replaces the DNS name with the validated IP (Host header preserved),
+//     so no TOCTOU re-resolution occurs between check and connect.
+//   - Redirects: every hop re-validates via http.Client CheckRedirect (same two gates + pin).
+//   - IPv4+IPv6 handled (A and AAAA); strict all-of means an allowlist with only IPv4 cannot authorize
+//     an IPv6 resolution of the same hostname — correctly denies, documented as strict.
+//   - Per-call resolution (no cache): allowlist hostname IPs are resolved fresh per request to avoid stale pins.
+//     This is safer against rebinding than a TTL cache.
+//   - KNOWN EDGE: if HTTP_PROXY/HTTPS_PROXY env is set, the proxy performs DNS and the IP pin
+//     is bypassed (dial goes to the proxy, as before WU5). Proxy deployments must enforce
+//     egress control at the proxy itself.
+//   - Response body capped at 2 MiB, same error envelope shape.
 func (h *hostEnv) netFetchHost() api.GoModuleFunc {
 	return api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
 		urlPtr := api.DecodeU32(stack[0])
@@ -345,15 +365,108 @@ func (h *hostEnv) netFetchHost() api.GoModuleFunc {
 			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: host not in allowlist: %q", rawURL))
 			return
 		}
-		client := &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if !isHostAllowed(req.URL.String(), h.netAllowlist) {
-					return fmt.Errorf("net_fetch denied: redirect host not in allowlist: %q", req.URL.String())
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: invalid URL %q: %v", rawURL, err))
+			return
+		}
+		targetHost := parsed.Hostname()
+		if targetHost == "" {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: missing host in URL %q", rawURL))
+			return
+		}
+		resolver := h.resolver
+		if resolver == nil {
+			resolver = &defaultResolver{}
+		}
+		// Resolve target host (handles IP literals without DNS).
+		targetIPs, err := resolveHost(ctx, resolver, targetHost)
+		if err != nil || len(targetIPs) == 0 {
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: DNS resolution failed for host %q: %v", targetHost, err))
+			return
+		}
+		// Derive allowed IP set (per-call, no cache).
+		allowedIPs, allowedCIDRs := buildAllowedIPSet(ctx, resolver, h.netAllowlist, h.logger)
+		if !allIPsStrictAllowed(targetIPs, allowedIPs, allowedCIDRs) {
+			// Find first disallowed IP for error message.
+			var bad string
+			for _, ip := range targetIPs {
+				if !isIPAllowed(ip, allowedIPs, allowedCIDRs) {
+					bad = ip.String()
+					break
 				}
+			}
+			if bad == "" {
+				bad = targetIPs[0].String()
+			}
+			stack[0] = errorEnvelope(ctx, mod, fmt.Sprintf("net_fetch denied: resolved IP %q not in allowlist", bad))
+			return
+		}
+		// Pinned map: hostname lower -> validated IP (for DialContext)
+		pinned := make(map[string]net.IP)
+		pinned[strings.ToLower(targetHost)] = targetIPs[0]
+
+		dialer := &net.Dialer{
+			Timeout: 10 * time.Second,
+		}
+		transport := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+				// addr is host:port (host may be hostname or IP literal with brackets stripped by SplitHostPort).
+				hostPart, portPart, splitErr := net.SplitHostPort(addr)
+				if splitErr != nil {
+					return nil, fmt.Errorf("net_fetch: invalid addr %q: %w", addr, splitErr)
+				}
+				lookupKey := strings.ToLower(strings.Trim(hostPart, "[]"))
+				// If hostPart is the target host or a previously validated redirect host, pin to its validated IP.
+				if pinnedIP, ok := pinned[lookupKey]; ok {
+					addr = net.JoinHostPort(pinnedIP.String(), portPart)
+					return dialer.DialContext(dialCtx, network, addr)
+				}
+				// Also handle case where addr host is already the pinned IP literal (e.g., target is IP literal).
+				// If lookupKey equals pinned IP string, dial directly.
+				if ip := net.ParseIP(strings.Trim(hostPart, "[]")); ip != nil {
+					// IP literal: ensure it was validated (it was, since targetIPs contains it).
+					// Dial as-is.
+					return dialer.DialContext(dialCtx, network, addr)
+				}
+				return nil, fmt.Errorf("net_fetch denied: host %q not validated (not in pinned set)", hostPart)
+			},
+			TLSHandshakeTimeout: 10 * time.Second,
+		}
+		client := &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 10 {
 					return fmt.Errorf("net_fetch: too many redirects")
 				}
+				if !isHostAllowed(req.URL.String(), h.netAllowlist) {
+					return fmt.Errorf("net_fetch denied: redirect host not in allowlist: %q", req.URL.String())
+				}
+				redirectHost := req.URL.Hostname()
+				if redirectHost == "" {
+					return fmt.Errorf("net_fetch denied: redirect missing host: %q", req.URL.String())
+				}
+				redirIPs, err := resolveHost(ctx, resolver, redirectHost)
+				if err != nil || len(redirIPs) == 0 {
+					return fmt.Errorf("net_fetch denied: DNS resolution failed for redirect host %q: %v", redirectHost, err)
+				}
+				aIPs, aCIDRs := buildAllowedIPSet(ctx, resolver, h.netAllowlist, h.logger)
+				if !allIPsStrictAllowed(redirIPs, aIPs, aCIDRs) {
+					var bad string
+					for _, ip := range redirIPs {
+						if !isIPAllowed(ip, aIPs, aCIDRs) {
+							bad = ip.String()
+							break
+						}
+					}
+					if bad == "" {
+						bad = redirIPs[0].String()
+					}
+					return fmt.Errorf("net_fetch denied: redirect resolved IP %q not in allowlist", bad)
+				}
+				pinned[strings.ToLower(redirectHost)] = redirIPs[0]
 				return nil
 			},
 		}
@@ -383,28 +496,4 @@ func (h *hostEnv) netFetchHost() api.GoModuleFunc {
 			"body":         string(bodyBytes),
 		})
 	})
-}
-
-// isHostAllowed checks whether urlStr's host is in the allowlist.
-// Allowlist entries are matched as exact host or suffix (e.g., "example.com" allows "api.example.com").
-func isHostAllowed(urlStr string, allowlist []string) bool {
-	if len(allowlist) == 0 {
-		return false
-	}
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(u.Host)
-	// Strip port.
-	if idx := strings.Index(host, ":"); idx >= 0 {
-		host = host[:idx]
-	}
-	for _, entry := range allowlist {
-		e := strings.ToLower(entry)
-		if host == e || strings.HasSuffix(host, "."+e) {
-			return true
-		}
-	}
-	return false
 }

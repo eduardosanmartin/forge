@@ -37,6 +37,7 @@ import (
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/agent"
+	"github.com/eduardosanmartin/forge/internal/approval"
 	"github.com/eduardosanmartin/forge/internal/cli"
 	"github.com/eduardosanmartin/forge/internal/perms"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
@@ -161,6 +162,12 @@ func unwrapFencedE2E(s string) string {
 }
 
 func TestExit_Verification(t *testing.T) {
+	// WU4: ensure signing keys exist for v2 records (isolated via FORGE_KEYS_DIR)
+	keysDir := t.TempDir()
+	t.Setenv("FORGE_KEYS_DIR", keysDir)
+	if _, _, err := approval.Keygen(false); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
 	wasmBytes, wasmPath := locateCommittedWasm(t)
 	t.Logf("committed wasm: %s (%d bytes, %s)", wasmPath, len(wasmBytes), wasmChecksumHex(wasmBytes))
 
@@ -190,8 +197,18 @@ func TestExit_Verification(t *testing.T) {
 			t.Fatalf("approved.flag missing: %v", err)
 		}
 		want := wasmChecksumHex(wasmBytes)
-		if strings.TrimSpace(string(data)) != want {
-			t.Fatalf("approved.flag mismatch: got %q want %q", strings.TrimSpace(string(data)), want)
+		// v2 record: extract sha256 via approval helper, accept both formats
+		extracted := approval.ExtractSHA256(filepath.Join(pluginsRoot, "urlcheck"))
+		got := strings.TrimSpace(string(data))
+		if extracted != "" {
+			got = strings.TrimSpace(extracted)
+		}
+		if !strings.EqualFold(got, want) {
+			t.Fatalf("approved.flag mismatch: got %q want %q (extracted %q)", strings.TrimSpace(string(data)), want, extracted)
+		}
+		// Verify signature with anchor
+		if err := approval.VerifyFile(filepath.Join(pluginsRoot, "urlcheck"), "plugin", "urlcheck", want, nil); err != nil {
+			t.Fatalf("v2 VerifyFile failed: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(pluginsRoot, "urlcheck", "urlcheck.wasm")); err != nil {
 			t.Fatalf("installed wasm missing: %v", err)
@@ -284,9 +301,17 @@ func TestExit_Verification(t *testing.T) {
 		cleaned := skill.StripChecksumLine(skillData)
 		sum := sha256.Sum256(cleaned)
 		want := "sha256:" + hex.EncodeToString(sum[:])
+		extracted := approval.ExtractSHA256(filepath.Join(skillsRoot, "deploy-notes"))
 		flagData, _ := os.ReadFile(flagPath)
-		if strings.TrimSpace(string(flagData)) != want {
-			t.Fatalf("skill flag mismatch: got %q want %q", strings.TrimSpace(string(flagData)), want)
+		got := strings.TrimSpace(string(flagData))
+		if extracted != "" {
+			got = strings.TrimSpace(extracted)
+		}
+		if !strings.EqualFold(got, want) {
+			t.Fatalf("skill flag mismatch: got %q want %q (extracted %q)", strings.TrimSpace(string(flagData)), want, extracted)
+		}
+		if err := approval.VerifyFile(filepath.Join(skillsRoot, "deploy-notes"), "skill", "deploy-notes", want, nil); err != nil {
+			t.Fatalf("skill v2 VerifyFile failed: %v", err)
 		}
 	})
 

@@ -83,7 +83,7 @@ func TestManager_Enable_ApprovalRecord_Skill(t *testing.T) {
 	}
 	// Corrupt flag to wrong hash
 	_ = os.WriteFile(filepath.Join(dir, "approved.flag"), []byte("sha256:"+strings.Repeat("0", 64)+"\n"), 0o644)
-	if err := mgr2c.Enable("ext-skill"); err == nil || !strings.Contains(err.Error(), "approval record missing or does not match") {
+	if err := mgr2c.Enable("ext-skill"); err == nil || (!strings.Contains(err.Error(), "approval record missing or does not match") && !strings.Contains(err.Error(), "requires explicit approval")) {
 		t.Fatalf("expected approval mismatch on Enable, got %v", err)
 	}
 	_ = mgr2c.Close()

@@ -49,6 +49,7 @@ func parseTOML(data []byte) (Manifest, error) {
 		"description":  true,
 		"source":       true,
 		"entrypoint":   true,
+		"kind":         true,
 		"permissions":  true,
 		"dependencies": true,
 		"checksum":     true,
@@ -258,6 +259,12 @@ func parseTOML(data []byte) (Manifest, error) {
 	// Dependencies
 	if arr, ok := getArray("dependencies"); ok {
 		m.Dependencies = arr
+	}
+	// Kind (optional, defaults to "tool" for ABI v1 compat)
+	if v, ok := getString("kind"); ok {
+		m.Kind = PluginKind(v)
+	} else {
+		m.Kind = KindTool
 	}
 	// Checksum
 	if v, ok := getString("checksum"); ok {

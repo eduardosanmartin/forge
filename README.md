@@ -67,6 +67,15 @@ allows it.
   allowlist is consulted.
 - `network.allowed_hosts` gates every provider endpoint by host (or exact
   host:port); an empty list denies all egress.
+- `limits.plugin_wasm_max_bytes` caps the plugin `.wasm` entrypoint at install
+  time (default `2097152` = 2 MiB). `limits.skill_file_max_bytes` caps each file
+  inside a skill directory at install time (default `1048576` = 1 MiB).
+  Exceeding a cap rejects the install with an error naming the limit, actual
+  size, and configured max (e.g. `plugin wasm too large: 3145728 bytes > limit 2097152 (limits.plugin_wasm_max_bytes)`).
+  Zero or negative values in `config.json` fall back to defaults. The message
+  store cap is deferred (not enforced). Enforcement is install-time only — the
+  managers do not re-check sizes on load; oversized artifacts are rejected at
+  the policy boundary before bytes are written.
 
 ## Security posture
 

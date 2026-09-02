@@ -15,6 +15,9 @@ import (
 )
 
 // wasmPlugin wraps a single instantiated WASM plugin and its wazero runtime.
+// It serves BOTH tool plugins (ABI v1) and provider plugins (ABI v2 LLM streaming)
+// differentiated by manifest.Kind. The struct holds exports for both kinds; unused
+// function slots are nil.
 type wasmPlugin struct {
 	manifest  plugin.Manifest
 	wasmBytes []byte
@@ -29,6 +32,11 @@ type wasmPlugin struct {
 	fnToolList   api.Function
 	fnToolInvoke api.Function
 	fnAlloc      api.Function
+
+	// ABI v2 provider exports (nil for tool plugins)
+	fnLLMStreamStart api.Function
+	fnLLMNextChunk   api.Function
+	fnLLMCancel      api.Function
 }
 
 // newWasmPlugin compiles and instantiates wasmBytes under a new wazero Runtime
@@ -89,45 +97,83 @@ func newWasmPlugin(ctx context.Context, m plugin.Manifest, wasmBytes []byte, env
 		mod:       mod,
 		env:       env,
 	}
-	// Resolve exports.
+	// Resolve exports (both ABIs; unused slots stay nil).
 	wp.fnAbiVersion = mod.ExportedFunction(ExportABIVersion)
 	wp.fnToolList = mod.ExportedFunction(ExportToolList)
 	wp.fnToolInvoke = mod.ExportedFunction(ExportToolInvoke)
 	wp.fnAlloc = mod.ExportedFunction(ExportAlloc)
+	wp.fnLLMStreamStart = mod.ExportedFunction(ExportLLMStreamStart)
+	wp.fnLLMNextChunk = mod.ExportedFunction(ExportLLMNextChunk)
+	wp.fnLLMCancel = mod.ExportedFunction(ExportLLMCancel)
 
-	// Validate required exports exist (ABI). Missing alloc is allowed to degrade gracefully
-	// but abi_version, tool_list, tool_invoke are mandatory for tool plugins.
+	// Common required: abi_version and alloc.
 	if wp.fnAbiVersion == nil {
 		_ = wp.close(ctx)
 		return nil, fmt.Errorf("%w: missing export %q", ErrCorruptedWASM, ExportABIVersion)
-	}
-	if wp.fnToolInvoke == nil {
-		_ = wp.close(ctx)
-		return nil, fmt.Errorf("%w: missing export %q", ErrCorruptedWASM, ExportToolInvoke)
 	}
 	if wp.fnAlloc == nil {
 		_ = wp.close(ctx)
 		return nil, fmt.Errorf("%w: missing export %q (required for host to allocate buffers)", ErrCorruptedWASM, ExportAlloc)
 	}
-	// forge_tool_list may be optional if manifest declares no tools, but require it when tools present.
-	if len(m.Tools) > 0 && wp.fnToolList == nil {
-		_ = wp.close(ctx)
-		return nil, fmt.Errorf("%w: missing export %q", ErrCorruptedWASM, ExportToolList)
+
+	// Kind-specific export validation.
+	isProvider := m.Kind == plugin.KindProvider
+	if isProvider {
+		// Provider plugins require llm exports, must NOT have tool invoke (allow but not required? enforce missing tool invoke is okay)
+		if wp.fnLLMStreamStart == nil {
+			_ = wp.close(ctx)
+			return nil, fmt.Errorf("%w: provider plugin %q missing export %q", ErrCorruptedWASM, m.Name, ExportLLMStreamStart)
+		}
+		if wp.fnLLMNextChunk == nil {
+			_ = wp.close(ctx)
+			return nil, fmt.Errorf("%w: provider plugin %q missing export %q", ErrCorruptedWASM, m.Name, ExportLLMNextChunk)
+		}
+		if wp.fnLLMCancel == nil {
+			_ = wp.close(ctx)
+			return nil, fmt.Errorf("%w: provider plugin %q missing export %q", ErrCorruptedWASM, m.Name, ExportLLMCancel)
+		}
+	} else {
+		// Tool plugin (default).
+		if wp.fnToolInvoke == nil {
+			_ = wp.close(ctx)
+			return nil, fmt.Errorf("%w: missing export %q", ErrCorruptedWASM, ExportToolInvoke)
+		}
+		// forge_tool_list may be optional if manifest declares no tools, but require it when tools present.
+		if len(m.Tools) > 0 && wp.fnToolList == nil {
+			_ = wp.close(ctx)
+			return nil, fmt.Errorf("%w: missing export %q", ErrCorruptedWASM, ExportToolList)
+		}
 	}
 
-	// Check ABI version.
+	// Check ABI version (allow both 1 and 2 for backward compat; enforce kind matches).
 	ver, err := wp.abiVersion(ctx)
 	if err != nil {
 		_ = wp.close(ctx)
 		return nil, fmt.Errorf("reading abi version: %w", err)
 	}
-	if ver != plugin.ABIVersion {
+	// Enforce supported set.
+	supported := false
+	for _, v := range plugin.SupportedABIVersions {
+		if ver == int64(v) {
+			supported = true
+			break
+		}
+	}
+	if !supported {
 		_ = wp.close(ctx)
-		return nil, fmt.Errorf("%w: plugin %q reports %d, host expects %d", ErrABIMismatch, m.Name, ver, plugin.ABIVersion)
+		return nil, fmt.Errorf("%w: plugin %q reports %d, host supports %v", ErrABIMismatch, m.Name, ver, plugin.SupportedABIVersions)
+	}
+	if isProvider && ver != plugin.ABIVersionV2 {
+		_ = wp.close(ctx)
+		return nil, fmt.Errorf("%w: provider plugin %q must report ABI %d, got %d", ErrABIMismatch, m.Name, plugin.ABIVersionV2, ver)
+	}
+	if !isProvider && ver != plugin.ABIVersion {
+		_ = wp.close(ctx)
+		return nil, fmt.Errorf("%w: tool plugin %q must report ABI %d, got %d", ErrABIMismatch, m.Name, plugin.ABIVersion, ver)
 	}
 
-	// Optionally validate tool list matches manifest when export exists.
-	if wp.fnToolList != nil {
+	// Optionally validate tool list matches manifest when export exists (tool plugins only).
+	if !isProvider && wp.fnToolList != nil {
 		list, err := wp.toolList(ctx)
 		if err != nil {
 			_ = wp.close(ctx)
@@ -279,6 +325,129 @@ func (p *wasmPlugin) allocAndWriteLocked(ctx context.Context, data []byte) (uint
 		return 0, 0, fmt.Errorf("memory write failed")
 	}
 	return ptr, uint32(len(data)), nil
+}
+
+// --- ABI v2 provider streaming (host-driven PULL, see abi.go design note) ---
+
+// llmStart starts a provider streaming request. It allocates the request JSON,
+// calls forge_llm_stream_start, and returns the plugin-assigned reqId.
+// It is mutex-serialized and honors ctx + per-call timeout guard.
+func (p *wasmPlugin) llmStart(ctx context.Context, reqJSON []byte) (uint32, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fnLLMStreamStart == nil {
+		return 0, fmt.Errorf("missing export %q", ExportLLMStreamStart)
+	}
+	ptr, ln, err := p.allocAndWriteLocked(ctx, reqJSON)
+	if err != nil {
+		return 0, fmt.Errorf("alloc llm req: %w", err)
+	}
+	// Bounded call timeout so a hung plugin does not hang daemon forever.
+	callCtx, cancel := context.WithTimeout(ctx, PluginLLMCallTimeout)
+	defer cancel()
+	res, err := p.fnLLMStreamStart.Call(callCtx, api.EncodeU32(ptr), api.EncodeU32(ln))
+	if err != nil {
+		return 0, fmt.Errorf("forge_llm_stream_start: %w", err)
+	}
+	if len(res) == 0 {
+		return 0, fmt.Errorf("forge_llm_stream_start returned no values")
+	}
+	packed := res[0]
+	rptr, rlen := unpack(packed)
+	if rlen == 0 {
+		return 0, fmt.Errorf("forge_llm_stream_start returned empty")
+	}
+	buf, ok := p.mod.Memory().Read(rptr, rlen)
+	if !ok {
+		return 0, fmt.Errorf("forge_llm_stream_start: out of bounds ptr=%d len=%d", rptr, rlen)
+	}
+	data := make([]byte, len(buf))
+	copy(data, buf)
+	// Expect {"req_id": N} or {"error": "...","code": ...}
+	var startResp map[string]any
+	if err := json.Unmarshal(data, &startResp); err != nil {
+		return 0, fmt.Errorf("forge_llm_stream_start JSON decode: %w (data=%q)", err, string(data))
+	}
+	if errMsg, ok := startResp["error"].(string); ok {
+		code := 0
+		if c, ok := startResp["code"].(float64); ok {
+			code = int(c)
+		}
+		return 0, fmt.Errorf("plugin llm_stream_start error (code %d): %s", code, errMsg)
+	}
+	// req_id may be int or float64 per JSON numbers.
+	var reqID uint32
+	if v, ok := startResp["req_id"]; ok {
+		switch n := v.(type) {
+		case float64:
+			reqID = uint32(n)
+		case int:
+			reqID = uint32(n)
+		case int64:
+			reqID = uint32(n)
+		default:
+			return 0, fmt.Errorf("invalid req_id type %T value %v", v, v)
+		}
+	} else {
+		return 0, fmt.Errorf("forge_llm_stream_start missing req_id: %q", string(data))
+	}
+	return reqID, nil
+}
+
+// llmNextChunk pulls the next chunk for reqID. Returns (chunk, done, error).
+// done==true means stream finished (host should stop pulling). On error, stream is terminal.
+// It decodes the JSON packed result: either a StreamChunk, {"done":true}, or {"error":...}.
+func (p *wasmPlugin) llmNextChunk(ctx context.Context, reqID uint32) ([]byte, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fnLLMNextChunk == nil {
+		return nil, false, fmt.Errorf("missing export %q", ExportLLMNextChunk)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, PluginLLMCallTimeout)
+	defer cancel()
+	res, err := p.fnLLMNextChunk.Call(callCtx, api.EncodeU32(reqID))
+	if err != nil {
+		return nil, false, fmt.Errorf("forge_llm_next_chunk: %w", err)
+	}
+	if len(res) == 0 {
+		return nil, false, fmt.Errorf("forge_llm_next_chunk returned no values")
+	}
+	packed := res[0]
+	ptr, ln := unpack(packed)
+	if ln == 0 {
+		// Treat empty as terminal with no data? For strict ABI, empty is not valid; but allow as done.
+		return nil, true, nil
+	}
+	buf, ok := p.mod.Memory().Read(ptr, ln)
+	if !ok {
+		return nil, false, fmt.Errorf("forge_llm_next_chunk: out of bounds ptr=%d len=%d", ptr, ln)
+	}
+	data := make([]byte, len(buf))
+	copy(data, buf)
+	// Inspect for done / error before treating as StreamChunk.
+	var probe map[string]any
+	if err := json.Unmarshal(data, &probe); err == nil {
+		if done, ok := probe["done"].(bool); ok && done {
+			return nil, true, nil
+		}
+		if errMsg, ok := probe["error"].(string); ok {
+			return nil, false, fmt.Errorf("%s", errMsg)
+		}
+	}
+	// Otherwise it's a StreamChunk JSON — return raw for caller to unmarshal.
+	return data, false, nil
+}
+
+// llmCancel asks the plugin to cancel reqID. Best-effort; ctx is independent.
+func (p *wasmPlugin) llmCancel(ctx context.Context, reqID uint32) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fnLLMCancel == nil {
+		return
+	}
+	callCtx, cancel := context.WithTimeout(ctx, PluginLLMCallTimeout)
+	defer cancel()
+	_, _ = p.fnLLMCancel.Call(callCtx, api.EncodeU32(reqID))
 }
 
 // instantiateWasiStub registers wasi_snapshot_preview1 with the default WASI

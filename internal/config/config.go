@@ -139,6 +139,23 @@ type TUIConfig struct {
 	Sidebar bool   `json:"sidebar"`
 }
 
+// LimitsConfig bounds artifact sizes at install time (WU7).
+// plugin_wasm_max_bytes caps the plugin .wasm entrypoint (default 2 MiB).
+// skill_file_max_bytes caps each file inside a skill directory (default 1 MiB).
+// Zero or negative values in a config file are invalid and fall back to
+// defaults (handled in mergeInto); missing limits section preserves built-in
+// defaults. Message store size cap is deferred (not implemented).
+type LimitsConfig struct {
+	PluginWasmMaxBytes int64 `json:"plugin_wasm_max_bytes"`
+	SkillFileMaxBytes  int64 `json:"skill_file_max_bytes"`
+}
+
+// Default artifact size caps (WU7, owner decision).
+const (
+	DefaultPluginWasmMaxBytes int64 = 2 * 1024 * 1024 // 2 MiB
+	DefaultSkillFileMaxBytes  int64 = 1 * 1024 * 1024 // 1 MiB
+)
+
 // Config is the full forge configuration document.
 type Config struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -150,6 +167,7 @@ type Config struct {
 	Permissions     PermissionsPolicy   `json:"permissions"`
 	TUI             TUIConfig           `json:"tui"`
 	LLM             LLMConfig           `json:"llm"`
+	Limits          LimitsConfig        `json:"limits"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -176,6 +194,10 @@ func Defaults() *Config {
 		Permissions: defaultPermissionsPolicy(),
 		TUI:         TUIConfig{Layout: "hybrid", Palette: "ember", Sidebar: true},
 		LLM:         LLMConfig{Streaming: false},
+		Limits: LimitsConfig{
+			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
+			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
+		},
 	}
 }
 
@@ -223,6 +245,14 @@ type filePermissions struct {
 	Git   *GitPermissions   `json:"git"`
 }
 
+// fileLimits mirrors LimitsConfig with presence-tracking pointers so that
+// merging can distinguish "field absent" from "field set to zero value".
+// Zero/negative values are treated as invalid and fall back to defaults.
+type fileLimits struct {
+	PluginWasmMaxBytes *int64 `json:"plugin_wasm_max_bytes"`
+	SkillFileMaxBytes  *int64 `json:"skill_file_max_bytes"`
+}
+
 // fileConfig mirrors Config with presence-tracking pointers so that merging
 // can distinguish "field absent" from "field set to zero value".
 type fileConfig struct {
@@ -235,6 +265,7 @@ type fileConfig struct {
 	Permissions     *filePermissions    `json:"permissions"`
 	TUI             *TUIConfig          `json:"tui"`
 	LLM             *LLMConfig          `json:"llm"`
+	Limits          *fileLimits         `json:"limits"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -305,6 +336,14 @@ func Load(filePaths ...string) (*Config, error) {
 	if err := cfg.expandPaths(); err != nil {
 		return nil, err
 	}
+	// Normalize limits: zero/negative values are invalid and fall back to
+	// defaults (covers direct Config construction bypassing mergeInto).
+	if cfg.Limits.PluginWasmMaxBytes <= 0 {
+		cfg.Limits.PluginWasmMaxBytes = DefaultPluginWasmMaxBytes
+	}
+	if cfg.Limits.SkillFileMaxBytes <= 0 {
+		cfg.Limits.SkillFileMaxBytes = DefaultSkillFileMaxBytes
+	}
 	return cfg, nil
 }
 
@@ -348,6 +387,27 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.LLM != nil {
 		dst.LLM = *fc.LLM
+	}
+	if fc.Limits != nil {
+		// Limits merge: each present key replaces the corresponding value;
+		// zero/negative values are invalid and fall back to defaults rather
+		// than being accepted (documented in LimitsConfig).
+		if fc.Limits.PluginWasmMaxBytes != nil {
+			v := *fc.Limits.PluginWasmMaxBytes
+			if v > 0 {
+				dst.Limits.PluginWasmMaxBytes = v
+			} else {
+				dst.Limits.PluginWasmMaxBytes = DefaultPluginWasmMaxBytes
+			}
+		}
+		if fc.Limits.SkillFileMaxBytes != nil {
+			v := *fc.Limits.SkillFileMaxBytes
+			if v > 0 {
+				dst.Limits.SkillFileMaxBytes = v
+			} else {
+				dst.Limits.SkillFileMaxBytes = DefaultSkillFileMaxBytes
+			}
+		}
 	}
 }
 

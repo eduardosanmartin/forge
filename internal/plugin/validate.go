@@ -81,6 +81,16 @@ func validateManifest(m *Manifest) error {
 		// Not needed; but ensure not empty after trimming.
 	}
 
+	// Kind: must be "tool" or "provider" (empty defaults to "tool" already in parseTOML)
+	kind := m.Kind
+	if kind == "" {
+		kind = KindTool
+		m.Kind = KindTool
+	}
+	if kind != KindTool && kind != KindProvider {
+		errs = append(errs, fmt.Errorf("kind %q: must be %q or %q", kind, KindTool, KindProvider))
+	}
+
 	// Permissions: each in vocab, duplicates rejected, at least one if tools declare.
 	allowedPerms := make(map[string]bool, len(PluginPermissionKinds))
 	for _, p := range PluginPermissionKinds {
@@ -99,6 +109,24 @@ func validateManifest(m *Manifest) error {
 	// If any tool declares a permission, manifest must have at least one permission.
 	if len(m.Tools) > 0 && len(m.Permissions) == 0 {
 		errs = append(errs, errors.New("permissions: must declare at least one permission when tools are present"))
+	}
+
+	// Kind-specific permission rules (ABI v2):
+	// - provider plugins MUST declare "llm" and MUST NOT declare tool permissions without llm? At minimum must contain llm.
+	// - tool plugins MUST NOT declare "llm".
+	hasLLM := seenPerms["llm"]
+	if kind == KindProvider {
+		if !hasLLM {
+			errs = append(errs, errors.New("permissions: provider plugins must declare \"llm\" permission"))
+		}
+		if len(m.Tools) > 0 {
+			errs = append(errs, errors.New("provider plugins must not declare [[tools]] (kind=provider is for LLM streaming, not tools)"))
+		}
+	} else {
+		// KindTool
+		if hasLLM {
+			errs = append(errs, errors.New("permissions: \"llm\" is only allowed for kind=\"provider\""))
+		}
 	}
 
 	// Tools validation

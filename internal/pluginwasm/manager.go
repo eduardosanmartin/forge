@@ -12,10 +12,15 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/eduardosanmartin/forge/internal/approval"
+	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
 	"github.com/eduardosanmartin/forge/internal/plugin"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
+
+// LLMProvider is an alias for llm.Provider for manager exposure (avoids import alias in docs).
+type LLMProvider = llm.Provider
 
 // Options configures a Manager.
 type Options struct {
@@ -34,6 +39,10 @@ type Options struct {
 	// successfully loaded LOCAL plugin right after load. External plugins
 	// ALWAYS require explicit Enable regardless of this flag.
 	AutoEnableLocal bool
+	// Resolver overrides DNS resolution for net_fetch rebinding mitigation.
+	// If nil, the system resolver (net.DefaultResolver) is used.
+	// Injected for tests to simulate DNS rebinding without real DNS.
+	Resolver HostResolver
 }
 
 // LoadResult reports the outcome of loading one plugin directory discovered under the root.
@@ -64,6 +73,7 @@ type Manager struct {
 	logger          *slog.Logger
 	approveExternal bool
 	autoEnableLocal bool
+	resolver        HostResolver
 
 	mu      sync.Mutex
 	plugins map[string]*wasmPlugin // all loaded (instantiated) plugins by manifest name
@@ -77,6 +87,10 @@ func NewManager(reg *tools.Registry, opts Options) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	resolver := opts.Resolver
+	if resolver == nil {
+		resolver = &defaultResolver{}
+	}
 	return &Manager{
 		reg:             reg,
 		permsEngine:     opts.Perms,
@@ -84,26 +98,93 @@ func NewManager(reg *tools.Registry, opts Options) *Manager {
 		logger:          logger,
 		approveExternal: opts.ApproveExternal,
 		autoEnableLocal: opts.AutoEnableLocal,
+		resolver:        resolver,
 		plugins:         make(map[string]*wasmPlugin),
 		enabled:         make(map[string]bool),
 	}
 }
 
-// isApproved verifies that dir/approved.flag contains "sha256:<hex>" matching
-// the hash of wasmBytes. The approval record binds the artifact hash
-// (these exact bytes were approved), not the directory.
+// isApproved verifies that dir/approved.flag contains a valid approval
+// record matching wasmBytes. Supports v1 hash-only and v2 signed records.
+// v2 without anchor falls back to hash check (untrusted-but-well-formed).
+// v1 produces a deprecation warning. The approval record binds the artifact
+// hash (these exact bytes were approved), not the directory.
+// Trust model: signatures prove operator identity, not CA chain; anchor is
+// the public key in user config (forge.pub).
 func isApproved(dir string, wasmBytes []byte) bool {
+	sum := sha256.Sum256(wasmBytes)
+	expected := "sha256:" + hex.EncodeToString(sum[:])
 	data, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
 	if err != nil {
 		return false
 	}
-	want := strings.TrimSpace(string(data))
-	if !strings.HasPrefix(want, "sha256:") {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
 		return false
 	}
+	if approval.IsV2(data) {
+		rec, err := approval.ParseV2(data)
+		if err != nil {
+			return false
+		}
+		// For legacy isApproved (no manifest name), verify hash + signature
+		// without strict name binding. Strict binding is enforced in
+		// checkPluginApproval which knows the manifest name.
+		anchor, hasAnchor, err := approval.LoadAnchor()
+		if err != nil || !hasAnchor {
+			slog.Default().Warn("v2 record without anchor — falling back to hash check", "dir", dir)
+			return strings.EqualFold(strings.TrimSpace(rec.SHA256), strings.TrimSpace(expected))
+		}
+		if err := approval.Verify(rec, expected, anchor); err != nil {
+			slog.Default().Warn("v2 approval verification failed", "error", err, "dir", dir)
+			return false
+		}
+		return true
+	}
+	// v1
+	slog.Default().Warn("v1 approval record deprecated — re-approve to generate v2 signed record", "dir", dir)
+	return strings.EqualFold(trimmed, strings.TrimSpace(expected))
+}
+
+func isV1HashMatch(dir, expected string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
+	if err != nil {
+		return false
+	}
+	if approval.IsV2(data) {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(data))
+	return strings.EqualFold(trimmed, strings.TrimSpace(expected))
+}
+
+// isApprovedStrict verifies with known plugin name (from manifest) for strict binding.
+func isApprovedStrict(dir, name string, wasmBytes []byte) bool {
 	sum := sha256.Sum256(wasmBytes)
-	got := "sha256:" + hex.EncodeToString(sum[:])
-	return strings.EqualFold(want, got)
+	expected := "sha256:" + hex.EncodeToString(sum[:])
+	err := approval.VerifyFile(dir, "plugin", name, expected, slog.Default())
+	return err == nil
+}
+
+func (m *Manager) checkPluginApproval(pluginDir, name string, wasmBytes []byte) error {
+	sum := sha256.Sum256(wasmBytes)
+	expected := "sha256:" + hex.EncodeToString(sum[:])
+	logger := m.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return approval.VerifyFile(pluginDir, "plugin", name, expected, logger)
+}
+
+func (m *Manager) checkPluginApprovalLocked(pluginDir, name string, wasmBytes []byte) error {
+	sum := sha256.Sum256(wasmBytes)
+	expected := "sha256:" + hex.EncodeToString(sum[:])
+	logger := m.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	// Called with lock held; VerifyFile does not need lock, but we pass logger.
+	return approval.VerifyFile(pluginDir, "plugin", name, expected, logger)
 }
 
 // LoadAll scans root (spec layout: forge-plugins/<name>/manifest.toml + entrypoint).
@@ -198,14 +279,16 @@ func (m *Manager) loadOne(ctx context.Context, pluginDir, manifestPath string) e
 	// RNF-4.6: checksum verified BEFORE any load for external plugins.
 	// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
 	if manifest.Source == plugin.SourceExternal {
-		if !m.approveExternal && !isApproved(pluginDir, wasmBytes) {
-			return fmt.Errorf("%w: external plugin %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, manifest.Name)
+		if !m.approveExternal {
+			if err := m.checkPluginApproval(pluginDir, manifest.Name, wasmBytes); err != nil {
+				return fmt.Errorf("%w: external plugin %q requires explicit approval (%v; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, manifest.Name, err)
+			}
 		}
 		if err := verifyChecksum(wasmBytes, manifest.Checksum); err != nil {
 			return err
 		}
 	}
-	env := newHostEnv(manifest, m.permsEngine, m.netAllowlist, m.logger)
+	env := newHostEnvWithResolver(manifest, m.permsEngine, m.netAllowlist, m.logger, m.resolver)
 	wp, err := newWasmPlugin(ctx, manifest, wasmBytes, env)
 	if err != nil {
 		return err
@@ -238,6 +321,8 @@ func verifyChecksum(wasmBytes []byte, checksum string) error {
 // Enable registers the plugin's tools into the Registry. The plugin must have been loaded via LoadAll.
 // For external plugins it requires either Options.ApproveExternal or an approved.flag file in the plugin dir.
 // Enable is idempotent-safe: calling it twice on the same plugin returns ErrAlreadyEnabled.
+// For provider plugins (kind=provider) it marks enabled without touching the tools registry;
+// provider availability is via GetProvider / LLMProviders.
 func (m *Manager) Enable(name string) error {
 	m.mu.Lock()
 	wp, ok := m.plugins[name]
@@ -250,15 +335,21 @@ func (m *Manager) Enable(name string) error {
 		return fmt.Errorf("%w: %q", ErrAlreadyEnabled, name)
 	}
 	if wp.manifest.Source == plugin.SourceExternal {
-		if !m.approveExternal && !isApproved(wp.pluginDir, wp.wasmBytes) {
-			m.mu.Unlock()
-			return fmt.Errorf("%w: external plugin %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name)
+		if !m.approveExternal {
+			if err := m.checkPluginApprovalLocked(wp.pluginDir, name, wp.wasmBytes); err != nil {
+				m.mu.Unlock()
+				return fmt.Errorf("%w: external plugin %q requires explicit approval (%v; re-run 'forge plugin install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name, err)
+			}
 		}
 	}
 	// Mark enabled before registering to avoid races; rollback on failure.
 	m.enabled[name] = true
 	m.mu.Unlock()
 
+	if wp.manifest.Kind == plugin.KindProvider {
+		// Provider plugins expose LLM providers, not tools.
+		return nil
+	}
 	// Register each tool export.
 	for _, te := range wp.manifest.Tools {
 		tool := newPluginTool(wp.manifest, te, wp)
@@ -268,7 +359,8 @@ func (m *Manager) Enable(name string) error {
 }
 
 // Disable unregisters the plugin's tools from the Registry. It does not unload the wasm module,
-// so Enable can be called again without recompiling.
+// so Enable can be called again without recompiling. For provider plugins it simply marks
+// disabled (no registry mutation).
 func (m *Manager) Disable(name string) error {
 	m.mu.Lock()
 	wp, ok := m.plugins[name]
@@ -283,10 +375,43 @@ func (m *Manager) Disable(name string) error {
 	delete(m.enabled, name)
 	m.mu.Unlock()
 
+	if wp.manifest.Kind == plugin.KindProvider {
+		return nil
+	}
 	for _, te := range wp.manifest.Tools {
 		m.reg.Unregister(te.Name)
 	}
 	return nil
+}
+
+// GetLLMProvider returns the llm.Provider for an enabled provider plugin by manifest name.
+func (m *Manager) GetLLMProvider(name string) (LLMProvider, bool) {
+	m.mu.Lock()
+	wp, ok := m.plugins[name]
+	isEnabled := m.enabled[name]
+	m.mu.Unlock()
+	if !ok || !isEnabled || wp.manifest.Kind != plugin.KindProvider {
+		return nil, false
+	}
+	return newProviderBridge(wp), true
+}
+
+// LLMProviders returns a snapshot map of all enabled provider plugins as llm.Providers,
+// keyed by manifest name (also the model name).
+func (m *Manager) LLMProviders() map[string]LLMProvider {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]LLMProvider)
+	for name, wp := range m.plugins {
+		if !m.enabled[name] {
+			continue
+		}
+		if wp.manifest.Kind != plugin.KindProvider {
+			continue
+		}
+		out[name] = newProviderBridge(wp)
+	}
+	return out
 }
 
 // Loaded returns the names of all successfully loaded plugins, sorted.

@@ -1,0 +1,7 @@
+name = "mock_provider"
+version = "0.1.0"
+description = "Mock LLM provider for ABI v2 streaming tests"
+source = "local"
+entrypoint = "mock_provider.wasm"
+kind = "provider"
+permissions = ["llm"]

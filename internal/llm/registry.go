@@ -230,6 +230,35 @@ func (r *Registry) ListAll() []ModelInfo {
 	return result
 }
 
+// RegisterProvider registers an external LLM provider (e.g., a provider-plugin) under name.
+// It is additive and safe to call after New. If a provider with the same name already
+// exists, it is replaced (old provider is closed). This is the hook for daemon's
+// provider-plugin wiring (WU2): plugins with kind=provider register as providers
+// named by manifest, and daemon config may select one as the default model source.
+// The provider is not persisted across restarts; callers must re-register after reload.
+func (r *Registry) RegisterProvider(name string, p Provider) error {
+	if name == "" {
+		return fmt.Errorf("provider name must not be empty")
+	}
+	if p == nil {
+		return fmt.Errorf("provider must not be nil")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.providers == nil {
+		r.providers = make(map[string]Provider)
+	}
+	if old, ok := r.providers[name]; ok {
+		_ = old.Close()
+	}
+	r.providers[name] = p
+	if r.providerKinds == nil {
+		r.providerKinds = make(map[string]string)
+	}
+	r.providerKinds[name] = "plugin-provider"
+	return nil
+}
+
 // Close closes all providers.
 func (r *Registry) Close() error {
 	r.mu.Lock()

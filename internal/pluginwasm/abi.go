@@ -64,10 +64,12 @@
 package pluginwasm
 
 import (
+	"time"
+
 	"github.com/eduardosanmartin/forge/internal/plugin"
 )
 
-// Re-export WU1 ABI names for convenience; the canonical constants live in internal/plugin.
+// Re-export ABI names for convenience; canonical constants live in internal/plugin.
 const (
 	// ExportABIVersion is the plugin export that reports its ABI version.
 	ExportABIVersion = plugin.ExportABIVersion
@@ -77,7 +79,16 @@ const (
 	ExportToolInvoke = plugin.ExportToolInvoke
 	// ExportAlloc is the plugin export that allocates memory in plugin linear memory.
 	ExportAlloc = plugin.ExportAlloc
+
+	// ABI v2: provider streaming.
+	ExportLLMStreamStart = plugin.ExportLLMStreamStart
+	ExportLLMNextChunk   = plugin.ExportLLMNextChunk
+	ExportLLMCancel      = plugin.ExportLLMCancel
 )
+
+// PluginLLMCallTimeout bounds a hung provider export call (WU2 guard: hung plugin must not hang daemon forever).
+// Applied per host->plugin export invocation inside the streaming bridge; timeout surfaces as StreamChunk{Error}.
+const PluginLLMCallTimeout = 5 * time.Second
 
 // HostModule is the wazero host module name that plugins import.
 const HostModule = "forge_host"

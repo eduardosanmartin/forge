@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/eduardosanmartin/forge/internal/approval"
 	"github.com/eduardosanmartin/forge/internal/client"
+	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/plugin"
 	"github.com/spf13/cobra"
@@ -282,7 +285,9 @@ func newPluginInstallCommand() *cobra.Command {
 			} else {
 				prompter = NewScriptedPrompter([]string{"y"})
 			}
-			return runPluginInstall(src, pluginsRoot, force, yes, prompter, os.Stdout)
+			// Use the same config loading path as the daemon (App config when available, else file load).
+			limits := limitsForPluginInstall(cmd)
+			return runPluginInstallWithLimits(src, pluginsRoot, force, yes, prompter, os.Stdout, limits)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing plugin")
@@ -290,7 +295,63 @@ func newPluginInstallCommand() *cobra.Command {
 	return cmd
 }
 
+// limitsForPluginInstall resolves LimitsConfig via the daemon's loading path.
+// It prefers the already-loaded App config (which respects --config), falling
+// back to a direct file load of global+project. Zero/negative values fall back
+// to defaults (handled in config.Load, but re-normalized here defensively).
+func limitsForPluginInstall(cmd *cobra.Command) config.LimitsConfig {
+	if cmd != nil {
+		if app, ok := AppFromContext(cmd.Context()); ok && app != nil && app.Config != nil {
+			lim := app.Config.Limits
+			if lim.PluginWasmMaxBytes <= 0 {
+				lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+			}
+			if lim.SkillFileMaxBytes <= 0 {
+				lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+			}
+			return lim
+		}
+		if f := cmd.Flags().Lookup("config"); f != nil && f.Value.String() != "" {
+			explicit := f.Value.String()
+			if gp, err := config.GlobalConfigPath(); err == nil {
+				if cfg, err := config.Load(gp, explicit); err == nil {
+					lim := cfg.Limits
+					if lim.PluginWasmMaxBytes <= 0 {
+						lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+					}
+					if lim.SkillFileMaxBytes <= 0 {
+						lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+					}
+					return lim
+				}
+			}
+		}
+	}
+	return loadLimitsFromDisk()
+}
+
+func loadLimitsFromDisk() config.LimitsConfig {
+	gp, _ := config.GlobalConfigPath()
+	pp, _ := config.ProjectConfigPath()
+	cfg, err := config.Load(gp, pp)
+	if err != nil {
+		return config.Defaults().Limits
+	}
+	lim := cfg.Limits
+	if lim.PluginWasmMaxBytes <= 0 {
+		lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+	}
+	if lim.SkillFileMaxBytes <= 0 {
+		lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+	}
+	return lim
+}
+
 func runPluginInstall(src, pluginsRoot string, force, yes bool, prompter Prompter, out io.Writer) error {
+	return runPluginInstallWithLimits(src, pluginsRoot, force, yes, prompter, out, loadLimitsFromDisk())
+}
+
+func runPluginInstallWithLimits(src, pluginsRoot string, force, yes bool, prompter Prompter, out io.Writer, limits config.LimitsConfig) error {
 	manifestPath := src
 	if fi, err := os.Stat(src); err == nil && fi.IsDir() {
 		manifestPath = filepath.Join(src, "manifest.toml")
@@ -308,6 +369,11 @@ func runPluginInstall(src, pluginsRoot string, force, yes bool, prompter Prompte
 	wasmBytes, err := os.ReadFile(entryPath)
 	if err != nil {
 		return fmt.Errorf("entrypoint %q not found: %w", m.Entrypoint, err)
+	}
+	// WU7: enforce plugin wasm size cap BEFORE writing artifact bytes.
+	// Separate from net_fetch 2 MiB body limit (internal/pluginwasm/host.go, kept as-is).
+	if int64(len(wasmBytes)) > limits.PluginWasmMaxBytes {
+		return fmt.Errorf("plugin wasm too large: %d bytes > limit %d (limits.plugin_wasm_max_bytes)", len(wasmBytes), limits.PluginWasmMaxBytes)
 	}
 	if m.Source == plugin.SourceExternal {
 		sum := sha256.Sum256(wasmBytes)
@@ -342,11 +408,17 @@ func runPluginInstall(src, pluginsRoot string, force, yes bool, prompter Prompte
 	}
 	if m.Source == plugin.SourceExternal {
 		// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
+		// WU4: write v2 signed record; requires user keypair.
 		sum := sha256.Sum256(wasmBytes)
-		flag := "sha256:" + hex.EncodeToString(sum[:]) + "\n"
-		flagPath := filepath.Join(destDir, "approved.flag")
-		_ = os.WriteFile(flagPath, []byte(flag), 0o644)
-		fmt.Fprintf(out, "Installed external plugin %q (approved %s)\n", m.Name, strings.TrimSpace(flag))
+		sha := "sha256:" + hex.EncodeToString(sum[:])
+		priv, err := approval.LoadPrivateKey()
+		if err != nil {
+			return fmt.Errorf("signing key not found: %w (run forge keygen first)", err)
+		}
+		if err := approval.WriteV2(destDir, "plugin", m.Name, sha, priv, time.Now().Unix()); err != nil {
+			return fmt.Errorf("write approved.flag: %w", err)
+		}
+		fmt.Fprintf(out, "Installed external plugin %q (approved %s)\n", m.Name, sha)
 	} else {
 		fmt.Fprintf(out, "Installed plugin %q\n", m.Name)
 	}

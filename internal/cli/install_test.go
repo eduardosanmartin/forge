@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/eduardosanmartin/forge/internal/approval"
 )
 
 func writeTestPlugin(t *testing.T, dir, name, source string, perms []string) string {
@@ -62,6 +64,11 @@ func TestPluginInstall_LocalWithoutConfirm(t *testing.T) {
 }
 
 func TestPluginInstall_ExternalRequiresConfirm(t *testing.T) {
+	keysDir := t.TempDir()
+	t.Setenv("FORGE_KEYS_DIR", keysDir)
+	if _, _, err := approval.Keygen(false); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
 	srcRoot := t.TempDir()
 	pluginsRoot := t.TempDir()
 	src := writeTestPlugin(t, srcRoot, "extplug", "external", []string{"fs.read"})
@@ -82,15 +89,22 @@ func TestPluginInstall_ExternalRequiresConfirm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("external approved should have approved.flag: %v", err)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(string(flagData)), "sha256:") {
-		t.Fatalf("approved.flag should contain sha256 hash, got %q", string(flagData))
-	}
-	// Verify flag hash matches wasm bytes
+	// v2 JSON or v1 fallback — extract sha256 via approval helper
 	wasmBytes, _ := os.ReadFile(filepath.Join(pluginsRoot, "extplug", "plugin.wasm"))
 	sum := sha256.Sum256(wasmBytes)
 	expectedFlag := "sha256:" + hex.EncodeToString(sum[:])
-	if strings.TrimSpace(string(flagData)) != expectedFlag {
-		t.Fatalf("flag hash mismatch: got %q want %q", strings.TrimSpace(string(flagData)), expectedFlag)
+	extracted := approval.ExtractSHA256(filepath.Join(pluginsRoot, "extplug"))
+	if extracted == "" {
+		// Fallback: check raw file contains hash
+		if !strings.Contains(string(flagData), expectedFlag) {
+			t.Fatalf("approved.flag should contain sha256 hash, got %q", string(flagData))
+		}
+	} else if !strings.EqualFold(strings.TrimSpace(extracted), expectedFlag) {
+		t.Fatalf("flag hash mismatch: got %q want %q", strings.TrimSpace(extracted), expectedFlag)
+	}
+	// Verify signature via approval.VerifyFile
+	if err := approval.VerifyFile(filepath.Join(pluginsRoot, "extplug"), "plugin", "extplug", expectedFlag, nil); err != nil {
+		t.Fatalf("VerifyFile failed: %v", err)
 	}
 	// With --yes flag (no prompter needed)
 	pluginsRoot2 := t.TempDir()
@@ -109,7 +123,7 @@ func TestPluginInstall_ExternalRequiresConfirm(t *testing.T) {
 	tamperedBytes, _ := os.ReadFile(filepath.Join(pluginsRoot, "extplug", "plugin.wasm"))
 	tamperedSum := sha256.Sum256(tamperedBytes)
 	tamperedFlag := "sha256:" + hex.EncodeToString(tamperedSum[:])
-	if strings.TrimSpace(string(flagData)) == tamperedFlag {
+	if strings.EqualFold(strings.TrimSpace(extracted), tamperedFlag) {
 		t.Fatalf("tampered flag should not match original")
 	}
 }
@@ -177,6 +191,11 @@ func TestPluginRemove_RefusesEscaping(t *testing.T) {
 }
 
 func TestSkillInstall_LocalAndExternal(t *testing.T) {
+	keysDir := t.TempDir()
+	t.Setenv("FORGE_KEYS_DIR", keysDir)
+	if _, _, err := approval.Keygen(false); err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
 	srcRoot := t.TempDir()
 	skillsRoot := t.TempDir()
 	// Local skill
@@ -222,15 +241,24 @@ func TestSkillInstall_LocalAndExternal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected approved.flag: %v", err)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(string(flagData)), "sha256:") {
-		t.Fatalf("skill approved.flag should contain sha256 hash, got %q", string(flagData))
+	// v2 JSON contains sha256 field; verify via Extract
+	extracted := approval.ExtractSHA256(filepath.Join(skillsRoot, "extskill"))
+	if extracted == "" {
+		if !strings.Contains(string(flagData), "sha256:") {
+			t.Fatalf("skill approved.flag should contain sha256 hash, got %q", string(flagData))
+		}
 	}
 	// Verify flag matches SKILL.md hash (minus checksum line)
 	skillData, _ := os.ReadFile(filepath.Join(skillsRoot, "extskill", "SKILL.md"))
 	cleaned2 := stripChecksumLineBytes(skillData)
 	sum2 := sha256.Sum256(cleaned2)
 	expected := "sha256:" + hex.EncodeToString(sum2[:])
-	if strings.TrimSpace(string(flagData)) != expected {
+	if extracted != "" && !strings.EqualFold(strings.TrimSpace(extracted), expected) {
+		t.Fatalf("skill flag hash mismatch: got %q want %q", strings.TrimSpace(extracted), expected)
+	} else if extracted == "" && strings.TrimSpace(string(flagData)) != expected {
 		t.Fatalf("skill flag hash mismatch: got %q want %q", strings.TrimSpace(string(flagData)), expected)
+	}
+	if err := approval.VerifyFile(filepath.Join(skillsRoot, "extskill"), "skill", "extskill", expected, nil); err != nil {
+		t.Fatalf("VerifyFile skill: %v", err)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/eduardosanmartin/forge/internal/approval"
 	"github.com/eduardosanmartin/forge/internal/embedding"
 )
 
@@ -108,21 +109,65 @@ func StripChecksumLine(data []byte) []byte {
 	return stripChecksumLine(data)
 }
 
-// isApprovedData verifies that dir/approved.flag contains "sha256:<hex>" matching
-// the hash of data (SKILL.md bytes) minus the checksum line.
+// isApprovedData verifies that dir/approved.flag contains a valid approval
+// record matching data (SKILL.md bytes) minus the checksum line.
+// Supports v1 and v2, with v2 without anchor falling back to hash check.
 func isApprovedData(dir string, data []byte) bool {
 	cleaned := stripChecksumLine(data)
 	sum := sha256.Sum256(cleaned)
-	got := "sha256:" + hex.EncodeToString(sum[:])
-	flag, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
+	expected := "sha256:" + hex.EncodeToString(sum[:])
+	// Try strict name binding if we can parse skill name from data
+	name := ""
+	if sk, err := parseSkillFile(data, dir); err == nil {
+		name = sk.Name
+	} else {
+		name = filepath.Base(dir)
+	}
+	if name == "" {
+		name = filepath.Base(dir)
+	}
+	err := approval.VerifyFile(dir, "skill", name, expected, slog.Default())
+	if err == nil {
+		return true
+	}
+	// Fallback for legacy isApprovedData callers without name knowledge:
+	// if VerifyFile failed due to name mismatch but hash matches, check raw.
+	if extracted := approval.ExtractSHA256(dir); strings.EqualFold(strings.TrimSpace(extracted), strings.TrimSpace(expected)) {
+		// Need to verify signature if anchor present; without it fallback is hash.
+		data2, _ := os.ReadFile(filepath.Join(dir, "approved.flag"))
+		if approval.IsV2(data2) {
+			if rec, err := approval.ParseV2(data2); err == nil {
+				anchor, hasAnchor, _ := approval.LoadAnchor()
+				if !hasAnchor {
+					return strings.EqualFold(strings.TrimSpace(rec.SHA256), strings.TrimSpace(expected))
+				}
+				if approval.Verify(rec, expected, anchor) == nil {
+					return true
+				}
+				return false
+			}
+		} else {
+			// v1 hash match already handled below, but return true here
+			return true
+		}
+	}
+	// Also handle v1 case
+	if isSkillV1Match(dir, expected) {
+		return true
+	}
+	return false
+}
+
+func isSkillV1Match(dir, expected string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "approved.flag"))
 	if err != nil {
 		return false
 	}
-	want := strings.TrimSpace(string(flag))
-	if !strings.HasPrefix(want, "sha256:") {
+	if approval.IsV2(data) {
 		return false
 	}
-	return strings.EqualFold(want, got)
+	trimmed := strings.TrimSpace(string(data))
+	return strings.EqualFold(trimmed, strings.TrimSpace(expected))
 }
 
 // isApproved verifies that dir/approved.flag contains "sha256:<hex>" matching
@@ -213,8 +258,10 @@ func (m *Manager) loadOneLocked(skillDir, skillFile string) error {
 	// Checksum verification for external before any enable (RNF-4.6).
 	// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
 	if sk.Source == SourceExternal {
-		if !m.approveExternal && !isApprovedData(skillDir, data) {
-			return fmt.Errorf("%w: external skill %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, sk.Name)
+		if !m.approveExternal {
+			if err := m.checkSkillApproval(skillDir, data, sk.Name); err != nil {
+				return fmt.Errorf("%w: external skill %q requires explicit approval (%v; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, sk.Name, err)
+			}
 		}
 		if err := verifySkillChecksum(data, sk.Checksum); err != nil {
 			return err
@@ -268,6 +315,25 @@ func stripChecksumLine(data []byte) []byte {
 	return []byte(strings.Join(kept, "\n"))
 }
 
+func (m *Manager) checkSkillApproval(skillDir string, data []byte, name string) error {
+	cleaned := stripChecksumLine(data)
+	sum := sha256.Sum256(cleaned)
+	expected := "sha256:" + hex.EncodeToString(sum[:])
+	logger := m.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return approval.VerifyFile(skillDir, "skill", name, expected, logger)
+}
+
+func (m *Manager) checkSkillApprovalByName(sk *Skill) error {
+	data, err := os.ReadFile(filepath.Join(sk.DirPath, "SKILL.md"))
+	if err != nil {
+		return fmt.Errorf("read SKILL.md: %w", err)
+	}
+	return m.checkSkillApproval(sk.DirPath, data, sk.Name)
+}
+
 func (m *Manager) indexSkillLocked(sk *Skill) {
 	// No-op: embeddings are pure functions of text and Relevant() regenerates
 	// per call via GenerateEmbedding on query + description+keywords. The
@@ -289,8 +355,10 @@ func (m *Manager) Enable(name string) error {
 		return fmt.Errorf("%w: %q", ErrAlreadyEnabled, name)
 	}
 	if sk.Source == SourceExternal {
-		if !m.approveExternal && !isApproved(sk.DirPath) {
-			return fmt.Errorf("%w: external skill %q requires explicit approval (approval record missing or does not match the current artifact; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name)
+		if !m.approveExternal {
+			if err := m.checkSkillApprovalByName(sk); err != nil {
+				return fmt.Errorf("%w: external skill %q requires explicit approval (%v; re-run 'forge skill install' or start serve with --approve-external-plugins)", ErrApprovalRequired, name, err)
+			}
 		}
 	}
 	m.enabled[name] = true

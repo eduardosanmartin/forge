@@ -65,6 +65,14 @@ func New(
 
 	emergency := NewEmergencyState(logger)
 	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store, WithV1Deps(v1Deps))
+	// Additive WU2: wire any enabled provider-plugins into the LLM registry (behind explicit
+	// opt-in: only plugins with kind=provider that are loaded+enabled register as providers
+	// named by manifest; daemon config selects model via DefaultProvider/model_roles).
+	if pluginMgr != nil && llmReg != nil {
+		for name, p := range pluginMgr.LLMProviders() {
+			_ = llmReg.RegisterProvider(name, p)
+		}
+	}
 	handler := NewHandler(mgr, logger, pluginMgr, skillMgr)
 	transport := NewTransport(addr, handler, logger)
 	// Wire live delta bridge (WU3): when llm.streaming is enabled, agent deltas are published

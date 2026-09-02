@@ -32,6 +32,14 @@ const (
 	SourceExternal Source = "external"
 )
 
+// PluginKind identifies the plugin kind (ABI v1 compat: absent means "tool").
+type PluginKind string
+
+const (
+	KindTool     PluginKind = "tool"
+	KindProvider PluginKind = "provider"
+)
+
 // ToolExport describes a tool exported by a plugin.
 type ToolExport struct {
 	// Name is the exported tool name; MUST be "<plugin-name>_<tool>" (OpenAI-safe: lowercase, digits, underscore, no dots).
@@ -54,6 +62,9 @@ type Manifest struct {
 	Source Source
 	// Entrypoint is the path to the .wasm file, must end in ".wasm".
 	Entrypoint string
+	// Kind is the plugin kind. "tool" (default, ABI v1) or "provider" (ABI v2 LLM streaming).
+	// Old manifests without kind remain valid and default to KindTool for ABI v1 compat.
+	Kind PluginKind
 	// Permissions is the list of permissions requested by the plugin.
 	Permissions []string
 	// Dependencies is an optional list of plugin names this plugin depends on.

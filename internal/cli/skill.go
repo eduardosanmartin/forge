@@ -11,8 +11,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/eduardosanmartin/forge/internal/approval"
 	"github.com/eduardosanmartin/forge/internal/client"
+	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/logging"
 	"github.com/eduardosanmartin/forge/internal/mining"
@@ -338,7 +341,8 @@ func newSkillInstallCommand() *cobra.Command {
 			} else {
 				prompter = NewScriptedPrompter([]string{"y"})
 			}
-			return runSkillInstall(src, skillsRoot, force, yes, prompter, os.Stdout)
+			limits := limitsForSkillInstall(cmd)
+			return runSkillInstallWithLimits(src, skillsRoot, force, yes, prompter, os.Stdout, limits)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite existing skill")
@@ -346,7 +350,59 @@ func newSkillInstallCommand() *cobra.Command {
 	return cmd
 }
 
+func limitsForSkillInstall(cmd *cobra.Command) config.LimitsConfig {
+	if cmd != nil {
+		if app, ok := AppFromContext(cmd.Context()); ok && app != nil && app.Config != nil {
+			lim := app.Config.Limits
+			if lim.PluginWasmMaxBytes <= 0 {
+				lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+			}
+			if lim.SkillFileMaxBytes <= 0 {
+				lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+			}
+			return lim
+		}
+		if f := cmd.Flags().Lookup("config"); f != nil && f.Value.String() != "" {
+			explicit := f.Value.String()
+			if gp, err := config.GlobalConfigPath(); err == nil {
+				if cfg, err := config.Load(gp, explicit); err == nil {
+					lim := cfg.Limits
+					if lim.PluginWasmMaxBytes <= 0 {
+						lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+					}
+					if lim.SkillFileMaxBytes <= 0 {
+						lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+					}
+					return lim
+				}
+			}
+		}
+	}
+	return loadSkillLimitsFromDisk()
+}
+
+func loadSkillLimitsFromDisk() config.LimitsConfig {
+	gp, _ := config.GlobalConfigPath()
+	pp, _ := config.ProjectConfigPath()
+	cfg, err := config.Load(gp, pp)
+	if err != nil {
+		return config.Defaults().Limits
+	}
+	lim := cfg.Limits
+	if lim.PluginWasmMaxBytes <= 0 {
+		lim.PluginWasmMaxBytes = config.DefaultPluginWasmMaxBytes
+	}
+	if lim.SkillFileMaxBytes <= 0 {
+		lim.SkillFileMaxBytes = config.DefaultSkillFileMaxBytes
+	}
+	return lim
+}
+
 func runSkillInstall(src, skillsRoot string, force, yes bool, prompter Prompter, out io.Writer) error {
+	return runSkillInstallWithLimits(src, skillsRoot, force, yes, prompter, out, loadSkillLimitsFromDisk())
+}
+
+func runSkillInstallWithLimits(src, skillsRoot string, force, yes bool, prompter Prompter, out io.Writer, limits config.LimitsConfig) error {
 	skillFile := src
 	if fi, err := os.Stat(src); err == nil && fi.IsDir() {
 		skillFile = filepath.Join(src, "SKILL.md")
@@ -356,6 +412,10 @@ func runSkillInstall(src, skillsRoot string, force, yes bool, prompter Prompter,
 		return fmt.Errorf("read SKILL.md %q: %w", skillFile, err)
 	}
 	srcDir := filepath.Dir(skillFile)
+	// WU7: enforce per-file skill size cap BEFORE writing artifact bytes.
+	if err := checkSkillFileSizes(srcDir, limits.SkillFileMaxBytes); err != nil {
+		return err
+	}
 	// Validate via temp manager before install
 	tmpMgr := skill.NewManager(skill.Options{ApproveExternal: true})
 	defer tmpMgr.Close()
@@ -418,17 +478,61 @@ func runSkillInstall(src, skillsRoot string, force, yes bool, prompter Prompter,
 	}
 	// For external, write approved.flag only after confirmation.
 	// The approval record binds the artifact hash (these exact bytes were approved), not the directory.
+	// WU4: write v2 signed record; requires user keypair.
 	if source == "external" {
 		cleaned := skill.StripChecksumLine(data)
 		sum := sha256.Sum256(cleaned)
-		flag := "sha256:" + hex.EncodeToString(sum[:]) + "\n"
-		flagPath := filepath.Join(destDir, "approved.flag")
-		_ = os.WriteFile(flagPath, []byte(flag), 0o644)
-		fmt.Fprintf(out, "Installed external skill %q (approved %s)\n", name, strings.TrimSpace(flag))
+		sha := "sha256:" + hex.EncodeToString(sum[:])
+		priv, err := approval.LoadPrivateKey()
+		if err != nil {
+			return fmt.Errorf("signing key not found: %w (run forge keygen first)", err)
+		}
+		if err := approval.WriteV2(destDir, "skill", name, sha, priv, time.Now().Unix()); err != nil {
+			return fmt.Errorf("write approved.flag: %w", err)
+		}
+		fmt.Fprintf(out, "Installed external skill %q (approved %s)\n", name, sha)
 	} else {
 		fmt.Fprintf(out, "Installed skill %q\n", name)
 	}
 	return nil
+}
+
+// checkSkillFileSizes walks srcDir recursively and rejects if any file exceeds maxBytes.
+// It is the install-time policy boundary for WU7 (per-file semantics).
+func checkSkillFileSizes(srcDir string, maxBytes int64) error {
+	if maxBytes <= 0 {
+		maxBytes = config.DefaultSkillFileMaxBytes
+	}
+	var tooLarge string
+	var actual int64
+	var filePath string
+	err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > maxBytes {
+			rel, _ := filepath.Rel(srcDir, path)
+			if rel == "" {
+				rel = d.Name()
+			}
+			tooLarge = rel
+			actual = info.Size()
+			filePath = rel
+			return fmt.Errorf("skill file too large: %q %d bytes > limit %d (limits.skill_file_max_bytes)", filePath, actual, maxBytes)
+		}
+		return nil
+	})
+	if err != nil && tooLarge != "" {
+		return err
+	}
+	return err
 }
 
 // --- skill list ---
