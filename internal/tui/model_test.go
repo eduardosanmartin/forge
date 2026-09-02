@@ -321,6 +321,12 @@ type fakeClient struct {
 	markErr       error
 	eventsCh      chan daemon.JSONRPCNotification
 	eventsErr     error
+	pluginRes     *daemon.PluginListResult
+	pluginErr     error
+	skillRes      *daemon.SkillListResult
+	skillErr      error
+	pluginCalled  bool
+	skillCalled   bool
 }
 
 func (f *fakeClient) Status() (*daemon.StatusResult, error) {
@@ -361,6 +367,20 @@ func (f *fakeClient) SwitchModel(sessionID, model string) error {
 func (f *fakeClient) MarkSuccess(sessionID string) error {
 	f.markCalled = true
 	return f.markErr
+}
+func (f *fakeClient) PluginList() (*daemon.PluginListResult, error) {
+	f.pluginCalled = true
+	if f.pluginRes != nil || f.pluginErr != nil {
+		return f.pluginRes, f.pluginErr
+	}
+	return &daemon.PluginListResult{Plugins: []daemon.PluginInfoResult{}}, nil
+}
+func (f *fakeClient) SkillList() (*daemon.SkillListResult, error) {
+	f.skillCalled = true
+	if f.skillRes != nil || f.skillErr != nil {
+		return f.skillRes, f.skillErr
+	}
+	return &daemon.SkillListResult{Skills: []daemon.SkillInfoResult{}}, nil
 }
 func (f *fakeClient) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
 	if f.eventsErr != nil {

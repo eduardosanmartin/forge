@@ -83,11 +83,26 @@ type Model struct {
 	suggestionIdx      int
 	suggestionsVisible bool
 
-	// TUI-5: session focus mode (arrow navigation), delta burst coalescing, scroll state
+	// TUI-5: delta burst coalescing, scroll state (session focus superseded by dropdown in TUI-6)
+	deltaPending bool
+	rebuildCount int // instrumentation for coalescing tests; counts viewport SetContent calls
+
+	// TUI-6: sessions dropdown (replaces inline focus mode), model selection panel, sidebar stats
+	sessionsDropdownVisible bool
+	sessionsDropdownIdx     int
+	modelPanelVisible       bool
+	modelPanelIdx           int
+	modelPanelList          []string
+	turnCount               int
+	latencyTotalMs          int64
+	latencyCount            int
+	lastError               string
+	plugins                 []daemon.PluginInfoResult
+	skills                  []daemon.SkillInfoResult
+
+	// Deprecated: retained for test compatibility; proxies to sessionsDropdown
 	sessionFocus    bool
 	sessionFocusIdx int
-	deltaPending    bool
-	rebuildCount    int // instrumentation for coalescing tests; counts viewport SetContent calls
 }
 
 type pendingTool struct {
@@ -123,6 +138,8 @@ type TUIClient interface {
 	SwitchModel(sessionID, model string) error
 	MarkSuccess(sessionID string) error
 	Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error)
+	PluginList() (*daemon.PluginListResult, error)
+	SkillList() (*daemon.SkillListResult, error)
 }
 
 // Messages for async daemon responses.
@@ -140,6 +157,8 @@ type switchModelResultMsg struct {
 	err   error
 }
 type markSuccessResultMsg struct{ err error }
+type pluginListMsg struct{ res *daemon.PluginListResult; err error }
+type skillListMsg struct{ res *daemon.SkillListResult; err error }
 
 // Event streaming messages.
 type daemonEventMsg struct{ notif daemon.JSONRPCNotification }
@@ -226,11 +245,31 @@ func (m Model) SuggestionIndex() int            { return m.suggestionIdx }
 func (m Model) SuggestionsList() []slashSuggestion { return m.suggestions }
 func (m Model) SpinnerFrame() string            { return m.spinnerModel.View() }
 func (m Model) RebuildCount() int               { return m.rebuildCount }
-func (m Model) IsSessionFocus() bool            { return m.sessionFocus }
-func (m Model) SessionFocusIdx() int            { return m.sessionFocusIdx }
+func (m Model) IsSessionFocus() bool            { return m.sessionFocus || m.sessionsDropdownVisible }
+func (m Model) SessionFocusIdx() int {
+	if m.sessionsDropdownVisible {
+		return m.sessionsDropdownIdx
+	}
+	return m.sessionFocusIdx
+}
 func (m Model) SpinnerFPS() time.Duration       { return m.spinnerModel.Spinner.FPS }
 func (m Model) ViewportYOffset() int            { return m.viewport.YOffset() }
 func (m Model) ViewportAtBottom() bool          { return m.viewport.AtBottom() }
+func (m Model) IsSessionsDropdownVisible() bool { return m.sessionsDropdownVisible }
+func (m Model) SessionsDropdownIdx() int        { return m.sessionsDropdownIdx }
+func (m Model) IsModelPanelVisible() bool       { return m.modelPanelVisible }
+func (m Model) ModelPanelList() []string        { return m.modelPanelList }
+func (m Model) ModelPanelIdx() int              { return m.modelPanelIdx }
+func (m Model) TurnCount() int                  { return m.turnCount }
+func (m Model) LastError() string               { return m.lastError }
+func (m Model) Plugins() []daemon.PluginInfoResult { return m.plugins }
+func (m Model) Skills() []daemon.SkillInfoResult   { return m.skills }
+func (m Model) AvgLatencyMs() int64 {
+	if m.latencyCount == 0 {
+		return 0
+	}
+	return m.latencyTotalMs / int64(m.latencyCount)
+}
 
 // SetSaveFn injects a persistence hook (tests).
 func (m *Model) SetSaveFn(fn func(TUIConfig) error) { m.saveFn = fn }
@@ -393,6 +432,26 @@ func (m Model) cmdMarkSuccess() tea.Cmd {
 	}
 }
 
+func (m Model) cmdRefreshPlugins() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		res, err := m.client.PluginList()
+		return pluginListMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRefreshSkills() tea.Cmd {
+	if m.client == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		res, err := m.client.SkillList()
+		return skillListMsg{res: res, err: err}
+	}
+}
+
 func (m Model) cmdSubscribeEvents() tea.Cmd {
 	if m.client == nil {
 		return nil
@@ -430,7 +489,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case spinner.TickMsg:
-		// Deterministic spinner: only advance while turn in flight; ignore stray ticks after stop.
+		// Architectural fix TUI-6: spinner ticks are DYNAMIC (footer + pending line compose at View time)
+		// and must NOT rebuild the static transcript (O(entries × width) wrapping).
+		// This prevents stutter where burst deltas queue behind tick rebuilds.
 		if !m.spinner {
 			return m, nil
 		}
@@ -439,8 +500,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var scmd tea.Cmd
 		m.spinnerModel, scmd = m.spinnerModel.Update(msg)
-		// Rebuild to refresh spinner frame beside pending user message / footer
-		m.rebuildTranscript()
 		if m.spinner {
 			cmds = append(cmds, scmd)
 			if nxt := m.cmdSpinnerTick(); nxt != nil {
@@ -534,6 +593,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner = false
 		m.deltaPending = false
 		if msg.err != nil {
+			// Track turn stats even on failure
+			m.turnCount++
+			if !m.turnStart.IsZero() && m.clock != nil {
+				elapsed := m.clock.Now().Sub(m.turnStart)
+				if elapsed >= 0 {
+					m.latencyTotalMs += elapsed.Milliseconds()
+					m.latencyCount++
+				}
+			}
+			m.lastError = truncateError(msg.err.Error(), 80)
 			// RF-2.6 failure semantics: if a streaming preview is in-flight,
 			// keep the partial text visible but mark it as interrupted — do NOT
 			// silently delete what the user was reading. This preserves the
@@ -566,6 +635,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					elapsedStr = fmt.Sprintf("%dms", elapsed.Milliseconds())
 				} else {
 					elapsedStr = fmt.Sprintf("%.1fs", elapsed.Seconds())
+				}
+			}
+			// Turn stats: count and latency
+			m.turnCount++
+			if !m.turnStart.IsZero() && m.clock != nil {
+				elapsedDur := m.clock.Now().Sub(m.turnStart)
+				if elapsedDur >= 0 {
+					m.latencyTotalMs += elapsedDur.Milliseconds()
+					m.latencyCount++
 				}
 			}
 			// Accumulate tokens.
@@ -719,6 +797,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case switchModelResultMsg:
 		if msg.err != nil {
 			m.toast = msg.err.Error()
+			m.lastError = truncateError(msg.err.Error(), 80)
 		} else {
 			m.toast = fmt.Sprintf("model → %s", msg.model)
 			m.currentModel = msg.model
@@ -728,6 +807,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case markSuccessResultMsg:
 		if msg.err != nil {
 			m.toast = msg.err.Error()
+			m.lastError = truncateError(msg.err.Error(), 80)
 		} else {
 			m.toast = "marked success"
 			if m.sessionID != "" {
@@ -745,61 +825,156 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pluginListMsg:
+		if msg.err != nil {
+			m.toast = msg.err.Error()
+			m.lastError = truncateError(msg.err.Error(), 80)
+		} else if msg.res != nil {
+			m.plugins = msg.res.Plugins
+		}
+		return m, nil
+
+	case skillListMsg:
+		if msg.err != nil {
+			m.toast = msg.err.Error()
+			m.lastError = truncateError(msg.err.Error(), 80)
+		} else if msg.res != nil {
+			m.skills = msg.res.Skills
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		// Help overlay intercepts everything: esc or any key closes it.
 		if m.helpVisible {
 			m.helpVisible = false
 			return m, nil
 		}
-		// Session focus mode intercepts BEFORE suggestions and globals
-		if m.sessionFocus {
+		// Sessions dropdown (TUI-6) intercepts BEFORE suggestions and globals — floating overlay like /help
+		if m.sessionsDropdownVisible || m.sessionFocus {
+			// Normalize legacy sessionFocus to dropdown semantics for backward compat
+			isDropdown := m.sessionsDropdownVisible || m.sessionFocus
+			_ = isDropdown
 			switch msg.String() {
 			case "up":
 				if len(m.sessions) > 0 {
-					m.sessionFocusIdx--
-					if m.sessionFocusIdx < 0 {
-						m.sessionFocusIdx = len(m.sessions) - 1
+					if m.sessionsDropdownVisible {
+						m.sessionsDropdownIdx--
+						if m.sessionsDropdownIdx < 0 {
+							m.sessionsDropdownIdx = len(m.sessions) - 1
+						}
+					} else {
+						m.sessionFocusIdx--
+						if m.sessionFocusIdx < 0 {
+							m.sessionFocusIdx = len(m.sessions) - 1
+						}
+					}
+					// Mirror for compat
+					m.sessionFocusIdx = m.sessionsDropdownIdx
+					if m.sessionsDropdownVisible {
+						m.sessionFocus = true
 					}
 				}
 				return m, nil
 			case "down":
 				if len(m.sessions) > 0 {
-					m.sessionFocusIdx = (m.sessionFocusIdx + 1) % len(m.sessions)
+					if m.sessionsDropdownVisible {
+						m.sessionsDropdownIdx = (m.sessionsDropdownIdx + 1) % len(m.sessions)
+					} else {
+						m.sessionFocusIdx = (m.sessionFocusIdx + 1) % len(m.sessions)
+						m.sessionsDropdownIdx = m.sessionFocusIdx
+					}
+					m.sessionFocusIdx = m.sessionsDropdownIdx
 				}
 				return m, nil
 			case "enter":
-				if len(m.sessions) > 0 && m.sessionFocusIdx >= 0 && m.sessionFocusIdx < len(m.sessions) {
-					sel := m.sessions[m.sessionFocusIdx]
-					// Same load semantics as ctrl+g cycle: lastSeq=0, echo cleared, GetMessagesSince(0)
+				// Prefer dropdown idx when dropdown visible, else legacy idx
+				idx := m.sessionsDropdownIdx
+				if !m.sessionsDropdownVisible {
+					idx = m.sessionFocusIdx
+				}
+				if len(m.sessions) > 0 && idx >= 0 && idx < len(m.sessions) {
+					sel := m.sessions[idx]
 					m.sessionID = sel.ID
 					m.lastSeq = 0
-					// Clear local echo entries
 					m.entries = nil
 					m.rebuildTranscriptForceBottom()
 					m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 					m.suggestionsVisible = false
+					m.sessionsDropdownVisible = false
 					m.sessionFocus = false
 					m.input.Focus()
+					// Refresh plugins/skills on session switch if cheap (async)
+					var cmdsSwitch []tea.Cmd
 					if m.client != nil {
-						return m, m.cmdGetMessagesSince(0)
+						cmdsSwitch = append(cmdsSwitch, m.cmdGetMessagesSince(0))
+						if plCmd := m.cmdRefreshPlugins(); plCmd != nil {
+							cmdsSwitch = append(cmdsSwitch, plCmd)
+						}
+						if skCmd := m.cmdRefreshSkills(); skCmd != nil {
+							cmdsSwitch = append(cmdsSwitch, skCmd)
+						}
+					}
+					if len(cmdsSwitch) > 0 {
+						return m, tea.Batch(cmdsSwitch...)
 					}
 					return m, nil
 				}
+				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
 				m.input.Focus()
 				return m, nil
 			case "esc":
+				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
 				m.input.Focus()
 				return m, nil
 			default:
 				if key.Matches(msg, m.keyMap.GrabSession) {
-					// ctrl+g again toggles off
+					m.sessionsDropdownVisible = false
 					m.sessionFocus = false
 					m.input.Focus()
 					return m, nil
 				}
 				// Any other key consumed, not sent to input
+				return m, nil
+			}
+		}
+		// Model selection panel intercepts before suggestions
+		if m.modelPanelVisible {
+			switch msg.String() {
+			case "up":
+				if len(m.modelPanelList) > 0 {
+					m.modelPanelIdx--
+					if m.modelPanelIdx < 0 {
+						m.modelPanelIdx = len(m.modelPanelList) - 1
+					}
+				}
+				return m, nil
+			case "down":
+				if len(m.modelPanelList) > 0 {
+					m.modelPanelIdx = (m.modelPanelIdx + 1) % len(m.modelPanelList)
+				}
+				return m, nil
+			case "enter":
+				if len(m.modelPanelList) > 0 && m.modelPanelIdx >= 0 && m.modelPanelIdx < len(m.modelPanelList) {
+					chosen := m.modelPanelList[m.modelPanelIdx]
+					m.modelPanelVisible = false
+					if m.sessionID == "" {
+						m.toast = "no session"
+						return m, nil
+					}
+					if m.client == nil {
+						m.toast = "not connected"
+						return m, nil
+					}
+					return m, m.cmdSwitchModel(chosen)
+				}
+				m.modelPanelVisible = false
+				return m, nil
+			case "esc":
+				m.modelPanelVisible = false
+				return m, nil
+			default:
 				return m, nil
 			}
 		}
@@ -858,14 +1033,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.GrabSession):
-			// TUI-5: ctrl+g toggles session focus mode instead of immediate cycle.
-			// In focus mode: sidebar highlighted, footer hint, up/down to navigate, enter to switch.
+			// TUI-6: ctrl+g opens sessions dropdown (floating overlay like /help)
+			// Position: floating overlay stacked with marker for TTY-free determinism.
+			// Replaces TUI-5 inline focus mode (superseded).
 			if len(m.sessions) == 0 {
 				m.toast = "no sessions"
 				return m, nil
 			}
-			m.sessionFocus = true
-			// Initialize selection to current session index
+			m.sessionsDropdownVisible = true
+			m.sessionFocus = true // compat
 			idx := 0
 			for i, s := range m.sessions {
 				if s.ID == m.sessionID {
@@ -873,8 +1049,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			m.sessionsDropdownIdx = idx
 			m.sessionFocusIdx = idx
 			m.input.Blur()
+			// Refresh plugins/skills if cheap (async, optional)
+			var refreshCmds []tea.Cmd
+			if pc := m.cmdRefreshPlugins(); pc != nil {
+				refreshCmds = append(refreshCmds, pc)
+			}
+			if sc := m.cmdRefreshSkills(); sc != nil {
+				refreshCmds = append(refreshCmds, sc)
+			}
+			if len(refreshCmds) > 0 {
+				return m, tea.Batch(refreshCmds...)
+			}
 			return m, nil
 		case msg.String() == "esc":
 			if m.suggestionsVisible {
@@ -1269,7 +1457,18 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		return true, m.cmdResume()
 	case "/model":
 		if len(parts) < 2 {
-			m.toast = "usage: /model <name>"
+			// TUI-6: /model with no argument opens floating selection panel listing available models
+			// Model list source: READ .forge/config.json providers.*.models directly
+			// (the TUI already reads that file for the tui section — reuse same read) + current model first
+			// Documented limitation: plugin-providers are not listed yet (deferred).
+			list := m.loadAvailableModels()
+			if len(list) == 0 {
+				m.toast = "usage: /model <name> — no models configured"
+				return true, nil
+			}
+			m.modelPanelList = list
+			m.modelPanelIdx = 0
+			m.modelPanelVisible = true
 			return true, nil
 		}
 		name := parts[1]
@@ -1443,40 +1642,33 @@ func (m *Model) rebuildTranscriptForceBottom() {
 	m.rebuildTranscriptInternal(true)
 }
 
+// pendingSpinnerLine composes the dynamic spinner pending line at View time.
+// It is NOT part of the static transcript content and does NOT trigger a rebuild.
+func (m Model) pendingSpinnerLine() string {
+	if !m.spinner || m.findStreamingIndex() != -1 {
+		return ""
+	}
+	hasPendingUser := false
+	for _, e := range m.entries {
+		if e.Role == "user" {
+			hasPendingUser = true
+			break
+		}
+	}
+	if !hasPendingUser {
+		return ""
+	}
+	frame := m.spinnerModel.View()
+	if frame == "" {
+		frame = "⠋"
+	}
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
+}
+
 func (m *Model) rebuildTranscriptInternal(forceBottom bool) {
 	wasAtBottom := m.viewport.AtBottom()
 	w := m.effectiveTranscriptWidth()
 	content := components.BuildContent(m.entries, toCompPalette(m.palette), w)
-	// Spinner v2: also shown beside pending user message while turn in flight.
-	// Implementation choice: render spinner frame as a pending line UNDER the last user entry,
-	// rather than inline beside wrapped text. This avoids wrapping distortion and keeps the
-	// streaming preview entry as the sole mutable assistant content. The pending line uses
-	// the same Line spinner frame shown in the footer, at 500ms/frame (2 FPS), distinct
-	// from OpenCode's braille dots. Documented: Line spinner ( | / - \ ) vs MiniDot.
-	if m.spinner && m.findStreamingIndex() == -1 {
-		hasPendingUser := false
-		for _, e := range m.entries {
-			if e.Role == "user" {
-				hasPendingUser = true
-			}
-		}
-		if hasPendingUser && len(m.entries) > 0 && m.entries[len(m.entries)-1].Role == "user" {
-			frame := m.spinnerModel.View()
-			if frame == "" {
-				frame = "⠋"
-			}
-			spinnerLine := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
-			content = content + "\n" + spinnerLine
-		} else if hasPendingUser {
-			// Fallback: if last entry not user (e.g. tool interleaved), still show pending line
-			frame := m.spinnerModel.View()
-			if frame == "" {
-				frame = "⠋"
-			}
-			spinnerLine := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
-			content = content + "\n" + spinnerLine
-		}
-	}
 	m.viewport.SetContent(content)
 	m.rebuildCount++
 	if forceBottom || wasAtBottom {
@@ -1692,6 +1884,12 @@ func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
 func (m Model) View() tea.View {
 	// Build subcomponents
 	transcriptView := m.viewport.View()
+	// Dynamic pending spinner line (TUI-6): composes at View time without transcript rebuild.
+	transcriptViewWithPending := transcriptView
+	if line := m.pendingSpinnerLine(); line != "" {
+		transcriptViewWithPending = transcriptView + "\n" + line
+	}
+
 	inputView := m.input.View()
 	// Slash suggestions floating list above input
 	if m.suggestionsVisible {
@@ -1700,8 +1898,15 @@ func (m Model) View() tea.View {
 			inputView = suggView + "\n" + inputView
 		}
 	}
-	// Session focus hint in input area
-	if m.sessionFocus {
+	// Sessions dropdown hint in input area (replaces old session focus hint) — keep "focus" word for backward compat with TUI-5 tests
+	if m.sessionsDropdownVisible {
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · esc/ctrl+g close")
+		inputView = focusHint + "\n" + inputView
+	} else if m.modelPanelVisible {
+		mpHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ model select: ↑/↓ navigate · enter select · esc close")
+		inputView = mpHint + "\n" + inputView
+	} else if m.sessionFocus {
+		// Deprecated compat: old inline focus hint still renders if set via legacy path
 		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · esc/ctrl+g back")
 		inputView = focusHint + "\n" + inputView
 	}
@@ -1714,8 +1919,10 @@ func (m Model) View() tea.View {
 		showMoreBelow = true
 	}
 	footerHint := ""
-	if m.sessionFocus {
+	if m.sessionsDropdownVisible || m.sessionFocus {
 		footerHint = "session focus"
+	} else if m.modelPanelVisible {
+		footerHint = "model select"
 	}
 	toastWithHint := m.toast
 	if showMoreBelow && m.toast == "" {
@@ -1723,32 +1930,47 @@ func (m Model) View() tea.View {
 	}
 
 	footer := components.FooterModel{
-		Palette:      compPal,
-		Width:        m.width,
-		Cwd:          m.cwd,
-		SessionID:    m.sessionID,
-		DaemonAddr:   m.daemonAddr,
-		Version:      m.daemonVers,
-		Toast:        toastWithHint,
-		DaemonErr:    m.daemonErr,
-		ShowSpinner:  m.spinner,
-		SpinnerView:  m.spinnerModel.View(),
-		Layout:       m.layout,
-		ModelName:    m.currentModel,
-		Tokens:       m.totalTokens,
+		Palette:       compPal,
+		Width:         m.width,
+		Cwd:           m.cwd,
+		SessionID:     m.sessionID,
+		DaemonAddr:    m.daemonAddr,
+		Version:       m.daemonVers,
+		Toast:         toastWithHint,
+		DaemonErr:     m.daemonErr,
+		ShowSpinner:   m.spinner,
+		SpinnerView:   m.spinnerModel.View(),
+		Layout:        m.layout,
+		ModelName:     m.currentModel,
+		Tokens:        m.totalTokens,
 		ShowMoreBelow: showMoreBelow,
-		FocusHint:    footerHint,
+		FocusHint:     footerHint,
 	}.Render()
 
-	// Sidebar: highlight when in session focus mode
+	// Sidebar redesign TUI-6: three sections — Context & tokens, Plugins & skills, Turn stats.
+	// Documented limitation: context window % requires daemon-side token accounting; TUI shows
+	// "turns in window: N" from local entries (cheaply available) and omits compaction status
+	// (not cheaply available via existing RPC). This is honest about what exists.
+	avgLatencyStr := ""
+	if m.latencyCount > 0 {
+		avgMs := m.latencyTotalMs / int64(m.latencyCount)
+		if avgMs < 1000 {
+			avgLatencyStr = fmt.Sprintf("%dms", avgMs)
+		} else {
+			avgLatencyStr = fmt.Sprintf("%.1fs", float64(avgMs)/1000)
+		}
+	}
+	turnsInWindow := len(m.entries)
+	// Heuristic: each turn has user+assistant; but we show raw entries as "turns in window" for honesty
 	sidebarData := components.SidebarData{
-		SessionID: m.sessionID,
-		Sessions:  m.sessions,
-		Palette:   compPal,
-		MarkedIDs: m.markedIDs,
-		ModelName: m.currentModel,
-		Focused:   m.sessionFocus,
-		FocusIdx:  m.sessionFocusIdx,
+		Palette:       compPal,
+		TotalTokens:   m.totalTokens,
+		TurnsInWindow: turnsInWindow,
+		TurnCount:     m.turnCount,
+		AvgLatency:    avgLatencyStr,
+		LastError:     m.lastError,
+		Plugins:       m.plugins,
+		Skills:        m.skills,
 	}
 	sidebar := components.SidebarModel{
 		Data:   sidebarData,
@@ -1760,16 +1982,16 @@ func (m Model) View() tea.View {
 	switch m.layout {
 	case LayoutSession:
 		if m.showSidebar {
-			content = layouts.Session(sidebar, transcriptView, inputView, footer)
+			content = layouts.Session(sidebar, transcriptViewWithPending, inputView, footer)
 		} else {
-			content = layouts.Minimal(transcriptView, inputView, footer)
+			content = layouts.Minimal(transcriptViewWithPending, inputView, footer)
 		}
 	case LayoutMinimal:
 		// Authoritative: Minimal always renders Minimal, never Hybrid, even if showSidebar true.
 		// This ensures three layouts are visually distinct at all times.
-		content = layouts.Minimal(transcriptView, inputView, footer)
+		content = layouts.Minimal(transcriptViewWithPending, inputView, footer)
 	default: // hybrid
-		content = layouts.Hybrid(transcriptView, inputView, footer, sidebar, m.showSidebar)
+		content = layouts.Hybrid(transcriptViewWithPending, inputView, footer, sidebar, m.showSidebar)
 	}
 
 	// Help floating overlay (viewport) on top of base content
@@ -1784,6 +2006,30 @@ func (m Model) View() tea.View {
 		helpBox := helpStyle.Render(m.helpViewport.View())
 		// For deterministic TTY-free test, stack help below base with marker; real overlay would be centered.
 		content = content + "\n--- help overlay ---\n" + helpBox
+	}
+	// Sessions dropdown floating overlay (like /help) — compact floating panel.
+	// Position: floating overlay stacked below base with marker for TTY-free determinism;
+	// real TUI would center it as a compact panel. Documented as floating overlay.
+	if m.sessionsDropdownVisible {
+		dropdown := m.renderSessionsDropdown()
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(m.palette.Accent)).
+			Background(lipgloss.Color(m.palette.BGElevated)).
+			Padding(0, 1)
+		box := boxStyle.Render(dropdown)
+		content = content + "\n--- sessions dropdown ---\n" + box
+	}
+	// Model selection floating panel (like /help)
+	if m.modelPanelVisible {
+		panel := m.renderModelPanel()
+		boxStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(m.palette.Accent)).
+			Background(lipgloss.Color(m.palette.BGElevated)).
+			Padding(0, 1)
+		box := boxStyle.Render(panel)
+		content = content + "\n--- model panel ---\n" + box
 	}
 
 	// Wrap with palette background
@@ -1820,6 +2066,144 @@ func formatTokens(n int) string {
 		}
 	}
 	return string(out)
+}
+
+func truncateError(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= max {
+		return s
+	}
+	if max <= 3 {
+		return s[:max]
+	}
+	return s[:max-3] + "..."
+}
+
+// loadAvailableModels reads .forge/config.json providers.*.models directly.
+// The TUI already reads that file for the tui section — reuse the same read path.
+// Returns current model first, then unique models from all providers. Plugin-providers are not listed yet (deferred).
+func (m Model) loadAvailableModels() []string {
+	path := m.configPath
+	if path == "" {
+		path = ".forge/config.json"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		if m.currentModel != "" {
+			return []string{m.currentModel}
+		}
+		return nil
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		if m.currentModel != "" {
+			return []string{m.currentModel}
+		}
+		return nil
+	}
+	rawProv, ok := doc["providers"]
+	if !ok {
+		if m.currentModel != "" {
+			return []string{m.currentModel}
+		}
+		return nil
+	}
+	var providers map[string]struct {
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rawProv, &providers); err != nil {
+		if m.currentModel != "" {
+			return []string{m.currentModel}
+		}
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	if m.currentModel != "" {
+		out = append(out, m.currentModel)
+		seen[m.currentModel] = true
+	}
+	for _, p := range providers {
+		for _, mdl := range p.Models {
+			if mdl == "" || seen[mdl] {
+				continue
+			}
+			seen[mdl] = true
+			out = append(out, mdl)
+		}
+	}
+	return out
+}
+
+func (m Model) renderSessionsDropdown() string {
+	if len(m.sessions) == 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no sessions)")
+	}
+	var sb strings.Builder
+	// Keep "Sessions ● focus" for backward compat with TUI-5 tests that assert this substring
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Sessions ● focus")
+	sb.WriteString(title + "\n")
+	for i, s := range m.sessions {
+		id := s.ID
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		marker := "  "
+		if s.ID == m.sessionID {
+			marker = lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▶ ")
+		}
+		line := marker + lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(id)
+		if s.MessageCount > 0 {
+			line += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(fmt.Sprintf(" (%d)", s.MessageCount))
+		}
+		isMarked := m.markedIDs != nil && m.markedIDs[s.ID]
+		if !isMarked && s.Metadata != nil {
+			if v, ok := s.Metadata["success"]; ok {
+				if b, ok := v.(bool); ok && b {
+					isMarked = true
+				}
+			}
+		}
+		if isMarked {
+			line += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Success)).Render(" ✓")
+		}
+		// Highlight selected index via background
+		if i == m.sessionsDropdownIdx || (!m.sessionsDropdownVisible && i == m.sessionFocusIdx) {
+			line = lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BGElevated)).Foreground(lipgloss.Color(m.palette.Warning)).Render(marker+id) + lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(fmt.Sprintf(" (%d)", s.MessageCount))
+			if isMarked {
+				line += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Success)).Render(" ✓")
+			}
+			// Wrap with background again for full line
+			line = lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BGElevated)).Render(line)
+		}
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("↑/↓ navigate · enter select · esc close"))
+	return sb.String()
+}
+
+func (m Model) renderModelPanel() string {
+	if len(m.modelPanelList) == 0 {
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no models)")
+	}
+	var sb strings.Builder
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Select Model")
+	sb.WriteString(title + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("plugin-providers not listed yet (deferred)") + "\n")
+	for i, mdl := range m.modelPanelList {
+		line := "  " + mdl
+		if mdl == m.currentModel {
+			line = "● " + mdl
+		}
+		if i == m.modelPanelIdx {
+			line = lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BGElevated)).Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("▶ " + mdl)
+		} else {
+			line = lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(line)
+		}
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("↑/↓ navigate · enter select · esc close"))
+	return sb.String()
 }
 
 

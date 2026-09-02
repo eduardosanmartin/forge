@@ -156,6 +156,17 @@ const (
 	DefaultSkillFileMaxBytes  int64 = 1 * 1024 * 1024 // 1 MiB
 )
 
+// AgentConfig bounds the agent turn loop (TUI-6).
+// MaxIterations caps tool-call iterations per turn (default 10).
+// Zero or negative values in a config file are invalid and fall back to
+// defaults (handled in mergeInto), matching the LimitsConfig pattern.
+type AgentConfig struct {
+	MaxIterations int `json:"max_iterations"`
+}
+
+// Default agent caps (TUI-6, owner decision).
+const DefaultAgentMaxIterations = 10
+
 // Config is the full forge configuration document.
 type Config struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -168,6 +179,7 @@ type Config struct {
 	TUI             TUIConfig           `json:"tui"`
 	LLM             LLMConfig           `json:"llm"`
 	Limits          LimitsConfig        `json:"limits"`
+	Agent           AgentConfig         `json:"agent"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -198,6 +210,7 @@ func Defaults() *Config {
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
 		},
+		Agent: AgentConfig{MaxIterations: DefaultAgentMaxIterations},
 	}
 }
 
@@ -253,6 +266,13 @@ type fileLimits struct {
 	SkillFileMaxBytes  *int64 `json:"skill_file_max_bytes"`
 }
 
+// fileAgent mirrors AgentConfig with presence-tracking pointers so that
+// merging can distinguish "field absent" from "field set to zero value".
+// Zero/negative values are treated as invalid and fall back to defaults.
+type fileAgent struct {
+	MaxIterations *int `json:"max_iterations"`
+}
+
 // fileConfig mirrors Config with presence-tracking pointers so that merging
 // can distinguish "field absent" from "field set to zero value".
 type fileConfig struct {
@@ -266,6 +286,7 @@ type fileConfig struct {
 	TUI             *TUIConfig          `json:"tui"`
 	LLM             *LLMConfig          `json:"llm"`
 	Limits          *fileLimits         `json:"limits"`
+	Agent           *fileAgent          `json:"agent"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -344,6 +365,9 @@ func Load(filePaths ...string) (*Config, error) {
 	if cfg.Limits.SkillFileMaxBytes <= 0 {
 		cfg.Limits.SkillFileMaxBytes = DefaultSkillFileMaxBytes
 	}
+	if cfg.Agent.MaxIterations <= 0 {
+		cfg.Agent.MaxIterations = DefaultAgentMaxIterations
+	}
 	return cfg, nil
 }
 
@@ -406,6 +430,16 @@ func mergeInto(dst *Config, fc *fileConfig) {
 				dst.Limits.SkillFileMaxBytes = v
 			} else {
 				dst.Limits.SkillFileMaxBytes = DefaultSkillFileMaxBytes
+			}
+		}
+	}
+	if fc.Agent != nil {
+		if fc.Agent.MaxIterations != nil {
+			v := *fc.Agent.MaxIterations
+			if v > 0 {
+				dst.Agent.MaxIterations = v
+			} else {
+				dst.Agent.MaxIterations = DefaultAgentMaxIterations
 			}
 		}
 	}

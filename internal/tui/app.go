@@ -66,6 +66,14 @@ func (a *ClientAdapter) MarkSuccess(sessionID string) error {
 	ctx := context.Background()
 	return a.c.MarkSuccess(ctx, sessionID)
 }
+func (a *ClientAdapter) PluginList() (*daemon.PluginListResult, error) {
+	ctx := context.Background()
+	return a.c.PluginList(ctx)
+}
+func (a *ClientAdapter) SkillList() (*daemon.SkillListResult, error) {
+	ctx := context.Background()
+	return a.c.SkillList(ctx)
+}
 func (a *ClientAdapter) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
 	return a.c.Events(ctx)
 }

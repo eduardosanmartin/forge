@@ -94,8 +94,10 @@ func NewAgent(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	maxIterations := 10 // default
-	// Could be made configurable via config in the future
+	maxIterations := 10
+	if cfg != nil && cfg.Agent.MaxIterations > 0 {
+		maxIterations = cfg.Agent.MaxIterations
+	}
 	return &Agent{
 		cfg:           cfg,
 		ctxAssembler:  NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
@@ -175,7 +177,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	for {
 		iterationCount++
 		if iterationCount > a.maxIterations {
-			result.Error = fmt.Errorf("max iterations (%d) exceeded", a.maxIterations)
+			result.Error = fmt.Errorf("turn aborted: agent reached max_iterations (%d) after %d iterations — raise agent.max_iterations in .forge/config.json", a.maxIterations, iterationCount-1)
 			result.Halted = true
 			break
 		}

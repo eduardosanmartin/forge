@@ -2,23 +2,29 @@ package components
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/eduardosanmartin/forge/internal/daemon"
 	"charm.land/lipgloss/v2"
+	"github.com/eduardosanmartin/forge/internal/daemon"
 )
 
-// SidebarData is the single data model for the sidebar panel.
-// ModelName is the current model (from ExecuteTurnResult.Model or fallback).
-// Documented source: last successful ExecuteTurnResult.Model when present; otherwise empty (no config model schema in TUI-4).
-// Focused indicates session focus mode (arrow navigation); FocusIdx is selected index.
+// SidebarData is the single data model for the sidebar panel (TUI-6 redesign).
+// It shows exactly three sections (owner-selected):
+// (a) "Context & tokens": cumulative session tokens, turns in current context window.
+// Documented limitation: window % and compaction status are not obtainable via existing RPC
+// without daemon changes, so we show "turns in window: N" honestly and omit compaction.
+// (b) "Plugins & skills": name + enabled/disabled per entry via plugin.list/skill.list.
+// (c) "Turn stats": turn count this session, average latency (client-measured), last error truncated.
+// Sessions list and model name were removed (redundant — both visible in footer).
 type SidebarData struct {
-	SessionID string
-	Sessions  []daemon.SessionResult
-	Palette   Palette
-	MarkedIDs map[string]bool // sessions flagged as success via /mark
-	ModelName string
-	Focused   bool
-	FocusIdx  int
+	Palette       Palette
+	TotalTokens   int
+	TurnsInWindow int
+	Plugins       []daemon.PluginInfoResult
+	Skills        []daemon.SkillInfoResult
+	TurnCount     int
+	AvgLatency    string
+	LastError     string
 }
 
 // SidebarModel renders the sidebar in two presentations: column vs overlay.
@@ -42,101 +48,121 @@ func (m *SidebarModel) SetSize(w, h int) {
 // SetData updates sidebar data.
 func (m *SidebarModel) SetData(d SidebarData) { m.Data = d }
 
-// renderContent builds the inner content shared between both renderers.
+// renderContent builds the inner content shared between both renderers — three sections.
 func (m SidebarModel) renderContent() string {
 	pal := m.Data.Palette
-	titleText := "Sessions"
-	if m.Data.Focused {
-		titleText = "Sessions ● focus"
-	}
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Accent)).Bold(true).Render(titleText)
-	var body string
-	if len(m.Data.Sessions) == 0 {
-		body = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Faint)).Render("(no sessions)")
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Accent)).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim))
+	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text))
+	faintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Faint))
+	successStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Success))
+	warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Warning))
+
+	// Section (a) Context & tokens
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Context & tokens"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("tokens: ") + textStyle.Render(formatTokensSidebar(m.Data.TotalTokens)))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("turns in window: ") + textStyle.Render(fmt.Sprintf("%d", m.Data.TurnsInWindow)))
+	sb.WriteString("\n")
+	// Documented: window % not obtainable without daemon changes — omitted honestly
+	sb.WriteString(faintStyle.Render("(window % unavailable via RPC — shows local turns)"))
+	sb.WriteString("\n\n")
+
+	// Section (b) Plugins & skills
+	sb.WriteString(titleStyle.Render("Plugins & skills"))
+	sb.WriteString("\n")
+	if len(m.Data.Plugins) == 0 && len(m.Data.Skills) == 0 {
+		sb.WriteString(faintStyle.Render("(no plugins/skills)"))
+		sb.WriteString("\n")
 	} else {
-		for i, s := range m.Data.Sessions {
-			id := s.ID
-			if len(id) > 12 {
-				id = id[:12]
+		for _, p := range m.Data.Plugins {
+			status := "disabled"
+			style := dimStyle
+			if p.Enabled {
+				status = "enabled"
+				style = successStyle
 			}
-			marker := "  "
-			if s.ID == m.Data.SessionID {
-				marker = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Accent)).Render("▶ ")
+			sb.WriteString(textStyle.Render(p.Name) + " " + style.Render("["+status+"]"))
+			sb.WriteString("\n")
+		}
+		for _, s := range m.Data.Skills {
+			status := "disabled"
+			style := dimStyle
+			if s.Enabled {
+				status = "enabled"
+				style = successStyle
 			}
-			// In focus mode, highlight selected index
-			if m.Data.Focused && i == m.Data.FocusIdx {
-				marker = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Warning)).Render("▸ ")
+			line := s.Name + " " + style.Render("["+status+"]")
+			if s.Category != "" {
+				line += " " + dimStyle.Render("("+s.Category+")")
 			}
-			line := marker + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(id)
-			if m.Data.Focused && i == m.Data.FocusIdx {
-				line = lipgloss.NewStyle().Background(lipgloss.Color(pal.BGElevated)).Foreground(lipgloss.Color(pal.Warning)).Render(marker + id)
-				// Use focus highlight; keep marked etc after
-				if s.MessageCount > 0 {
-					line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render(fmt.Sprintf(" (%d)", s.MessageCount))
-				}
-				isMarked := m.Data.MarkedIDs != nil && m.Data.MarkedIDs[s.ID]
-				if !isMarked && s.Metadata != nil {
-					if v, ok := s.Metadata["success"]; ok {
-						if b, ok := v.(bool); ok && b {
-							isMarked = true
-						}
-					}
-				}
-				if isMarked {
-					line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Success)).Render(" ✓")
-				}
-				line = lipgloss.NewStyle().Background(lipgloss.Color(pal.BGElevated)).Render(line)
-			} else {
-				if s.MessageCount > 0 {
-					line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render(fmt.Sprintf(" (%d)", s.MessageCount))
-				}
-				// Success flag: metadata success or explicit MarkedIDs.
-				isMarked := m.Data.MarkedIDs != nil && m.Data.MarkedIDs[s.ID]
-				if !isMarked && s.Metadata != nil {
-					if v, ok := s.Metadata["success"]; ok {
-						if b, ok := v.(bool); ok && b {
-							isMarked = true
-						}
-					}
-				}
-				if isMarked {
-					line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Success)).Render(" ✓")
-				}
+			_ = warningStyle
+			sb.WriteString(textStyle.Render(s.Name) + " " + style.Render("["+status+"]"))
+			if s.Category != "" {
+				// append category dim after
+				sb.WriteString(" " + dimStyle.Render("("+s.Category+")"))
 			}
-			body += line + "\n"
+			sb.WriteString("\n")
+			_ = line
 		}
 	}
-	current := ""
-	if m.Data.SessionID != "" {
-		short := m.Data.SessionID
-		if len(short) > 12 {
-			short = short[:12]
+	sb.WriteString("\n")
+
+	// Section (c) Turn stats
+	sb.WriteString(titleStyle.Render("Turn stats"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("turns: ") + textStyle.Render(fmt.Sprintf("%d", m.Data.TurnCount)))
+	sb.WriteString("\n")
+	avg := m.Data.AvgLatency
+	if avg == "" {
+		avg = "—"
+	}
+	sb.WriteString(dimStyle.Render("avg latency: ") + textStyle.Render(avg))
+	sb.WriteString("\n")
+	lastErr := m.Data.LastError
+	if lastErr == "" {
+		lastErr = "—"
+	} else if len(lastErr) > 60 {
+		lastErr = lastErr[:57] + "..."
+	}
+	sb.WriteString(dimStyle.Render("last error: ") + faintStyle.Render(lastErr))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+func formatTokensSidebar(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var out []byte
+	rem := len(s) % 3
+	if rem > 0 {
+		out = append(out, s[:rem]...)
+		if len(s) > rem {
+			out = append(out, ',')
 		}
-		current = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render("current: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(short)
 	}
-	modelLine := ""
-	if m.Data.ModelName != "" {
-		modelLine = lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render("model: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(m.Data.ModelName)
+	for i := rem; i < len(s); i += 3 {
+		out = append(out, s[i:i+3]...)
+		if i+3 < len(s) {
+			out = append(out, ',')
+		}
 	}
-	content := title + "\n" + body
-	if current != "" {
-		content += "\n" + current
-	}
-	if modelLine != "" {
-		content += "\n" + modelLine
-	}
-	return content
+	return string(out)
 }
 
 // RenderColumn renders as a permanent column (session layout).
 func (m SidebarModel) RenderColumn() string {
-	borderColor := m.Data.Palette.Border
-	if m.Data.Focused {
-		borderColor = m.Data.Palette.Accent
-	}
 	style := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color(borderColor)).
+		BorderForeground(lipgloss.Color(m.Data.Palette.Border)).
 		Background(lipgloss.Color(m.Data.Palette.BGElevated)).
 		Width(m.Width).
 		Height(m.Height).
@@ -146,13 +172,9 @@ func (m SidebarModel) RenderColumn() string {
 
 // RenderOverlay renders as a floating overlay panel (hybrid/minimal layouts).
 func (m SidebarModel) RenderOverlay() string {
-	borderColor := m.Data.Palette.Border
-	if m.Data.Focused {
-		borderColor = m.Data.Palette.Accent
-	}
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(borderColor)).
+		BorderForeground(lipgloss.Color(m.Data.Palette.Border)).
 		Background(lipgloss.Color(m.Data.Palette.BGElevated)).
 		Width(m.Width).
 		Height(m.Height).
