@@ -403,6 +403,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result and live notifications. Halt events stop spinner separately.
 		m.spinner = false
 		if msg.err != nil {
+			// RF-2.6 failure semantics: if a streaming preview is in-flight,
+			// keep the partial text visible but mark it as interrupted — do NOT
+			// silently delete what the user was reading. This preserves the
+			// live preview as evidence of the failure point.
+			if idx := m.findStreamingIndex(); idx != -1 {
+				m.entries[idx].Streaming = false
+				if m.entries[idx].Meta == "" {
+					m.entries[idx].Meta = "stream interrupted"
+				} else if !strings.Contains(m.entries[idx].Meta, "stream interrupted") {
+					m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
+				}
+				m.rebuildTranscript()
+			}
 			m.toast = msg.err.Error()
 			return m, nil
 		}
@@ -434,11 +447,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
-			// Replace the optimistic local echo with the daemon-confirmed copy.
-			if len(newEntries) > 0 {
-				m.absorbLocalEcho(newEntries[0])
+			// Streaming confirmation swap (TUI-3): if a streaming preview is
+			// active, the authoritative assistant entry replaces it in-place
+			// rather than being appended. Search, don't assume position —
+			// tool events may have landed after the streaming entry.
+			if idx := m.findStreamingIndex(); idx != -1 {
+				for j, e := range newEntries {
+					if e.Role == "assistant" && !e.IsTool {
+						m.entries[idx] = e
+						newEntries = append(newEntries[:j], newEntries[j+1:]...)
+						break
+					}
+				}
+				// If no assistant entry matched (e.g. tool-only turn), just
+				// finalize the preview to avoid a lingering streaming caret.
+				if idx < len(m.entries) && m.entries[idx].Streaming {
+					m.entries[idx].Streaming = false
+					if m.entries[idx].Meta == "" {
+						m.entries[idx].Meta = "stream interrupted"
+					}
+				}
+				// Replace user echo in-place to preserve order when tool
+				// events interleaved. Normal path uses removal+append which
+				// would place user after tool if tool was after echo.
+				for j, e := range newEntries {
+					if e.Role == "user" {
+						if m.replaceLocalEchoInPlace(e) {
+							newEntries = append(newEntries[:j], newEntries[j+1:]...)
+						}
+						break
+					}
+				}
+				m.entries = append(m.entries, newEntries...)
+			} else {
+				// Replace the optimistic local echo with the daemon-confirmed
+				// copy — in-place to preserve order when tool events
+				// interleaved. On in-place success the confirmed entry is
+				// already in the transcript, so drop it from the append list;
+				// fall back to search-and-remove otherwise.
+				if len(newEntries) > 0 {
+					if m.replaceLocalEchoInPlace(newEntries[0]) {
+						newEntries = newEntries[1:]
+					} else {
+						m.absorbLocalEcho(newEntries[0])
+					}
+				}
+				m.entries = append(m.entries, newEntries...)
 			}
-			m.entries = append(m.entries, newEntries...)
 			for _, mr := range msg.res.Messages {
 				if mr.Seq > m.lastSeq {
 					m.lastSeq = mr.Seq
@@ -559,6 +614,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, cmd
 					}
 				}
+				// Defensive reset: if a previous streaming buffer is still
+				// unresolved (e.g. no confirmation arrived), finalize it so
+				// the new turn starts clean. Keep partial text as interrupted
+				// rather than silently discarding it.
+				if idx := m.findStreamingIndex(); idx != -1 {
+					m.entries[idx].Streaming = false
+					if m.entries[idx].Meta == "" {
+						m.entries[idx].Meta = "stream interrupted"
+					} else if !strings.Contains(m.entries[idx].Meta, "stream interrupted") {
+						m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
+					}
+				}
 				// Normal turn: optimistic local echo, clear input, spinner, execute.
 				// The daemon-confirmed copy replaces this echo in executeTurnMsg.
 				m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true})
@@ -603,6 +670,18 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 			Content: payload.Message.Content,
 		}
 		entries := components.EntriesFromMessages([]daemon.MessageResult{mr}, nil)
+		// Streaming confirmation swap (TUI-3): if this authoritative
+		// assistant message corresponds to an active preview, replace the
+		// streaming entry in-place. Search, don't assume position.
+		if len(entries) > 0 && entries[0].Role == "assistant" && m.hasStreamingEntry() {
+			if m.absorbStreamingEntry(entries[0]) {
+				if seq > m.lastSeq {
+					m.lastSeq = seq
+				}
+				m.rebuildTranscript()
+				return nil
+			}
+		}
 		// A live-confirmed user message replaces the optimistic local echo.
 		if len(entries) > 0 {
 			m.absorbLocalEcho(entries[0])
@@ -614,6 +693,14 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 		// If payload carries usage, accumulate (not currently in payload but future-proof).
 		m.rebuildTranscript()
 		return nil
+
+	case daemon.MethodMessageDelta:
+		var payload daemon.MessageDeltaPayload
+		if err := json.Unmarshal(notif.Params, &payload); err != nil {
+			m.toast = err.Error()
+			return nil
+		}
+		return m.handleMessageDelta(payload)
 
 	case daemon.MethodToolCallEvent:
 		var payload daemon.ToolCallEventPayload
@@ -904,6 +991,99 @@ func (m *Model) absorbLocalEcho(confirmed components.Entry) {
 			return
 		}
 	}
+}
+
+// findStreamingIndex returns the index of the active streaming preview entry,
+// or -1 if none. There should be at most one streaming entry at a time.
+func (m *Model) findStreamingIndex() int {
+	for i, e := range m.entries {
+		if e.Streaming {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *Model) hasStreamingEntry() bool { return m.findStreamingIndex() != -1 }
+
+// absorbStreamingEntry replaces the active streaming preview with the
+// confirmed assistant entry. It searches the whole transcript (tool events may
+// have landed after the streaming entry, so position-based matching is not safe).
+// Returns true if a swap occurred.
+func (m *Model) absorbStreamingEntry(confirmed components.Entry) bool {
+	if confirmed.Role != "assistant" {
+		return false
+	}
+	idx := m.findStreamingIndex()
+	if idx == -1 {
+		return false
+	}
+	// Preserve the confirmed entry's fields; ensure Streaming is false.
+	confirmed.Streaming = false
+	m.entries[idx] = confirmed
+	return true
+}
+
+// replaceLocalEchoInPlace replaces an optimistic local echo in-place (preserving
+// order) rather than removing and appending at end. Used for streaming swap
+// to keep user → assistant → tool order when tool events interleaved.
+func (m *Model) replaceLocalEchoInPlace(confirmed components.Entry) bool {
+	if confirmed.Role != "user" {
+		return false
+	}
+	for i, e := range m.entries {
+		if e.Local && e.Role == "user" && strings.TrimSpace(e.Content) == strings.TrimSpace(confirmed.Content) {
+			m.entries[i] = confirmed
+			return true
+		}
+	}
+	return false
+}
+
+// handleMessageDelta handles passive streaming deltas (message.delta.event).
+// Deltas are best-effort previews and carry no Seq; they are purely additive
+// and must not affect lastSeq. The TUI behaves identically to TUI-2 when no
+// deltas arrive (passive: no config coupling).
+func (m *Model) handleMessageDelta(payload daemon.MessageDeltaPayload) tea.Cmd {
+	// Session filter like other events.
+	if m.sessionID != "" && payload.SessionID != "" && payload.SessionID != m.sessionID {
+		return nil
+	}
+	// Cross-session or stray before session creation — ignore if we have a
+	// session filter mismatch already handled; also ignore empty deltas.
+	if payload.Delta == "" {
+		return nil
+	}
+	// Late/stray: if no active turn context and no streaming entry, ignore.
+	// Active turn is spinner true (turn in-flight) or an existing streaming
+	// entry that is still marked streaming. This prevents stray deltas after
+	// swap/failure from creating phantom entries.
+	if idx := m.findStreamingIndex(); idx == -1 {
+		// No streaming entry — only create one if a turn is currently in-flight.
+		if !m.spinner {
+			return nil
+		}
+		// No streaming yet but turn is active: create new preview entry.
+		if m.sessionID == "" {
+			// Before session creation (should not happen via filter, but defensive).
+			return nil
+		}
+		m.entries = append(m.entries, components.Entry{
+			Role:      "assistant",
+			Content:   payload.Delta,
+			Streaming: true,
+		})
+		m.rebuildTranscript()
+		return nil
+	}
+	// Append to existing streaming entry (search, don't assume last).
+	idx := m.findStreamingIndex()
+	if idx == -1 {
+		return nil
+	}
+	m.entries[idx].Content += payload.Delta
+	m.rebuildTranscript()
+	return nil
 }
 
 func (m *Model) rebuildTranscript() {

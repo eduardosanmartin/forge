@@ -10,13 +10,14 @@ import (
 
 // Entry is a single transcript entry for rendering.
 type Entry struct {
-	Role     string
-	Content  string
-	Meta     string // dim meta line (model/duration)
-	ToolName string // if tool call compact line
-	IsTool   bool
-	Seq      int  // daemon message seq; used by callers to dedup fetched history
-	Local    bool // true for the optimistic local echo before daemon confirmation
+	Role      string
+	Content   string
+	Meta      string // dim meta line (model/duration)
+	ToolName  string // if tool call compact line
+	IsTool    bool
+	Seq       int  // daemon message seq; used by callers to dedup fetched history
+	Local     bool // true for the optimistic local echo before daemon confirmation
+	Streaming bool // true for in-flight streaming preview; renders with caret
 }
 
 // TranscriptModel wraps a viewport for the transcript area.
@@ -86,7 +87,14 @@ func BuildContent(entries []Entry, pal Palette, width int) string {
 			block := pal.AccentStyle().Render("▎ ") + pal.TextStyle().Render(e.Content)
 			sb.WriteString(block)
 		case e.Role == "assistant":
-			sb.WriteString(pal.TextStyle().Render(e.Content))
+			if e.Streaming {
+				// Deterministic caret marker for in-flight streaming preview.
+				// Static "▌" in accent color — no time-based blinking, so goldens/tests are stable.
+				sb.WriteString(pal.TextStyle().Render(e.Content))
+				sb.WriteString(pal.AccentStyle().Render("▌"))
+			} else {
+				sb.WriteString(pal.TextStyle().Render(e.Content))
+			}
 			if e.Meta != "" {
 				sb.WriteString("\n")
 				sb.WriteString(pal.DimStyle().Render(e.Meta))
