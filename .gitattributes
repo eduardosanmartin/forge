@@ -8,3 +8,5 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# Golden snapshots must survive fresh clones on Windows without CRLF materialization
+internal/tui/testdata/*.golden text eol=lf

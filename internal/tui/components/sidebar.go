@@ -12,6 +12,7 @@ type SidebarData struct {
 	SessionID string
 	Sessions  []daemon.SessionResult
 	Palette   Palette
+	MarkedIDs map[string]bool // sessions flagged as success via /mark
 }
 
 // SidebarModel renders the sidebar in two presentations: column vs overlay.
@@ -55,6 +56,18 @@ func (m SidebarModel) renderContent() string {
 			line := marker + lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Text)).Render(id)
 			if s.MessageCount > 0 {
 				line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Dim)).Render(fmt.Sprintf(" (%d)", s.MessageCount))
+			}
+			// Success flag: metadata success or explicit MarkedIDs.
+			isMarked := m.Data.MarkedIDs != nil && m.Data.MarkedIDs[s.ID]
+			if !isMarked && s.Metadata != nil {
+				if v, ok := s.Metadata["success"]; ok {
+					if b, ok := v.(bool); ok && b {
+						isMarked = true
+					}
+				}
+			}
+			if isMarked {
+				line += lipgloss.NewStyle().Foreground(lipgloss.Color(pal.Success)).Render(" ✓")
 			}
 			body += line + "\n"
 		}

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	forgeconfig "github.com/eduardosanmartin/forge/internal/config"
 )
 
 // TUIConfig holds the persisted TUI section inside .forge/config.json.
@@ -34,54 +36,70 @@ func IsValidPalette(s string) bool {
 	return ok
 }
 
-// LoadTUIConfig reads the tui section from path. If the file does not exist,
-// is empty, or contains invalid JSON, defaults are returned without error.
-// Missing tui section or missing fields are filled with defaults. Unknown
-// sibling keys are ignored (preserved on save).
+// LoadTUIConfig reads the tui section from path via internal/config so parsing
+// exists in exactly ONE place. This is the sole READ path for TUI settings.
+//
+//   - SaveTUIConfig is the sole WRITER of the tui section (atomic merge).
+//   - LoadTUIConfig delegates to forgeconfig.Load which handles DisallowUnknownFields,
+//     schema migration, and defaults. On any load error (missing file, empty,
+//     invalid JSON) defaults are returned without error, matching legacy behavior.
+//   - Invalid layout/palette values fall back to defaults after delegation.
+//
+// Documenting the split: read-via-config / write-via-tui keeps config authority
+// centralized in internal/config while preserving TUI's atomic-merge save that
+// must not clobber unknown sibling keys.
 func LoadTUIConfig(path string) TUIConfig {
-	cfg := DefaultTUIConfig()
-	data, err := os.ReadFile(path)
+	def := DefaultTUIConfig()
+	cfg, err := forgeconfig.Load(path)
 	if err != nil {
-		return cfg
+		return def
 	}
-	if len(data) == 0 {
-		return cfg
+	// cfg is never nil when err == nil; but guard anyway.
+	if cfg == nil {
+		return def
 	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return cfg
+	tui := TUIConfig{
+		Layout:  cfg.TUI.Layout,
+		Palette: cfg.TUI.Palette,
+		Sidebar: cfg.TUI.Sidebar,
 	}
-	raw, ok := doc["tui"]
-	if !ok || len(raw) == 0 || string(raw) == "null" {
-		return cfg
+	// Fill defaults for empty fields (should not happen when loaded via
+	// forgeconfig.Defaults, but keep for safety).
+	if tui.Layout == "" {
+		tui.Layout = def.Layout
 	}
-	var parsed TUIConfig
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return cfg
+	if tui.Palette == "" {
+		tui.Palette = def.Palette
 	}
-	// Fill defaults for empty fields.
-	if parsed.Layout == "" {
-		parsed.Layout = cfg.Layout
-	}
-	if parsed.Palette == "" {
-		parsed.Palette = cfg.Palette
-	}
-	// Sidebar is a bool; we need to distinguish missing vs false. If the raw
-	// does not contain "sidebar" key, keep default true. We check via map.
-	var tmp map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &tmp); err == nil {
-		if _, has := tmp["sidebar"]; !has {
-			parsed.Sidebar = cfg.Sidebar
+	// Sidebar is a bool where false is valid but also the zero value.
+	// forgeconfig.Load via fileConfig clobbers the whole TUI struct, so a
+	// document like {"tui":{"layout":"minimal"}} would yield Sidebar=false
+	// even though the key was absent. Preserve default true when the key is
+	// missing in the raw document.
+	if data, readErr := os.ReadFile(path); readErr == nil && len(data) > 0 {
+		var doc map[string]json.RawMessage
+		if jsonErr := json.Unmarshal(data, &doc); jsonErr == nil {
+			if raw, ok := doc["tui"]; ok && len(raw) > 0 && string(raw) != "null" {
+				var tmp map[string]json.RawMessage
+				if jsonErr2 := json.Unmarshal(raw, &tmp); jsonErr2 == nil {
+					if _, has := tmp["sidebar"]; !has {
+						tui.Sidebar = def.Sidebar
+					}
+				}
+			} else if !ok {
+				// No tui section at all — keep full defaults.
+				tui = def
+			}
 		}
 	}
 	// Validate; invalid values fall back to defaults without error.
-	if !IsValidLayout(parsed.Layout) {
-		parsed.Layout = cfg.Layout
+	if !IsValidLayout(tui.Layout) {
+		tui.Layout = def.Layout
 	}
-	if !IsValidPalette(parsed.Palette) {
-		parsed.Palette = cfg.Palette
+	if !IsValidPalette(tui.Palette) {
+		tui.Palette = def.Palette
 	}
-	return parsed
+	return tui
 }
 
 // SaveTUIConfig persists cfg's tui section into path atomically (write temp +
@@ -151,8 +169,8 @@ func SaveTUIConfig(path string, cfg TUIConfig) error {
 }
 
 // TUIConfigPath returns the project-scoped config path for TUI persistence.
-// It mirrors internal/config.ProjectConfigPath but avoids importing that package
-// to keep tui decoupled from core config validation. The path is ./.forge/config.json.
+// The path is ./.forge/config.json, resolved from the current working
+// directory (consistent with how the daemon resolves its own config).
 func TUIConfigPath() (string, error) {
 	return filepath.Join(".forge", "config.json"), nil
 }

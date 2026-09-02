@@ -18,6 +18,7 @@ type FooterModel struct {
 	Toast       string
 	DaemonErr   string
 	ShowSpinner bool
+	Tokens      int // cumulative session tokens; 0 hides the field
 }
 
 // NewFooter creates a footer model.
@@ -39,7 +40,7 @@ func (m FooterModel) Render() string {
 
 	// Left: cwd
 	left := styleDim.Render(m.Cwd)
-	// Right: session short + daemon addr
+	// Right: session short + daemon addr + tokens
 	rightParts := []string{}
 	if m.SessionID != "" {
 		short := m.SessionID
@@ -47,6 +48,9 @@ func (m FooterModel) Render() string {
 			short = short[:8]
 		}
 		rightParts = append(rightParts, styleAccent.Render(short))
+	}
+	if m.Tokens > 0 {
+		rightParts = append(rightParts, styleFaint.Render(formatTokens(m.Tokens)+" tokens"))
 	}
 	if m.DaemonAddr != "" {
 		rightParts = append(rightParts, styleFaint.Render(m.DaemonAddr))
@@ -98,4 +102,30 @@ func (m FooterModel) Render() string {
 		return toastLine + bar
 	}
 	return bar
+}
+
+// formatTokens formats n with thousands separators, e.g. 12431 -> "12,431".
+func formatTokens(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	s := fmt.Sprintf("%d", n)
+	if len(s) <= 3 {
+		return s
+	}
+	var out []byte
+	rem := len(s) % 3
+	if rem > 0 {
+		out = append(out, s[:rem]...)
+		if len(s) > rem {
+			out = append(out, ',')
+		}
+	}
+	for i := rem; i < len(s); i += 3 {
+		out = append(out, s[i:i+3]...)
+		if i+3 < len(s) {
+			out = append(out, ',')
+		}
+	}
+	return string(out)
 }

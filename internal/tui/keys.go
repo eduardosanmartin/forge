@@ -11,6 +11,7 @@ type KeyMap struct {
 	CycleLayout   key.Binding
 	Quit          key.Binding
 	Help          key.Binding
+	Halt          key.Binding
 }
 
 // DefaultKeyMap returns the global key bindings.
@@ -32,17 +33,21 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("?"),
 			key.WithHelp("?", "help"),
 		),
+		Halt: key.NewBinding(
+			key.WithKeys("ctrl+h"),
+			key.WithHelp("ctrl+h", "halt turn"),
+		),
 	}
 }
 
 // ShortHelp returns short help bindings.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.ToggleSidebar, k.CycleLayout, k.Quit}
+	return []key.Binding{k.ToggleSidebar, k.CycleLayout, k.Quit, k.Halt}
 }
 
 // FullHelp returns full help bindings grouped.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleSidebar, k.CycleLayout, k.Quit, k.Help},
+		{k.ToggleSidebar, k.CycleLayout, k.Quit, k.Help, k.Halt},
 	}
 }

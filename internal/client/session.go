@@ -47,3 +47,21 @@ func (c *Client) MarkSuccess(ctx context.Context, sessionID string) error {
 	var result map[string]any
 	return c.Call(ctx, daemon.MethodSessionMarkSuccess, daemon.SessionMarkSuccessParams{SessionID: sessionID}, &result)
 }
+
+// HaltSession halts a running turn for a session.
+func (c *Client) HaltSession(ctx context.Context, sessionID, reason string) error {
+	var result map[string]any
+	return c.Call(ctx, daemon.MethodHaltSession, daemon.HaltSessionParams{SessionID: sessionID, Reason: reason}, &result)
+}
+
+// ResumeSession resumes a halted session.
+func (c *Client) ResumeSession(ctx context.Context, sessionID string) error {
+	var result map[string]any
+	return c.Call(ctx, daemon.MethodResumeSession, daemon.ResumeSessionParams{SessionID: sessionID}, &result)
+}
+
+// SwitchModel switches the session's model.
+func (c *Client) SwitchModel(ctx context.Context, sessionID, model string) error {
+	var result map[string]any
+	return c.Call(ctx, daemon.MethodSwitchModel, daemon.SwitchModelParams{SessionID: sessionID, Model: model}, &result)
+}

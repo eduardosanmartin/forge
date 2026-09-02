@@ -50,6 +50,25 @@ func (a *ClientAdapter) GetMessagesSince(sessionID string, sinceSeq int) (*daemo
 	ctx := context.Background()
 	return a.c.GetMessagesSince(ctx, sessionID, sinceSeq)
 }
+func (a *ClientAdapter) HaltSession(sessionID, reason string) error {
+	ctx := context.Background()
+	return a.c.HaltSession(ctx, sessionID, reason)
+}
+func (a *ClientAdapter) ResumeSession(sessionID string) error {
+	ctx := context.Background()
+	return a.c.ResumeSession(ctx, sessionID)
+}
+func (a *ClientAdapter) SwitchModel(sessionID, model string) error {
+	ctx := context.Background()
+	return a.c.SwitchModel(ctx, sessionID, model)
+}
+func (a *ClientAdapter) MarkSuccess(sessionID string) error {
+	ctx := context.Background()
+	return a.c.MarkSuccess(ctx, sessionID)
+}
+func (a *ClientAdapter) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
+	return a.c.Events(ctx)
+}
 
 // Run launches the TUI program. It dials the daemon via internal/client and
 // builds the model.

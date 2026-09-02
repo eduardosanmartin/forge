@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -299,11 +300,22 @@ func (e fakeErr) Error() string { return string(e) }
 
 // fakeClient implements TUIClient for daemon-flow tests.
 type fakeClient struct {
-	turnRes  *daemon.ExecuteTurnResult
-	turnErr  error
-	sinceRes *daemon.GetMessagesResult
-	gotSince int
-	turnMsg  string
+	turnRes       *daemon.ExecuteTurnResult
+	turnErr       error
+	sinceRes      *daemon.GetMessagesResult
+	gotSince      int
+	turnMsg       string
+	haltCalled    bool
+	haltReason    string
+	haltErr       error
+	resumeCalled  bool
+	resumeErr     error
+	switchModel   string
+	switchErr     error
+	markCalled    bool
+	markErr       error
+	eventsCh      chan daemon.JSONRPCNotification
+	eventsErr     error
 }
 
 func (f *fakeClient) Status() (*daemon.StatusResult, error) {
@@ -326,6 +338,34 @@ func (f *fakeClient) ExecuteTurn(sessionID, message string) (*daemon.ExecuteTurn
 func (f *fakeClient) GetMessagesSince(sessionID string, sinceSeq int) (*daemon.GetMessagesResult, error) {
 	f.gotSince = sinceSeq
 	return f.sinceRes, nil
+}
+
+func (f *fakeClient) HaltSession(sessionID, reason string) error {
+	f.haltCalled = true
+	f.haltReason = reason
+	return f.haltErr
+}
+func (f *fakeClient) ResumeSession(sessionID string) error {
+	f.resumeCalled = true
+	return f.resumeErr
+}
+func (f *fakeClient) SwitchModel(sessionID, model string) error {
+	f.switchModel = model
+	return f.switchErr
+}
+func (f *fakeClient) MarkSuccess(sessionID string) error {
+	f.markCalled = true
+	return f.markErr
+}
+func (f *fakeClient) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
+	if f.eventsErr != nil {
+		return nil, f.eventsErr
+	}
+	if f.eventsCh != nil {
+		return f.eventsCh, nil
+	}
+	ch := make(chan daemon.JSONRPCNotification)
+	return ch, nil
 }
 
 func msgResult(seq int, role, content string) daemon.MessageResult {
