@@ -122,6 +122,14 @@ func defaultPermissionsPolicy() PermissionsPolicy {
 	}
 }
 
+// TUIConfig holds TUI preferences persisted in .forge/config.json.
+// Added for TUI-1: layout, palette, sidebar. Defaults are hybrid/ember/true.
+type TUIConfig struct {
+	Layout  string `json:"layout"`
+	Palette string `json:"palette"`
+	Sidebar bool   `json:"sidebar"`
+}
+
 // Config is the full forge configuration document.
 type Config struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -131,6 +139,7 @@ type Config struct {
 	Network         NetworkConfig       `json:"network"`
 	Logging         LoggingConfig       `json:"logging"`
 	Permissions     PermissionsPolicy   `json:"permissions"`
+	TUI             TUIConfig           `json:"tui"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -155,6 +164,7 @@ func Defaults() *Config {
 		Network:     NetworkConfig{AllowedHosts: []string{"127.0.0.1", "localhost"}},
 		Logging:     LoggingConfig{Level: "info", File: ""},
 		Permissions: defaultPermissionsPolicy(),
+		TUI:         TUIConfig{Layout: "hybrid", Palette: "ember", Sidebar: true},
 	}
 }
 
@@ -212,6 +222,7 @@ type fileConfig struct {
 	Network         *NetworkConfig      `json:"network"`
 	Logging         *LoggingConfig      `json:"logging"`
 	Permissions     *filePermissions    `json:"permissions"`
+	TUI             *TUIConfig          `json:"tui"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -319,6 +330,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		if fp.Git != nil {
 			dst.Permissions.Git = *fp.Git
 		}
+	}
+	if fc.TUI != nil {
+		dst.TUI = *fc.TUI
 	}
 }
 
