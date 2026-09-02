@@ -401,10 +401,267 @@ func (p *GeminiProvider) geminiToChatResponse(gr geminiResponse, model string) C
 	}
 }
 
-// ChatStream implements Provider.ChatStream. WU6 does not implement streaming for Gemini
-// because the agent loop uses Chat only. Returns ErrStreamingNotSupported.
+// ChatStream implements Provider.ChatStream for Gemini.
+//
+// It POSTs streamGenerateContent?alt=sse and parses the SSE data lines, each
+// containing a JSON chunk with candidates[0].content.parts[] (text parts) and
+// optional functionCall. The final chunk carries finishReason and usageMetadata
+// (promptTokenCount/candidatesTokenCount/totalTokenCount). The mapping to
+// StreamChunk mirrors Anthropic's so downstream code is provider-agnostic.
+// Unknown fields are ignored. HTTP non-200 surfaces the error body. Mid-stream
+// provider errors are emitted as StreamChunk{Error: "..."}.
+// Context cancellation closes the channel with no goroutine leak.
+// Mid-stream failures fail the turn (see Anthropic ChatStream docs).
 func (p *GeminiProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
-	return nil, fmt.Errorf("%w: gemini streaming requires alt=sse handling not in WU6 scope", ErrStreamingNotSupported)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.closedMu.Lock()
+	if p.closed {
+		p.closedMu.Unlock()
+		return nil, errors.New("provider closed")
+	}
+	p.closedMu.Unlock()
+
+	bodyMap := p.buildGeminiBody(req)
+	body, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	endpoint := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", p.baseURL, url.PathEscape(req.Model))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	if p.apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", p.apiKey)
+	}
+	p.logger.Debug("gemini chat stream request", "endpoint", endpoint, "body", logging.Redact(string(body)))
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, p.mapError(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+	}
+
+	ch := make(chan StreamChunk, 16)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		emit := func(chunk StreamChunk) bool {
+			select {
+			case ch <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		var (
+			finishReason string
+			usage        *Usage
+			seenFinish   bool
+		)
+
+		handler := func(ev SSEEvent) error {
+			if ev.Data == "" {
+				return nil
+			}
+			// Gemini SSE data lines are raw JSON chunks; event field is typically empty.
+			var gr geminiStreamChunk
+			if err := json.Unmarshal([]byte(ev.Data), &gr); err != nil {
+				// Check for error payload shape: {"error": {"message": "...", "code": 400}}
+				var errProbe struct {
+					Error *struct {
+						Message string `json:"message"`
+						Code    int    `json:"code"`
+					} `json:"error"`
+				}
+				if jErr := json.Unmarshal([]byte(ev.Data), &errProbe); jErr == nil && errProbe.Error != nil && errProbe.Error.Message != "" {
+					_ = emit(StreamChunk{ID: "gemini-" + req.Model, Model: req.Model, Error: errProbe.Error.Message})
+					return io.EOF
+				}
+				p.logger.Debug("gemini stream parse failed", "error", err, "data", logging.Redact(ev.Data))
+				return nil
+			}
+
+			// If error field present in chunk, surface.
+			if gr.Error != nil && gr.Error.Message != "" {
+				_ = emit(StreamChunk{ID: "gemini-" + req.Model, Model: req.Model, Error: gr.Error.Message})
+				return io.EOF
+			}
+
+			// UsageMetadata handling: capture latest.
+			if gr.UsageMetadata != nil {
+				usage = &Usage{
+					PromptTokens:     gr.UsageMetadata.PromptTokenCount,
+					CompletionTokens: gr.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:      gr.UsageMetadata.TotalTokenCount,
+				}
+				if usage.TotalTokens == 0 {
+					usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+				}
+			}
+
+			if len(gr.Candidates) > 0 {
+				cand := gr.Candidates[0]
+				// Emit text parts and function calls as separate chunks for provider-agnostic consumption.
+				for _, part := range cand.Content.Parts {
+					if part.Text != "" {
+						if !emit(StreamChunk{
+							ID:    "gemini-" + req.Model,
+							Model: req.Model,
+							Choices: []StreamChoice{{
+								Index: 0,
+								Delta: Message{Role: "assistant", Content: part.Text},
+							}},
+						}) {
+							return io.EOF
+						}
+					}
+					if part.FunctionCall != nil {
+						argsStr := "{}"
+						if part.FunctionCall.Args != nil {
+							b, _ := json.Marshal(part.FunctionCall.Args)
+							argsStr = string(b)
+						}
+						if !emit(StreamChunk{
+							ID:    "gemini-" + req.Model,
+							Model: req.Model,
+							Choices: []StreamChoice{{
+								Index: 0,
+								Delta: Message{
+									Role: "assistant",
+									ToolCalls: []ToolCall{{
+										ID:   part.FunctionCall.Name + "_call",
+										Type: "function",
+										Function: ToolCallFunction{
+											Name:      part.FunctionCall.Name,
+											Arguments: argsStr,
+										},
+									}},
+								},
+							}},
+						}) {
+							return io.EOF
+						}
+					}
+				}
+				if cand.FinishReason != "" {
+					seenFinish = true
+					switch cand.FinishReason {
+					case "STOP":
+						// Heuristic: if any chunk had tool_calls, map to tool_calls; otherwise stop.
+						// Since we emit tool calls inline, track if we saw any functionCall this chunk?
+						// For simplicity, default to stop; agent will decide based on presence of tool calls.
+						// We preserve exact mapping by checking if candidate had functionCall part.
+						hasTool := false
+						for _, pt := range cand.Content.Parts {
+							if pt.FunctionCall != nil {
+								hasTool = true
+								break
+							}
+						}
+						if hasTool {
+							finishReason = "tool_calls"
+						} else {
+							finishReason = "stop"
+						}
+					case "MAX_TOKENS":
+						finishReason = "length"
+					case "SAFETY", "RECITATION":
+						finishReason = "content_filter"
+					default:
+						finishReason = strings.ToLower(cand.FinishReason)
+					}
+				}
+			}
+
+			// Gemini signals end via finishReason or when stream closes. We don't emit final chunk per-data;
+			// final usage/finishReason will be emitted on stream EOF handling below if not already.
+			_ = seenFinish
+			return nil
+		}
+
+		err := parseSSEStream(ctx, resp.Body, handler)
+		if err != nil && err != io.EOF && err != context.Canceled && !strings.Contains(err.Error(), "EOF") {
+			select {
+			case <-ctx.Done():
+			default:
+				select {
+				case ch <- StreamChunk{ID: "gemini-" + req.Model, Model: req.Model, Error: err.Error()}:
+				case <-ctx.Done():
+				default:
+				}
+				p.logger.Debug("gemini stream terminated with error", "error", err)
+			}
+		}
+
+		// Emit final terminal chunk if we captured finishReason or usage and haven't terminated via error.
+		// This ensures parity with Anthropic's message_stop: downstream gets one chunk with FinishReason+Usage.
+		if finishReason != "" || usage != nil {
+			fr := finishReason
+			if fr == "" {
+				fr = "stop"
+			}
+			// Only emit if context not canceled.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			// Best-effort final chunk; if channel already full and context not canceled, block briefly but respect ctx.
+			select {
+			case ch <- StreamChunk{
+				ID:    "gemini-" + req.Model,
+				Model: req.Model,
+				Choices: []StreamChoice{{
+					Index:        0,
+					FinishReason: &fr,
+					Delta:        Message{Role: "assistant"},
+				}},
+				Usage: usage,
+			}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+// geminiStreamChunk mirrors geminiResponse but is permissive for streaming (single chunk).
+type geminiStreamChunk struct {
+	Candidates []struct {
+		Content struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Text         string `json:"text,omitempty"`
+				FunctionCall *struct {
+					Name string         `json:"name"`
+					Args map[string]any `json:"args"`
+				} `json:"functionCall,omitempty"`
+			} `json:"parts"`
+		} `json:"content"`
+		FinishReason string `json:"finishReason"`
+	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount     int `json:"promptTokenCount"`
+		CandidatesTokenCount int `json:"candidatesTokenCount"`
+		TotalTokenCount      int `json:"totalTokenCount"`
+	} `json:"usageMetadata"`
+	Error *struct {
+		Message string `json:"message"`
+		Code    int    `json:"code"`
+	} `json:"error,omitempty"`
 }
 
 // ListModels implements Provider.ListModels for Gemini.

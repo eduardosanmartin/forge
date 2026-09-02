@@ -389,10 +389,370 @@ func (p *AnthropicProvider) anthropicToChatResponse(ar anthropicResponse) ChatRe
 	}
 }
 
-// ChatStream implements Provider.ChatStream. WU6 does not implement streaming for Anthropic
-// because the agent loop uses Chat only (see loop.go). Returns ErrStreamingNotSupported.
+// anthropicToolAccum holds incremental input assembly for a tool_use content block.
+type anthropicToolAccum struct {
+	ID   string
+	Name string
+	buf  strings.Builder
+}
+
+// ChatStream implements Provider.ChatStream for Anthropic.
+//
+// It POSTs /v1/messages with "stream": true and parses the SSE event sequence:
+// message_start, content_block_start, content_block_delta, content_block_stop,
+// message_delta, message_stop, plus ping/error. Text deltas are emitted as
+// StreamChunk deltas immediately. Tool_use input is assembled from partial_json
+// fragments and emitted once per block on content_block_stop. The final chunk
+// carries finish_reason and usage. Unknown event types are ignored gracefully.
+// Truncated JSON is skipped (debug logged). HTTP non-200 surfaces the error body.
+// Provider mid-stream `error` events are emitted as StreamChunk{Error: "..."} then the
+// channel is closed. Context cancellation closes the channel with no goroutine leak.
+//
+// Mid-stream failure (error event, JSON parse fatal, or transport error after
+// streaming started) fails the turn predictably; the caller should NOT fallback
+// to Chat within the same turn — the next turn may run non-streaming if
+// streaming is disabled in config.
 func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
-	return nil, fmt.Errorf("%w: anthropic streaming requires SSE event parsing (message_start/content_block_delta) not in WU6 scope", ErrStreamingNotSupported)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.closedMu.Lock()
+	if p.closed {
+		p.closedMu.Unlock()
+		return nil, errors.New("provider closed")
+	}
+	p.closedMu.Unlock()
+
+	bodyMap := p.buildAnthropicBody(req)
+	bodyMap["stream"] = true
+	body, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+	endpoint := p.baseURL + "/v1/messages"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	if p.apiKey != "" {
+		httpReq.Header.Set("x-api-key", p.apiKey)
+	}
+	p.logger.Debug("anthropic chat stream request", "endpoint", endpoint, "body", logging.Redact(string(body)))
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, p.mapError(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+	}
+
+	ch := make(chan StreamChunk, 16)
+
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+
+		var (
+			messageID   string
+			model       string
+			toolAccums  = make(map[int]*anthropicToolAccum)
+			usage       *Usage
+			finishReason string
+			// anthropicUsage stores input/output for eventual Usage.
+			inputTokens int
+		)
+
+		// Helper to emit a chunk or abort on ctx cancellation (no leak).
+		emit := func(chunk StreamChunk) bool {
+			select {
+			case ch <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
+		handler := func(ev SSEEvent) error {
+			// Anthropic error events are delivered as SSE event "error" with JSON {"type":"error","error":{"type":...,"message":...}}
+			if ev.Event == "error" {
+				var errPayload struct {
+					Type  string `json:"type"`
+					Error struct {
+						Type    string `json:"type"`
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &errPayload); err == nil {
+					msg := errPayload.Error.Message
+					if msg == "" {
+						msg = "anthropic stream error"
+					}
+					_ = emit(StreamChunk{ID: messageID, Model: model, Error: msg})
+				} else {
+					// Fallback: surface raw data as error.
+					_ = emit(StreamChunk{ID: messageID, Model: model, Error: ev.Data})
+				}
+				// Terminal: stop parsing.
+				return io.EOF
+			}
+
+			switch ev.Event {
+			case "message_start":
+				var payload struct {
+					Type    string `json:"type"`
+					Message struct {
+						ID    string         `json:"id"`
+						Model string         `json:"model"`
+						Usage anthropicUsage `json:"usage"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+					p.logger.Debug("anthropic stream parse message_start failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				messageID = payload.Message.ID
+				model = payload.Message.Model
+				inputTokens = payload.Message.Usage.InputTokens
+				// Map model back if empty use request model.
+				if model == "" {
+					model = req.Model
+				}
+			case "content_block_start":
+				var payload struct {
+					Type         string `json:"type"`
+					Index        int    `json:"index"`
+					ContentBlock struct {
+						Type string `json:"type"`
+						ID   string `json:"id,omitempty"`
+						Name string `json:"name,omitempty"`
+					} `json:"content_block"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+					p.logger.Debug("anthropic stream parse content_block_start failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				if payload.ContentBlock.Type == "tool_use" {
+					acc := &anthropicToolAccum{ID: payload.ContentBlock.ID, Name: payload.ContentBlock.Name}
+					toolAccums[payload.Index] = acc
+				}
+			case "content_block_delta":
+				var payload struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+					Delta struct {
+						Type        string `json:"type"`
+						Text        string `json:"text,omitempty"`
+						PartialJSON string `json:"partial_json,omitempty"`
+					} `json:"delta"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+					p.logger.Debug("anthropic stream parse content_block_delta failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				switch payload.Delta.Type {
+				case "text_delta":
+					if payload.Delta.Text == "" {
+						return nil
+					}
+					id := messageID
+					if id == "" {
+						id = "msg_stream"
+					}
+					m := model
+					if m == "" {
+						m = req.Model
+					}
+					if !emit(StreamChunk{
+						ID:    id,
+						Model: m,
+						Choices: []StreamChoice{{
+							Index: 0,
+							Delta: Message{Role: "assistant", Content: payload.Delta.Text},
+						}},
+					}) {
+						return io.EOF
+					}
+				case "input_json_delta":
+					if acc, ok := toolAccums[payload.Index]; ok {
+						acc.buf.WriteString(payload.Delta.PartialJSON)
+					} else {
+						// Gracefully handle out-of-order: create placeholder.
+						acc := &anthropicToolAccum{}
+						acc.buf.WriteString(payload.Delta.PartialJSON)
+						toolAccums[payload.Index] = acc
+					}
+				default:
+					// Unknown delta type -> ignore gracefully.
+				}
+			case "content_block_stop":
+				var payload struct {
+					Type  string `json:"type"`
+					Index int    `json:"index"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+					p.logger.Debug("anthropic stream parse content_block_stop failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				if acc, ok := toolAccums[payload.Index]; ok && acc.ID != "" {
+					// Assemble accumulated input_json_delta fragments. Empty
+					// args become "{}"; malformed (truncated) JSON is emitted
+					// raw so the agent loop surfaces invalid-args downstream.
+					argsStr := acc.buf.String()
+					if argsStr == "" {
+						argsStr = "{}"
+					}
+					id := messageID
+					if id == "" {
+						id = "msg_stream"
+					}
+					m := model
+					if m == "" {
+						m = req.Model
+					}
+					if !emit(StreamChunk{
+						ID:    id,
+						Model: m,
+						Choices: []StreamChoice{{
+							Index: 0,
+							Delta: Message{
+								Role: "assistant",
+								ToolCalls: []ToolCall{{
+									ID:   acc.ID,
+									Type: "function",
+									Function: ToolCallFunction{
+										Name:      acc.Name,
+										Arguments: argsStr,
+									},
+								}},
+							},
+						}},
+					}) {
+						return io.EOF
+					}
+					delete(toolAccums, payload.Index)
+				}
+			case "message_delta":
+				var payload struct {
+					Type  string `json:"type"`
+					Delta struct {
+						StopReason   *string `json:"stop_reason,omitempty"`
+						StopSequence *string `json:"stop_sequence,omitempty"`
+					} `json:"delta"`
+					Usage struct {
+						OutputTokens int `json:"output_tokens"`
+					} `json:"usage"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &payload); err != nil {
+					p.logger.Debug("anthropic stream parse message_delta failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				if payload.Delta.StopReason != nil {
+					switch *payload.Delta.StopReason {
+					case "tool_use":
+						finishReason = "tool_calls"
+					case "end_turn":
+						finishReason = "stop"
+					case "max_tokens":
+						finishReason = "length"
+					default:
+						finishReason = *payload.Delta.StopReason
+					}
+				}
+				if payload.Usage.OutputTokens != 0 {
+					usage = &Usage{
+						PromptTokens:     inputTokens,
+						CompletionTokens: payload.Usage.OutputTokens,
+						TotalTokens:      inputTokens + payload.Usage.OutputTokens,
+					}
+				}
+			case "message_stop":
+				// Emit final chunk with finish reason and usage.
+				if finishReason == "" {
+					finishReason = "stop"
+				}
+				fr := finishReason
+				id := messageID
+				if id == "" {
+					id = "msg_stream"
+				}
+				m := model
+				if m == "" {
+					m = req.Model
+				}
+				ch2 := StreamChunk{
+					ID:    id,
+					Model: m,
+					Choices: []StreamChoice{{
+						Index:        0,
+						FinishReason: &fr,
+						Delta:        Message{Role: "assistant"},
+					}},
+					Usage: usage,
+				}
+				_ = emit(ch2)
+				return io.EOF
+			case "ping":
+				// Keepalive, ignore.
+			case "":
+				// Data without explicit event: try to infer via JSON type field.
+				if ev.Data == "" {
+					return nil
+				}
+				var probe struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &probe); err != nil {
+					p.logger.Debug("anthropic stream unknown event parse failed", "error", err, "data", logging.Redact(ev.Data))
+					return nil
+				}
+				// Re-dispatch based on probe.Type if it matches known.
+				switch probe.Type {
+				case "error":
+					var errPayload struct {
+						Error struct {
+							Message string `json:"message"`
+						} `json:"error"`
+					}
+					if err := json.Unmarshal([]byte(ev.Data), &errPayload); err == nil && errPayload.Error.Message != "" {
+						_ = emit(StreamChunk{ID: messageID, Model: model, Error: errPayload.Error.Message})
+					} else {
+						_ = emit(StreamChunk{ID: messageID, Model: model, Error: ev.Data})
+					}
+					return io.EOF
+				default:
+					// Unknown typed event without SSE event field: ignore gracefully.
+				}
+			default:
+				// Unknown event type -> ignore gracefully.
+			}
+			return nil
+		}
+
+		err := parseSSEStream(ctx, resp.Body, handler)
+		if err != nil && err != io.EOF && err != context.Canceled && !strings.Contains(err.Error(), "EOF") {
+			// Surface transport errors as StreamChunk Error if channel still open.
+			// Only if context not canceled and we haven't already emitted terminal.
+			select {
+			case <-ctx.Done():
+			default:
+				// Best-effort error chunk.
+				select {
+				case ch <- StreamChunk{ID: messageID, Model: model, Error: err.Error()}:
+				case <-ctx.Done():
+				default:
+				}
+				p.logger.Debug("anthropic stream terminated with error", "error", err)
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 // ListModels implements Provider.ListModels for Anthropic.

@@ -44,15 +44,17 @@ type ToolsRegistryInterface interface {
 
 // SessionManager manages sessions and executes agent turns.
 type SessionManager struct {
-	store     StoreInterface
-	llmReg    LLMRegistryInterface
-	toolsReg  ToolsRegistryInterface
-	emergency *EmergencyState
-	logger    *slog.Logger
-	mu        sync.RWMutex
-	sessions  map[string]*SessionState // active sessions with turn contexts
-	agent     *agent.Agent
-	v1Deps    agent.V1Deps
+	store          StoreInterface
+	llmReg         LLMRegistryInterface
+	toolsReg       ToolsRegistryInterface
+	emergency      *EmergencyState
+	logger         *slog.Logger
+	mu             sync.RWMutex
+	sessions       map[string]*SessionState // active sessions with turn contexts
+	agent          *agent.Agent
+	v1Deps         agent.V1Deps
+	cfg            *config.Config
+	deltaPublisher func(sessionID string, notif *JSONRPCNotification)
 }
 
 // SessionState holds runtime state for an active session.
@@ -80,6 +82,22 @@ func WithV1Deps(deps agent.V1Deps) SessionManagerOption {
 	}
 }
 
+// WithDeltaPublisher wires a broadcaster for live streaming deltas (WU3).
+// The publisher is called for each text delta when llm.streaming is enabled.
+// It is additive: nil disables the bridge with no side effects.
+func WithDeltaPublisher(publisher func(sessionID string, notif *JSONRPCNotification)) SessionManagerOption {
+	return func(m *SessionManager) {
+		m.deltaPublisher = publisher
+	}
+}
+
+// SetDeltaPublisher sets the delta broadcaster after construction (used by Daemon to wire Transport).
+func (m *SessionManager) SetDeltaPublisher(publisher func(sessionID string, notif *JSONRPCNotification)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deltaPublisher = publisher
+}
+
 // NewSessionManager creates a new SessionManager.
 func NewSessionManager(
 	store StoreInterface,
@@ -99,6 +117,7 @@ func NewSessionManager(
 		emergency: emergency,
 		logger:    logger,
 		sessions:  make(map[string]*SessionState),
+		cfg:       cfg,
 	}
 
 	// Create the agent if all dependencies are available
@@ -263,10 +282,36 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		m.emergency.ClearTurnContext(sessionID)
 	}()
 
-	// Delegate to agent with v1 flags
-	// We need to pass v1 flags to the agent - for now we'll use the agent's ExecuteTurn
-	// which will read flags from session metadata
-	result, err := m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
+	// Delegate to agent with v1 flags and optional streaming delta bridge (WU3).
+	// Streaming is controlled by config llm.streaming (default OFF). When enabled,
+	// the manager publishes text deltas via MessageDelta notifications so TUI clients
+	// receive live updates. Tool calls still execute as before; Chat remains canonical
+	// when streaming is disabled or provider lacks support.
+	var result agent.TurnResult
+	streamingEnabled := m.cfg != nil && m.cfg.LLM.Streaming
+	if streamingEnabled && m.deltaPublisher != nil {
+		opts := agent.TurnOptions{
+			StreamingEnabled: true,
+			OnDelta: func(delta string) {
+				// Publish per-delta notification (additive, best-effort, non-blocking).
+				payload := MessageDeltaPayload{SessionID: sessionID, Delta: delta}
+				if notif, nErr := NewNotification(MethodMessageDelta, payload); nErr == nil {
+					// Capture publisher under lock snapshot to avoid race if SetDeltaPublisher races.
+					m.mu.RLock()
+					pub := m.deltaPublisher
+					m.mu.RUnlock()
+					if pub != nil {
+						pub(sessionID, notif)
+					}
+				}
+			},
+		}
+		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, opts)
+	} else if streamingEnabled {
+		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
+	} else {
+		result, err = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
+	}
 	if err != nil {
 		return result.Messages, err
 	}

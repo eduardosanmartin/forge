@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -191,17 +192,27 @@ func TestGeminiProvider_Chat_WireFormat(t *testing.T) {
 }
 
 func TestGeminiProvider_ChatStream_NotSupported(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	// WU3: Gemini now implements real ChatStream; sentinel is not returned.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1beta/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"candidates\":[]}\n\n"))
+	}))
 	defer srv.Close()
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
 	p, _ := NewGeminiProvider(srv.URL, "", []string{hostFromURL(srv.URL)}, logger)
 	defer p.Close()
-	_, err := p.ChatStream(nil, ChatRequest{Model: "gemini-1.5-pro"})
-	if !errors.Is(err, ErrStreamingNotSupported) {
-		t.Fatalf("expected ErrStreamingNotSupported, got %v", err)
+	_, err := p.ChatStream(context.Background(), ChatRequest{Model: "gemini-1.5-pro"})
+	if errors.Is(err, ErrStreamingNotSupported) {
+		t.Fatalf("expected Gemini to support streaming in WU3, got ErrStreamingNotSupported: %v", err)
 	}
-	if !strings.Contains(err.Error(), "gemini") {
-		t.Errorf("error should mention gemini, got %q", err.Error())
+	if err != nil {
+		t.Fatalf("ChatStream should succeed, got %v", err)
 	}
 }
 

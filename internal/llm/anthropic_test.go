@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -194,17 +195,28 @@ func TestAnthropicProvider_Chat_DefaultMaxTokens(t *testing.T) {
 }
 
 func TestAnthropicProvider_ChatStream_NotSupported(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	// WU3: Anthropic now implements real ChatStream; the sentinel is no longer returned for this provider.
+	// Verify that ChatStream with a valid context does not return ErrStreamingNotSupported.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+	}))
 	defer srv.Close()
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
 	p, _ := NewAnthropicProvider(srv.URL, "", []string{hostFromURL(srv.URL)}, logger)
 	defer p.Close()
-	_, err := p.ChatStream(nil, ChatRequest{Model: "claude-3"})
-	if !errors.Is(err, ErrStreamingNotSupported) {
-		t.Fatalf("expected ErrStreamingNotSupported, got %v", err)
+	_, err := p.ChatStream(context.Background(), ChatRequest{Model: "claude-3"})
+	if errors.Is(err, ErrStreamingNotSupported) {
+		t.Fatalf("expected Anthropic to support streaming in WU3, got ErrStreamingNotSupported: %v", err)
 	}
-	if !strings.Contains(err.Error(), "anthropic") {
-		t.Errorf("error should mention anthropic, got %q", err.Error())
+	if err != nil {
+		t.Fatalf("ChatStream should succeed, got %v", err)
 	}
 }
 

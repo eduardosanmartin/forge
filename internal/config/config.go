@@ -122,6 +122,15 @@ func defaultPermissionsPolicy() PermissionsPolicy {
 	}
 }
 
+// LLMConfig holds LLM-related global toggles.
+// Streaming (WU3): optional, default OFF (false) for backward compatibility.
+// When true, the daemon/agent may use ChatStream and publish message.delta.event
+// notifications for live TUI updates. The next turn can fallback to non-streaming
+// if this flag is disabled or the provider returns ErrStreamingNotSupported.
+type LLMConfig struct {
+	Streaming bool `json:"streaming"`
+}
+
 // TUIConfig holds TUI preferences persisted in .forge/config.json.
 // Added for TUI-1: layout, palette, sidebar. Defaults are hybrid/ember/true.
 type TUIConfig struct {
@@ -140,6 +149,7 @@ type Config struct {
 	Logging         LoggingConfig       `json:"logging"`
 	Permissions     PermissionsPolicy   `json:"permissions"`
 	TUI             TUIConfig           `json:"tui"`
+	LLM             LLMConfig           `json:"llm"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -165,6 +175,7 @@ func Defaults() *Config {
 		Logging:     LoggingConfig{Level: "info", File: ""},
 		Permissions: defaultPermissionsPolicy(),
 		TUI:         TUIConfig{Layout: "hybrid", Palette: "ember", Sidebar: true},
+		LLM:         LLMConfig{Streaming: false},
 	}
 }
 
@@ -223,6 +234,7 @@ type fileConfig struct {
 	Logging         *LoggingConfig      `json:"logging"`
 	Permissions     *filePermissions    `json:"permissions"`
 	TUI             *TUIConfig          `json:"tui"`
+	LLM             *LLMConfig          `json:"llm"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -333,6 +345,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.TUI != nil {
 		dst.TUI = *fc.TUI
+	}
+	if fc.LLM != nil {
+		dst.LLM = *fc.LLM
 	}
 }
 

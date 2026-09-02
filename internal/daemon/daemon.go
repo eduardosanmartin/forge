@@ -67,6 +67,11 @@ func New(
 	mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store, WithV1Deps(v1Deps))
 	handler := NewHandler(mgr, logger, pluginMgr, skillMgr)
 	transport := NewTransport(addr, handler, logger)
+	// Wire live delta bridge (WU3): when llm.streaming is enabled, agent deltas are published
+	// as message.delta.event notifications via the transport's broadcast channel.
+	mgr.SetDeltaPublisher(func(sessionID string, notif *JSONRPCNotification) {
+		transport.Broadcast(sessionID, notif)
+	})
 
 	d := &Daemon{
 		addr:      addr,

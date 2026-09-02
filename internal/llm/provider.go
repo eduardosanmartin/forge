@@ -79,10 +79,19 @@ type Usage struct {
 }
 
 // StreamChunk represents a single chunk in a streaming response.
+//
+// Extension (WU3, additive, backward compatible): Usage and Error are optional.
+// Usage is populated on the final chunk when the provider supplies token counts.
+// Error is populated when the provider signals a mid-stream error (e.g. Anthropic `error` event);
+// downstream consumers should treat a chunk with Error != "" as terminal and fail the turn.
+// Mid-stream failures fail the turn predictably; the next turn may use non-streaming fallback
+// if streaming is disabled. No goroutine is left blocked on context cancellation.
 type StreamChunk struct {
 	ID      string         `json:"id"`
 	Model   string         `json:"model"`
 	Choices []StreamChoice `json:"choices"`
+	Usage   *Usage         `json:"usage,omitempty"`
+	Error   string         `json:"error,omitempty"`
 }
 
 // StreamChoice represents a choice delta in a streaming chunk.

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/config"
@@ -50,8 +51,28 @@ type ModelForStepSelector interface {
 	GetModelForStep(step routing.StepType) string
 }
 
+// TurnOptions controls optional per-turn behavior (additive, backward compatible).
+//
+// StreamingEnabled enables the streaming path (ChatStream) when true. When false
+// (default) or when the provider returns ErrStreamingNotSupported, the turn uses
+// the canonical Chat path with identical semantics. Mid-stream failures fail the
+// turn predictably; the next turn may run non-streaming if streaming is disabled.
+// OnDelta is called for each text delta when streaming; it is ignored when
+// streaming is disabled. The callback must be non-blocking; the agent does not
+// enforce ordering beyond sequential delta emission.
+type TurnOptions struct {
+	StreamingEnabled bool
+	OnDelta          func(delta string)
+}
+
+// ChatStreamer matches providers/registries that support streaming.
+type ChatStreamer interface {
+	ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error)
+}
+
 // Agent orchestrates the agent loop: user message -> assistant -> tool calls -> ... -> final answer.
 type Agent struct {
+	cfg           *config.Config
 	ctxAssembler  *ContextAssembler
 	llmReg        LLMRegistryInterface
 	toolsReg      ToolsRegistryInterface
@@ -76,6 +97,7 @@ func NewAgent(
 	maxIterations := 10 // default
 	// Could be made configurable via config in the future
 	return &Agent{
+		cfg:           cfg,
 		ctxAssembler:  NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
 		llmReg:        llmReg,
 		toolsReg:      toolsReg,
@@ -93,7 +115,14 @@ func (a *Agent) SetV1Deps(deps V1Deps) {
 }
 
 // ExecuteTurn runs one complete turn: user message -> assistant -> tool calls -> ... -> final answer.
+// It honors config llm.streaming (default OFF) for backward compatibility.
 func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage string) (TurnResult, error) {
+	enabled := a.cfg != nil && a.cfg.LLM.Streaming
+	return a.ExecuteTurnWithOptions(ctx, sessionID, userMessage, TurnOptions{StreamingEnabled: enabled})
+}
+
+// ExecuteTurnWithOptions runs one turn with explicit per-turn options (additive).
+func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, userMessage string, opts TurnOptions) (TurnResult, error) {
 	startTime := time.Now()
 	result := TurnResult{
 		Metrics: TurnMetrics{
@@ -195,7 +224,16 @@ func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage s
 			Stream:   false,
 		}
 
-		resp, err := provider.Chat(ctx, req)
+		var resp llm.ChatResponse
+		if opts.StreamingEnabled {
+			resp, err = a.callLLMStream(ctx, provider, req, opts.OnDelta)
+			if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
+				// Provider does not support streaming: exact Chat fallback (WU3).
+				resp, err = provider.Chat(ctx, req)
+			}
+		} else {
+			resp, err = provider.Chat(ctx, req)
+		}
 		llmElapsed := time.Since(llmStartTime).Milliseconds()
 		totalLLMTimeMs += llmElapsed
 
@@ -335,4 +373,94 @@ func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage s
 	result.Metrics.IterationCount = iterationCount
 
 	return result, result.Error
+}
+
+// callLLMStream attempts streaming and assembles a ChatResponse.
+// On any mid-stream failure it returns an error and the caller must fail the turn
+// (documented contract: no fallback within the same turn; the next turn may be non-streaming).
+func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req llm.ChatRequest, onDelta func(string)) (llm.ChatResponse, error) {
+	streamer, ok := provider.(ChatStreamer)
+	if !ok {
+		return llm.ChatResponse{}, fmt.Errorf("%w: provider does not implement ChatStream", llm.ErrStreamingNotSupported)
+	}
+	// Ensure request signals streaming for providers that inspect it.
+	req.Stream = true
+	ch, err := streamer.ChatStream(ctx, req)
+	if err != nil {
+		return llm.ChatResponse{}, err
+	}
+	if ch == nil {
+		return llm.ChatResponse{}, errors.New("nil stream channel")
+	}
+	content, toolCalls, usage, finishReason, cErr := consumeStream(ctx, ch, onDelta)
+	if cErr != nil {
+		return llm.ChatResponse{}, cErr
+	}
+	// Map to ChatResponse so the existing tool-execution loop is reused verbatim.
+	return llm.ChatResponse{
+		ID:    "stream-" + req.Model,
+		Model: req.Model,
+		Choices: []llm.Choice{{
+			Index: 0,
+			Message: llm.Message{
+				Role:      "assistant",
+				Content:   content,
+				ToolCalls: toolCalls,
+			},
+			FinishReason: finishReason,
+		}},
+		Usage: usage,
+	}, nil
+}
+
+// consumeStream assembles text and tool calls from a StreamChunk channel.
+// It forwards each text delta to onDelta when non-nil.
+// A chunk with Error != "" is treated as terminal mid-stream failure.
+// Context cancellation is respected and produces a context error.
+func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string)) (string, []llm.ToolCall, *llm.Usage, string, error) {
+	var (
+		contentBuilder strings.Builder
+		toolCalls      []llm.ToolCall
+		usage          *llm.Usage
+		finishReason   string
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return "", nil, nil, "", ctx.Err()
+		case chunk, ok := <-ch:
+			if !ok {
+				// Channel closed: final assembly.
+				if finishReason == "" {
+					if len(toolCalls) > 0 {
+						finishReason = "tool_calls"
+					} else {
+						finishReason = "stop"
+					}
+				}
+				return contentBuilder.String(), toolCalls, usage, finishReason, nil
+			}
+			if chunk.Error != "" {
+				return "", nil, nil, "", fmt.Errorf("stream error: %s", chunk.Error)
+			}
+			if chunk.Usage != nil {
+				usage = chunk.Usage
+			}
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					contentBuilder.WriteString(choice.Delta.Content)
+					if onDelta != nil {
+						onDelta(choice.Delta.Content)
+					}
+				}
+				if len(choice.Delta.ToolCalls) > 0 {
+					toolCalls = append(toolCalls, choice.Delta.ToolCalls...)
+				}
+				if choice.FinishReason != nil && *choice.FinishReason != "" {
+					finishReason = *choice.FinishReason
+				}
+			}
+			// Also consider chunk-level usage already captured.
+		}
+	}
 }

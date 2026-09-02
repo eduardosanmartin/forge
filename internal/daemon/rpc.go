@@ -54,10 +54,11 @@ const (
 
 // Method names for daemon -> client notifications.
 const (
-	MethodSessionEvent  = "session.event"   // session created/updated/deleted
-	MethodMessageEvent  = "message.event"   // new message appended
-	MethodToolCallEvent = "tool.call.event" // tool call started/finished
-	MethodEmergencyHalt = "emergency.halt"  // emergency stop broadcast
+	MethodSessionEvent  = "session.event"    // session created/updated/deleted
+	MethodMessageEvent  = "message.event"    // new message appended
+	MethodToolCallEvent = "tool.call.event"  // tool call started/finished
+	MethodEmergencyHalt = "emergency.halt"   // emergency stop broadcast
+	MethodMessageDelta  = "message.delta.event" // WU3: live text delta during streaming (additive)
 )
 
 // SessionEventPayload carries session lifecycle events.
@@ -86,6 +87,14 @@ type ToolCallEventPayload struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"` // "started" | "finished" | "error"
 	Error      string `json:"error,omitempty"`
+}
+
+// MessageDeltaPayload carries live streaming deltas (WU3).
+// It is additive and does not alter existing message.event shapes consumed by TUI-2.
+type MessageDeltaPayload struct {
+	SessionID string `json:"session_id"`
+	Delta     string `json:"delta"`
+	Seq       *int   `json:"seq,omitempty"`
 }
 
 // EmergencyHaltPayload carries emergency halt notifications.
