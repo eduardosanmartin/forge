@@ -29,7 +29,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		CycleLayout: key.NewBinding(
 			key.WithKeys("ctrl+l"),
-			key.WithHelp("ctrl+l", "cycle layout"),
+			key.WithHelp("ctrl+l", "cycle layout (hybrid/session/minimal — distinct)"),
 		),
 		Quit: key.NewBinding(
 			key.WithKeys("ctrl+c"),
@@ -45,7 +45,7 @@ func DefaultKeyMap() KeyMap {
 		),
 		GrabSession: key.NewBinding(
 			key.WithKeys("ctrl+g"),
-			key.WithHelp("ctrl+g", "next session"),
+			key.WithHelp("ctrl+g", "session focus (↑/↓, enter)"),
 		),
 	}
 }

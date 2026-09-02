@@ -82,6 +82,12 @@ type Model struct {
 	suggestions        []slashSuggestion
 	suggestionIdx      int
 	suggestionsVisible bool
+
+	// TUI-5: session focus mode (arrow navigation), delta burst coalescing, scroll state
+	sessionFocus    bool
+	sessionFocusIdx int
+	deltaPending    bool
+	rebuildCount    int // instrumentation for coalescing tests; counts viewport SetContent calls
 }
 
 type pendingTool struct {
@@ -178,9 +184,14 @@ func NewModel(cfg TUIConfig, pal Palette, palName, configPath string, client TUI
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	m.viewport = vp
 
-	// Spinner: bubbles spinner wired for animated "working…" while turn in flight.
-	// Uses MiniDot (⠋⠙⠹…) at 12fps. Ticks only while m.spinner is true; stopped cleanly on completion.
-	m.spinnerModel = spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	// Spinner v2: Line spinner distinct from OpenCode's braille dots.
+	// Choice: Line (| / - \) is visually distinct from MiniDot braille dots (⠋⠙⠹…) used in chat,
+	// and its 4-frame cycle at 500ms/frame (2 FPS) is clearly perceptible without
+	// being distracting. FPS is set to 2/sec (500ms) via Spinner.FPS.
+	// Determinism: tests drive TickMsg manually; wall timing not used in assertions.
+	lineSpinner := spinner.Line
+	lineSpinner.FPS = time.Second / 2
+	m.spinnerModel = spinner.New(spinner.WithSpinner(lineSpinner))
 
 	// Help viewport (floating overlay, scrollable)
 	helpVP := viewport.New(viewport.WithWidth(60), viewport.WithHeight(20))
@@ -214,6 +225,12 @@ func (m Model) IsSuggestionsVisible() bool      { return m.suggestionsVisible }
 func (m Model) SuggestionIndex() int            { return m.suggestionIdx }
 func (m Model) SuggestionsList() []slashSuggestion { return m.suggestions }
 func (m Model) SpinnerFrame() string            { return m.spinnerModel.View() }
+func (m Model) RebuildCount() int               { return m.rebuildCount }
+func (m Model) IsSessionFocus() bool            { return m.sessionFocus }
+func (m Model) SessionFocusIdx() int            { return m.sessionFocusIdx }
+func (m Model) SpinnerFPS() time.Duration       { return m.spinnerModel.Spinner.FPS }
+func (m Model) ViewportYOffset() int            { return m.viewport.YOffset() }
+func (m Model) ViewportAtBottom() bool          { return m.viewport.AtBottom() }
 
 // SetSaveFn injects a persistence hook (tests).
 func (m *Model) SetSaveFn(fn func(TUIConfig) error) { m.saveFn = fn }
@@ -394,6 +411,9 @@ func (m Model) cmdSubscribeEvents() tea.Cmd {
 
 type eventsSubscribedMsg struct{ ch <-chan daemon.JSONRPCNotification }
 
+// deltaRebuildMsg coalesces burst deltas to a single rebuild at ~14fps.
+type deltaRebuildMsg struct{}
+
 func (m Model) cmdWaitEvent(ch <-chan daemon.JSONRPCNotification) tea.Cmd {
 	return func() tea.Msg {
 		notif, ok := <-ch
@@ -419,6 +439,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var scmd tea.Cmd
 		m.spinnerModel, scmd = m.spinnerModel.Update(msg)
+		// Rebuild to refresh spinner frame beside pending user message / footer
+		m.rebuildTranscript()
 		if m.spinner {
 			cmds = append(cmds, scmd)
 			if nxt := m.cmdSpinnerTick(); nxt != nil {
@@ -426,6 +448,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case deltaRebuildMsg:
+		m.deltaPending = false
+		m.rebuildTranscript()
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if m.helpVisible {
+			return m, nil
+		}
+		// Forward wheel to viewport (scroll)
+		m.viewport, _ = m.viewport.Update(msg)
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
@@ -497,6 +532,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// stop the spinner to avoid double-stop races between the synchronous
 		// result and live notifications. Halt events stop spinner separately.
 		m.spinner = false
+		m.deltaPending = false
 		if msg.err != nil {
 			// RF-2.6 failure semantics: if a streaming preview is in-flight,
 			// keep the partial text visible but mark it as interrupted — do NOT
@@ -664,6 +700,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case haltResultMsg:
 		m.spinner = false
+		m.deltaPending = false
 		if msg.err != nil {
 			m.toast = msg.err.Error()
 		} else {
@@ -714,6 +751,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.helpVisible = false
 			return m, nil
 		}
+		// Session focus mode intercepts BEFORE suggestions and globals
+		if m.sessionFocus {
+			switch msg.String() {
+			case "up":
+				if len(m.sessions) > 0 {
+					m.sessionFocusIdx--
+					if m.sessionFocusIdx < 0 {
+						m.sessionFocusIdx = len(m.sessions) - 1
+					}
+				}
+				return m, nil
+			case "down":
+				if len(m.sessions) > 0 {
+					m.sessionFocusIdx = (m.sessionFocusIdx + 1) % len(m.sessions)
+				}
+				return m, nil
+			case "enter":
+				if len(m.sessions) > 0 && m.sessionFocusIdx >= 0 && m.sessionFocusIdx < len(m.sessions) {
+					sel := m.sessions[m.sessionFocusIdx]
+					// Same load semantics as ctrl+g cycle: lastSeq=0, echo cleared, GetMessagesSince(0)
+					m.sessionID = sel.ID
+					m.lastSeq = 0
+					// Clear local echo entries
+					m.entries = nil
+					m.rebuildTranscriptForceBottom()
+					m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
+					m.suggestionsVisible = false
+					m.sessionFocus = false
+					m.input.Focus()
+					if m.client != nil {
+						return m, m.cmdGetMessagesSince(0)
+					}
+					return m, nil
+				}
+				m.sessionFocus = false
+				m.input.Focus()
+				return m, nil
+			case "esc":
+				m.sessionFocus = false
+				m.input.Focus()
+				return m, nil
+			default:
+				if key.Matches(msg, m.keyMap.GrabSession) {
+					// ctrl+g again toggles off
+					m.sessionFocus = false
+					m.input.Focus()
+					return m, nil
+				}
+				// Any other key consumed, not sent to input
+				return m, nil
+			}
+		}
 		// Suggestion navigation intercepts before global keys
 		if m.suggestionsVisible && len(m.suggestions) > 0 {
 			switch msg.String() {
@@ -755,6 +844,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.spinner = false
+			m.deltaPending = false
 			// Keep input enabled (textarea stays focused); just stop spinner and toast.
 			return m, m.cmdHalt()
 		case key.Matches(msg, m.keyMap.ToggleSidebar):
@@ -768,9 +858,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.GrabSession):
-			if ok, cmd := m.cycleSession(); ok {
-				return m, cmd
+			// TUI-5: ctrl+g toggles session focus mode instead of immediate cycle.
+			// In focus mode: sidebar highlighted, footer hint, up/down to navigate, enter to switch.
+			if len(m.sessions) == 0 {
+				m.toast = "no sessions"
+				return m, nil
 			}
+			m.sessionFocus = true
+			// Initialize selection to current session index
+			idx := 0
+			for i, s := range m.sessions {
+				if s.ID == m.sessionID {
+					idx = i
+					break
+				}
+			}
+			m.sessionFocusIdx = idx
+			m.input.Blur()
 			return m, nil
 		case msg.String() == "esc":
 			if m.suggestionsVisible {
@@ -781,6 +885,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		default:
+			// Scroll keys forwarded to viewport when help closed and not in focus mode
+			// (pgup/pgdn/home/end). Viewport handles PageUp/PageDown; home/end via GotoTop/Bottom.
+			switch msg.String() {
+			case "pgup", "pgdown":
+				m.viewport, _ = m.viewport.Update(msg)
+				return m, nil
+			case "home":
+				m.viewport.GotoTop()
+				return m, nil
+			case "end":
+				m.viewport.GotoBottom()
+				return m, nil
+			}
 			// enter = send (slash commands parsed first). Any other key —
 			// including shift+enter, bound in the textarea to InsertNewline —
 			// falls through to the textarea delegate below.
@@ -819,7 +936,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Normal turn: optimistic local echo, clear input, spinner, execute.
 				// The daemon-confirmed copy replaces this echo in executeTurnMsg.
 				m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true})
-				m.rebuildTranscript()
+				m.rebuildTranscriptForceBottom()
 				m.input.Reset()
 				m.suggestionsVisible = false
 				m.spinner = true
@@ -1039,10 +1156,14 @@ func (m *Model) handleToolCallEvent(payload daemon.ToolCallEventPayload) tea.Cmd
 }
 
 func (m *Model) toggleSidebar() {
-	// Semantics: hybrid and minimal render the sidebar as a floating overlay,
-	// session renders it as a permanent column; in all three ctrl+o toggles
-	// its visibility.
+	// Per-layout toggle semantics (documented):
+	// - hybrid: toggles overlay visibility
+	// - session: toggles column visibility
+	// - minimal: toggles internal flag but View() is authoritative and ALWAYS renders Minimal (no overlay),
+	//   so the toggle has no visual effect in minimal. This guarantees the three layouts remain visually distinct
+	//   even when showSidebar was toggled in minimal before cycling.
 	m.showSidebar = !m.showSidebar
+	m.config.Sidebar = m.showSidebar
 	// Recompute effective width so transcript never overflows terminal in session column mode.
 	m.viewport.SetWidth(m.effectiveTranscriptWidth())
 	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
@@ -1059,6 +1180,19 @@ func (m *Model) cycleLayout() {
 	}
 	m.layout = layoutOrder[(idx+1)%len(layoutOrder)]
 	m.config.Layout = m.layout
+	// Normalize showSidebar per layout for distinct visuals (fixes LAYOUT COLLAPSE):
+	// hybrid → sidebar on (overlay), session → sidebar on (column), minimal → sidebar OFF (no overlay).
+	// View() is also authoritative: Minimal always renders Minimal regardless of flag.
+	// This ensures ctrl+l always lands on a visually different state.
+	switch m.layout {
+	case LayoutHybrid:
+		m.showSidebar = true
+	case LayoutSession:
+		m.showSidebar = true
+	case LayoutMinimal:
+		m.showSidebar = false
+	}
+	m.config.Sidebar = m.showSidebar
 	// Update viewport/input width for session column layout observability.
 	m.viewport.SetWidth(m.effectiveTranscriptWidth())
 	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
@@ -1257,28 +1391,23 @@ func (m *Model) replaceLocalEchoInPlace(confirmed components.Entry) bool {
 // Deltas are best-effort previews and carry no Seq; they are purely additive
 // and must not affect lastSeq. The TUI behaves identically to TUI-2 when no
 // deltas arrive (passive: no config coupling).
+// TUI-5 coalescing: each delta mutates the streaming entry immediately but
+// viewport rebuild is throttled to ~14fps (70ms) via deltaRebuildMsg. A burst
+// of N deltas in <1s thus costs a handful of rebuilds, not N. Correctness
+// invariants (swap on message.event, failure semantics) remain untouched.
 func (m *Model) handleMessageDelta(payload daemon.MessageDeltaPayload) tea.Cmd {
 	// Session filter like other events.
 	if m.sessionID != "" && payload.SessionID != "" && payload.SessionID != m.sessionID {
 		return nil
 	}
-	// Cross-session or stray before session creation — ignore if we have a
-	// session filter mismatch already handled; also ignore empty deltas.
 	if payload.Delta == "" {
 		return nil
 	}
-	// Late/stray: if no active turn context and no streaming entry, ignore.
-	// Active turn is spinner true (turn in-flight) or an existing streaming
-	// entry that is still marked streaming. This prevents stray deltas after
-	// swap/failure from creating phantom entries.
 	if idx := m.findStreamingIndex(); idx == -1 {
-		// No streaming entry — only create one if a turn is currently in-flight.
 		if !m.spinner {
 			return nil
 		}
-		// No streaming yet but turn is active: create new preview entry.
 		if m.sessionID == "" {
-			// Before session creation (should not happen via filter, but defensive).
 			return nil
 		}
 		m.entries = append(m.entries, components.Entry{
@@ -1286,24 +1415,73 @@ func (m *Model) handleMessageDelta(payload daemon.MessageDeltaPayload) tea.Cmd {
 			Content:   payload.Delta,
 			Streaming: true,
 		})
-		m.rebuildTranscript()
-		return nil
+		return m.scheduleDeltaRebuild()
 	}
-	// Append to existing streaming entry (search, don't assume last).
 	idx := m.findStreamingIndex()
 	if idx == -1 {
 		return nil
 	}
 	m.entries[idx].Content += payload.Delta
-	m.rebuildTranscript()
-	return nil
+	return m.scheduleDeltaRebuild()
+}
+
+func (m *Model) scheduleDeltaRebuild() tea.Cmd {
+	if m.deltaPending {
+		return nil
+	}
+	m.deltaPending = true
+	return tea.Tick(70*time.Millisecond, func(t time.Time) tea.Msg {
+		return deltaRebuildMsg{}
+	})
 }
 
 func (m *Model) rebuildTranscript() {
+	m.rebuildTranscriptInternal(false)
+}
+
+func (m *Model) rebuildTranscriptForceBottom() {
+	m.rebuildTranscriptInternal(true)
+}
+
+func (m *Model) rebuildTranscriptInternal(forceBottom bool) {
+	wasAtBottom := m.viewport.AtBottom()
 	w := m.effectiveTranscriptWidth()
 	content := components.BuildContent(m.entries, toCompPalette(m.palette), w)
+	// Spinner v2: also shown beside pending user message while turn in flight.
+	// Implementation choice: render spinner frame as a pending line UNDER the last user entry,
+	// rather than inline beside wrapped text. This avoids wrapping distortion and keeps the
+	// streaming preview entry as the sole mutable assistant content. The pending line uses
+	// the same Line spinner frame shown in the footer, at 500ms/frame (2 FPS), distinct
+	// from OpenCode's braille dots. Documented: Line spinner ( | / - \ ) vs MiniDot.
+	if m.spinner && m.findStreamingIndex() == -1 {
+		hasPendingUser := false
+		for _, e := range m.entries {
+			if e.Role == "user" {
+				hasPendingUser = true
+			}
+		}
+		if hasPendingUser && len(m.entries) > 0 && m.entries[len(m.entries)-1].Role == "user" {
+			frame := m.spinnerModel.View()
+			if frame == "" {
+				frame = "⠋"
+			}
+			spinnerLine := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
+			content = content + "\n" + spinnerLine
+		} else if hasPendingUser {
+			// Fallback: if last entry not user (e.g. tool interleaved), still show pending line
+			frame := m.spinnerModel.View()
+			if frame == "" {
+				frame = "⠋"
+			}
+			spinnerLine := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
+			content = content + "\n" + spinnerLine
+		}
+	}
 	m.viewport.SetContent(content)
-	m.viewport.GotoBottom()
+	m.rebuildCount++
+	if forceBottom || wasAtBottom {
+		m.viewport.GotoBottom()
+	}
 }
 
 // ---- TUI-4 helpers ----
@@ -1417,6 +1595,27 @@ func (m *Model) openHelp() {
 		help := b.Help()
 		sb.WriteString(dimStyle.Render("  "+help.Key) + textStyle.Render("  "+help.Desc) + "\n")
 	}
+	// Document session focus mode and scroll
+	sb.WriteString(textStyle.Render("Session Focus:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+g        toggle session focus mode (sidebar highlighted)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ↑/↓ (focus)   navigate sessions"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  enter (focus) switch to selected session (lastSeq=0, echo cleared)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  esc/ctrl+g    exit focus mode (other keys consumed)"))
+	sb.WriteString("\n")
+	sb.WriteString(textStyle.Render("Scrolling:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  pgup/pgdown   scroll transcript"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  home/end      top/bottom"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  mouse wheel   scroll (when terminal mouse reported)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  more below    footer shows ↓ more below when not at bottom (stick-to-bottom)"))
+	sb.WriteString("\n")
 	// Full help group
 	for _, group := range m.keyMap.FullHelp() {
 		for _, b := range group {
@@ -1439,7 +1638,7 @@ func (m *Model) cmdSpinnerTick() tea.Cmd {
 	// Use the spinner's FPS for deterministic interval.
 	fps := m.spinnerModel.Spinner.FPS
 	if fps == 0 {
-		fps = time.Second / 12
+		fps = time.Second / 2
 	}
 	return tea.Tick(fps, func(t time.Time) tea.Msg {
 		return spinner.TickMsg{Time: t, ID: id}
@@ -1465,19 +1664,26 @@ func (m *Model) cycleSession() (bool, tea.Cmd) {
 	m.sessionID = next.ID
 	// Reset lastSeq to 0 then apply via GetMessagesSince(0) — respect semantics: reset lastSeq to 0 then apply, local echo cleared.
 	m.lastSeq = 0
-	// Clear local echo entries
-	var kept []components.Entry
-	for _, e := range m.entries {
-		if !e.Local {
-			kept = append(kept, e)
-		}
-	}
 	// For minimal viable: clear all entries and reload transcript via GetMessagesSince(0)
 	// Spec says entries replaced, lastSeq reset, echo cleared — so clear entries wholesale.
 	m.entries = nil
-	m.rebuildTranscript()
+	m.rebuildTranscriptForceBottom()
 	m.toast = fmt.Sprintf("session → %s", next.ID[:8])
 	// Also clear suggestions
+	m.suggestionsVisible = false
+	return true, m.cmdGetMessagesSince(0)
+}
+
+func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
+	if len(m.sessions) == 0 || idx < 0 || idx >= len(m.sessions) {
+		return false, nil
+	}
+	sel := m.sessions[idx]
+	m.sessionID = sel.ID
+	m.lastSeq = 0
+	m.entries = nil
+	m.rebuildTranscriptForceBottom()
+	m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 	m.suggestionsVisible = false
 	return true, m.cmdGetMessagesSince(0)
 }
@@ -1494,33 +1700,58 @@ func (m Model) View() tea.View {
 			inputView = suggView + "\n" + inputView
 		}
 	}
+	// Session focus hint in input area
+	if m.sessionFocus {
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · esc/ctrl+g back")
+		inputView = focusHint + "\n" + inputView
+	}
 
 	compPal := toCompPalette(m.palette)
 
+	// Footer: show "more below" hint when viewport not at bottom (stick-to-bottom)
+	showMoreBelow := false
+	if len(m.entries) > 0 && !m.viewport.AtBottom() {
+		showMoreBelow = true
+	}
+	footerHint := ""
+	if m.sessionFocus {
+		footerHint = "session focus"
+	}
+	toastWithHint := m.toast
+	if showMoreBelow && m.toast == "" {
+		// Footer hint via MoreBelow field is handled in FooterModel; keep toast clean
+	}
+
 	footer := components.FooterModel{
-		Palette:     compPal,
-		Width:       m.width,
-		Cwd:         m.cwd,
-		SessionID:   m.sessionID,
-		DaemonAddr:  m.daemonAddr,
-		Version:     m.daemonVers,
-		Toast:       m.toast,
-		DaemonErr:   m.daemonErr,
-		ShowSpinner: m.spinner,
-		SpinnerView: m.spinnerModel.View(),
-		Layout:      m.layout,
-		ModelName:   m.currentModel,
-		Tokens:      m.totalTokens,
+		Palette:      compPal,
+		Width:        m.width,
+		Cwd:          m.cwd,
+		SessionID:    m.sessionID,
+		DaemonAddr:   m.daemonAddr,
+		Version:      m.daemonVers,
+		Toast:        toastWithHint,
+		DaemonErr:    m.daemonErr,
+		ShowSpinner:  m.spinner,
+		SpinnerView:  m.spinnerModel.View(),
+		Layout:       m.layout,
+		ModelName:    m.currentModel,
+		Tokens:       m.totalTokens,
+		ShowMoreBelow: showMoreBelow,
+		FocusHint:    footerHint,
 	}.Render()
 
+	// Sidebar: highlight when in session focus mode
+	sidebarData := components.SidebarData{
+		SessionID: m.sessionID,
+		Sessions:  m.sessions,
+		Palette:   compPal,
+		MarkedIDs: m.markedIDs,
+		ModelName: m.currentModel,
+		Focused:   m.sessionFocus,
+		FocusIdx:  m.sessionFocusIdx,
+	}
 	sidebar := components.SidebarModel{
-		Data: components.SidebarData{
-			SessionID: m.sessionID,
-			Sessions:  m.sessions,
-			Palette:   compPal,
-			MarkedIDs: m.markedIDs,
-			ModelName: m.currentModel,
-		},
+		Data:   sidebarData,
 		Width:  28,
 		Height: m.height - 2, // approx
 	}
@@ -1534,11 +1765,9 @@ func (m Model) View() tea.View {
 			content = layouts.Minimal(transcriptView, inputView, footer)
 		}
 	case LayoutMinimal:
+		// Authoritative: Minimal always renders Minimal, never Hybrid, even if showSidebar true.
+		// This ensures three layouts are visually distinct at all times.
 		content = layouts.Minimal(transcriptView, inputView, footer)
-		if m.showSidebar {
-			// overlay
-			content = layouts.Hybrid(transcriptView, inputView, footer, sidebar, true)
-		}
 	default: // hybrid
 		content = layouts.Hybrid(transcriptView, inputView, footer, sidebar, m.showSidebar)
 	}
@@ -1562,6 +1791,7 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(bg)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

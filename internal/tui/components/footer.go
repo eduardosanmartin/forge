@@ -11,20 +11,23 @@ import (
 // Layout is always shown (hybrid/session/minimal) for TUI-4 observability.
 // ModelName is the current model (from ExecuteTurnResult.Model or config default).
 // When ShowSpinner is true, SpinnerView holds the animated frame (bubbles spinner); falls back to "⠋".
+// ShowMoreBelow indicates viewport is not at bottom (stick-to-bottom hint).
 type FooterModel struct {
-	Palette     Palette
-	Width       int
-	Cwd         string
-	SessionID   string
-	DaemonAddr  string
-	Version     string
-	Toast       string
-	DaemonErr   string
-	ShowSpinner bool
-	SpinnerView string
-	Layout      string
-	ModelName   string
-	Tokens      int // cumulative session tokens; 0 hides the field
+	Palette       Palette
+	Width         int
+	Cwd           string
+	SessionID     string
+	DaemonAddr    string
+	Version       string
+	Toast         string
+	DaemonErr     string
+	ShowSpinner   bool
+	SpinnerView   string
+	Layout        string
+	ModelName     string
+	Tokens        int // cumulative session tokens; 0 hides the field
+	ShowMoreBelow bool
+	FocusHint     string
 }
 
 // NewFooter creates a footer model.
@@ -93,6 +96,14 @@ func (m FooterModel) Render() string {
 		}
 		spinner = styleAccent.Render(" "+frame+" working…") + " "
 	}
+	moreBelow := ""
+	if m.ShowMoreBelow {
+		moreBelow = styleAccent.Render(" ↓ more below") + " "
+	}
+	focusHint := ""
+	if m.FocusHint != "" {
+		focusHint = styleAccent.Render(" ["+m.FocusHint+"]") + " "
+	}
 
 	// Simple two-column layout within width
 	// Use lipgloss to join.
@@ -100,9 +111,9 @@ func (m FooterModel) Render() string {
 	content := left
 	if right != "" {
 		// Pad between left and right
-		content = left + spinner + styleBorder.Render(sep) + right
-	} else if spinner != "" {
-		content += spinner
+		content = left + spinner + moreBelow + focusHint + styleBorder.Render(sep) + right
+	} else if spinner != "" || moreBelow != "" || focusHint != "" {
+		content += spinner + moreBelow + focusHint
 	}
 	// Ensure footer fits width; truncate left if needed.
 	_ = fmt.Sprintf // avoid unused
