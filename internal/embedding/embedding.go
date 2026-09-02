@@ -53,7 +53,8 @@ func (s *Store) Close() error {
 // Tokenization: lowercased, split on non-alphanumeric runes, empty tokens skipped.
 // Each token hashes to a bucket (h % dim) with signed hashing (+1/-1 from a bit
 // of h) to zero-mean collision noise; the vector is then L2-normalized.
-func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
+// Package-level single source of truth; Store.GenerateEmbedding delegates here.
+func GenerateEmbedding(text string) ([]float32, error) {
 	const dim = 384
 	emb := make([]float32, dim)
 
@@ -103,6 +104,12 @@ func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
 	}
 
 	return emb, nil
+}
+
+// GenerateEmbedding generates a deterministic token-based bag-of-words embedding
+// via the package-level GenerateEmbedding. Kept on Store for API compatibility.
+func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
+	return GenerateEmbedding(text)
 }
 
 // Store saves text and its embedding, returns the row ID.
@@ -173,7 +180,10 @@ func (s *Store) Search(queryText string, k int) ([]SearchResult, error) {
 	return results, nil
 }
 
-func cosineSimilarity(a, b []float32) float32 {
+// CosineSimilarity computes cosine similarity between two vectors.
+// It is the exported single source of truth for BoW cosine (hashing trick, 384-dim).
+// Returns 0 for mismatched lengths or zero vectors, otherwise dot/(|a|*|b|).
+func CosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return 0
 	}
@@ -187,6 +197,10 @@ func cosineSimilarity(a, b []float32) float32 {
 		return 0
 	}
 	return dot / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
+}
+
+func cosineSimilarity(a, b []float32) float32 {
+	return CosineSimilarity(a, b)
 }
 
 func hashString(s string) uint32 {

@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/eduardosanmartin/forge/internal/embedding"
 )
 
 // Step is a single tool invocation within a turn.
@@ -90,7 +92,7 @@ func Mine(trajs []Trajectory, opts Options) []Proposal {
 	var items []trajEmb
 	for _, t := range trajs {
 		summary := trajectorySummaryText(t)
-		emb := generateEmbedding(summary)
+		emb, _ := embedding.GenerateEmbedding(summary)
 		items = append(items, trajEmb{traj: t, emb: emb, text: summary})
 	}
 
@@ -100,7 +102,7 @@ func Mine(trajs []Trajectory, opts Options) []Proposal {
 		bestIdx := -1
 		bestScore := float32(-1)
 		for idx, c := range clusters {
-			score := cosineSimilarity(it.emb, c.centroid)
+			score := embedding.CosineSimilarity(it.emb, c.centroid)
 			if score >= opts.Threshold && score > bestScore {
 				bestScore = score
 				bestIdx = idx
@@ -406,60 +408,4 @@ func isStopword(tok string) bool {
 	default:
 		return false
 	}
-}
-
-// --- embedding helpers (mirror internal/embedding) ---
-
-func generateEmbedding(text string) []float32 {
-	emb := make([]float32, dim)
-	lower := strings.ToLower(text)
-	tokens := tokenize(lower)
-	for _, tok := range tokens {
-		if tok == "" {
-			continue
-		}
-		h := hashString(tok)
-		bucket := int(h % uint32(dim))
-		sign := float32(1)
-		if (h & 1) == 0 {
-			sign = -1
-		}
-		emb[bucket] += sign
-	}
-	var norm float32
-	for _, v := range emb {
-		norm += v * v
-	}
-	if norm > 0 {
-		norm = float32(math.Sqrt(float64(norm)))
-		for i := range emb {
-			emb[i] /= norm
-		}
-	}
-	return emb
-}
-
-func hashString(s string) uint32 {
-	h := uint32(2166136261)
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
-}
-
-func cosineSimilarity(a, b []float32) float32 {
-	if len(a) != len(b) {
-		return 0
-	}
-	var dot, normA, normB float32
-	for i := range a {
-		dot += a[i] * b[i]
-		normA += a[i]*a[i]
-		normB += b[i]*b[i]
-	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
 }

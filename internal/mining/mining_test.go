@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/eduardosanmartin/forge/internal/embedding"
 )
 
 func trajWithPrompts(sessionID string, prompts []string, toolSeq [][]string) Trajectory {
@@ -220,17 +222,56 @@ func TestSanitizeSlug(t *testing.T) {
 func TestCosineSimilarity(t *testing.T) {
 	a := []float32{1, 0, 0}
 	b := []float32{1, 0, 0}
-	if got := cosineSimilarity(a, b); got != 1 {
+	if got := embedding.CosineSimilarity(a, b); got != 1 {
 		t.Fatalf("identical vectors should be 1, got %v", got)
 	}
 	c := []float32{0, 1, 0}
-	if got := cosineSimilarity(a, c); got != 0 {
+	if got := embedding.CosineSimilarity(a, c); got != 0 {
 		t.Fatalf("orthogonal should be 0, got %v", got)
 	}
-	if got := cosineSimilarity([]float32{}, []float32{1}); got != 0 {
+	if got := embedding.CosineSimilarity([]float32{}, []float32{1}); got != 0 {
 		t.Fatalf("mismatched len should be 0, got %v", got)
 	}
-	if got := cosineSimilarity([]float32{0, 0}, []float32{0, 0}); got != 0 {
+	if got := embedding.CosineSimilarity([]float32{0, 0}, []float32{0, 0}); got != 0 {
 		t.Fatalf("zero vectors should be 0, got %v", got)
+	}
+}
+
+func TestEmbeddingEquivalenceMiningDelegatesToEmbedding(t *testing.T) {
+	// Cross-package equivalence: mining must produce bit-for-bit identical vectors
+	// and similarities as embedding.GenerateEmbedding / CosineSimilarity.
+	inputs := []string{
+		"hello world",
+		"fix authentication bug in login flow",
+		"",
+		"!!!",
+		"función para sumar dos números",
+		"Hello, WORLD!!! 123",
+		"a b c d e f g",
+	}
+	for _, txt := range inputs {
+		emb, err := embedding.GenerateEmbedding(txt)
+		if err != nil {
+			t.Fatalf("GenerateEmbedding(%q) error: %v", txt, err)
+		}
+		if len(emb) != 384 {
+			t.Fatalf("expected dim 384, got %d for %q", len(emb), txt)
+		}
+		emb2, _ := embedding.GenerateEmbedding(txt)
+		for i := range emb {
+			if emb[i] != emb2[i] {
+				t.Fatalf("non-deterministic embedding for %q at %d: %v vs %v", txt, i, emb[i], emb2[i])
+			}
+		}
+	}
+	// Deterministic similarity check: identical texts -> 1.0, unrelated -> <0.2
+	sameA, _ := embedding.GenerateEmbedding("Provides guidance for code reviews and pull request style checks")
+	sameB, _ := embedding.GenerateEmbedding("Provides guidance for code reviews and pull request style checks")
+	if got := embedding.CosineSimilarity(sameA, sameB); got < 0.99 {
+		t.Fatalf("identical texts cosine should be ~1.0, got %f", got)
+	}
+	unrelated, _ := embedding.GenerateEmbedding("weather forecast gardening cooking recipes")
+	if got := embedding.CosineSimilarity(sameA, unrelated); got > 0.2 {
+		t.Fatalf("unrelated texts cosine should be <0.2, got %f", got)
 	}
 }
