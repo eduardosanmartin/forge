@@ -1,7 +1,7 @@
 # SPEC â€” Harness de Desarrollo Agentic a Medida
 
 **Nombre de proyecto (working title):** `forge` *(placeholder â€” renombrar libremente)*
-**Versión del documento:** 0.9
+**Versión del documento:** 0.10
 **Estado:** Borrador para validaciÃ³n de arquitectura
 **Alcance:** DefiniciÃ³n funcional, no funcional y arquitectÃ³nica de un harness de desarrollo con agentes IA, inspirado en OpenCode y Claude Code, optimizado para modelos locales, eficiencia de contexto/tokens, y extensibilidad total.
 
@@ -41,6 +41,7 @@ Este proyecto no busca ser "mejor en todos los ejes" que herramientas con equipo
 - RF-2.3 Debe permitir cambiar de proveedor/modelo sin reiniciar sesiÃ³n, incluso a mitad de una tarea.
 - RF-2.4 Debe soportar ruteo por costo/complejidad de la tarea â€” **esto no es solo "local vs. remoto"**: incluye usar un modelo local pequeÃ±o y rÃ¡pido (orientativamente 1-3B parÃ¡metros cuantizados en el Perfil A, Â§5) para pasos baratos (clasificaciÃ³n de intenciÃ³n, generaciÃ³n de queries de retrieval, resÃºmenes de compactaciÃ³n) y reservar un modelo mÃ¡s capaz (7-8B en Perfil A; mayor en Perfil B o remoto) para la generaciÃ³n real. Gastar cÃ³mputo de un modelo grande en un paso que uno chico resuelve igual de bien es directamente contrario al objetivo de velocidad mÃ¡xima en hardware estÃ¡ndar.
 - RF-2.5 El ruteo debe ser configurable por tipo de paso del ciclo de un turno (Â§3.2) â€” no solo por "tarea" en general â€” de forma que cada paso (clasificaciÃ³n, retrieval, generaciÃ³n, validaciÃ³n) pueda apuntar a un modelo distinto.
+- RF-2.6 **Streaming de tokens (opcional, opt-in)**: los adaptadores deben implementar `ChatStream` (SSE) ademÃ¡s de `Chat`, gobernado por el flag de configuraciÃ³n `llm.streaming` (default OFF). SemÃ¡ntica de falla vinculante: una falla a mitad de stream **FALLA el turno** â€” no hay fallback silencioso a no-streaming (un fallback oculto implicarÃ­a costo doble invisible, una respuesta distinta que reemplaza a la ya mostrada en vivo, y enmascaramiento de problemas del proveedor). Ãšnica excepciÃ³n: el sentinel `ErrStreamingNotSupported` (capacidad ausente, detectada antes de emitir tokens) degrada automÃ¡ticamente a `Chat`. Los deltas de texto se publican a los clientes como notificaciÃ³n `message.delta.event` (payload aditivo; no altera los shapes de `message.event`); la entrega es best-effort (broadcast no bloqueante, descarta con warn ante backpressure). El valor del flag se lee al iniciar el daemon â€” sin hot-reload: un turno en vuelo no cambia de comportamiento a mitad de camino.
 
 ### RF-3. GestiÃ³n de contexto y memoria
 - RF-3.1 Debe mantener memoria persistente entre sesiones (decisiones de arquitectura, convenciones del proyecto, hechos "anclados").
@@ -846,6 +847,7 @@ hitl:
 
 ## Registro de revisiones
 
+- **0.10** — Semántica de streaming formalizada (implementación WU3, 2026-09-02): se añade RF-2.6 — streaming SSE opcional para adaptadores (Anthropic/Gemini) gobernado por `llm.streaming` (default OFF). Semántica de falla: una falla a mitad de stream falla el turno, sin fallback silencioso; el sentinel `ErrStreamingNotSupported` degrada automático a `Chat`. Deltas publicados vía `message.delta.event` (best-effort, broadcast no bloqueante). Flag leído al inicio del daemon, sin hot-reload.
 - **0.9** — Gobernanza (decisión del owner, 2026-08-31): el bootstrapping (§0) deja de ser principio rector y criterio de salida; pasa a requerimiento deseable diferido — a abordar cuando el core esté más depurado, posiblemente al final (v1.0 o posterior). El principio rector pasa a ser la eficiencia de contexto y tokens (RNF-2.x). La validación de rendimiento con modelos locales queda diferida hasta tener la arquitectura afinada; el banco de RNF-10 opera model-free (determinístico). Reparación estructural: se restaura el encabezado de MVP v3 (había quedado fusionado con la sección v2).
 - **0.8** â€” Se hace explÃ­cito el principio rector de bootstrapping (Â§0) y se incorpora como criterio de salida verificable en cada versiÃ³n de la hoja de ruta (Â§6): desde v1, cada MVP se desarrolla usando el anterior. Incluye el riesgo de velocidad asociado en Â§5, con vÃ¡lvula de escape por capacidad de modelo (frontera temporal vÃ­a RF-2.1/2.3) sin suspender el bootstrapping de herramienta.
 - **0.7** â€” Borrador inicial para validaciÃ³n de arquitectura.
