@@ -23,3 +23,6 @@ func (p Palette) DimStyle() lipgloss.Style    { return lipgloss.NewStyle().Foreg
 func (p Palette) FaintStyle() lipgloss.Style  { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Faint)) }
 func (p Palette) AccentStyle() lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent)) }
 func (p Palette) ErrorStyle() lipgloss.Style  { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Error)) }
+func (p Palette) SuccessStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Success))
+}

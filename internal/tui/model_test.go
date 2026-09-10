@@ -59,26 +59,27 @@ func TestLayoutCycleOrderAndPersistence(t *testing.T) {
 	fs := &fakeSave{}
 	m.SetSaveFn(fs.fn)
 
-	// hybrid -> session -> minimal -> hybrid
-	order := []string{LayoutSession, LayoutMinimal, LayoutHybrid}
-	for _, want := range order {
-		next := m
-		// send ctrl+l
-		var cmd tea.Cmd
-		model, cmd := next.Update(keyPress("ctrl+l"))
-		_ = cmd
-		mm := model.(Model)
-		if mm.Layout() != want {
-			t.Fatalf("cycle: got %q want %q", mm.Layout(), want)
-		}
-		if len(fs.calls) == 0 {
-			t.Fatal("persistence hook not called on layout cycle")
-		}
-		last := fs.calls[len(fs.calls)-1]
-		if last.Layout != want {
-			t.Fatalf("persisted layout %q want %q", last.Layout, want)
-		}
-		m = mm
+	// M2: ctrl+l is alias of ctrl+o (rail toggle), not 3-layout cycle. Verify toggle and persistence.
+	initial := m.ShowSidebar()
+	model, _ := m.Update(keyPress("ctrl+l"))
+	mm := model.(Model)
+	if mm.ShowSidebar() == initial {
+		t.Fatalf("ctrl+l should toggle rail, initial %v after %v", initial, mm.ShowSidebar())
+	}
+	if len(fs.calls) == 0 {
+		t.Fatal("persistence hook not called on rail toggle via ctrl+l")
+	}
+	// Second toggle via ctrl+l returns
+	model, _ = mm.Update(keyPress("ctrl+l"))
+	mm2 := model.(Model)
+	if mm2.ShowSidebar() != initial {
+		t.Fatalf("second ctrl+l should toggle back, got %v want %v", mm2.ShowSidebar(), initial)
+	}
+	// ctrl+o also toggles (alias behavior)
+	model, _ = mm2.Update(keyPress("ctrl+o"))
+	mm3 := model.(Model)
+	if mm3.ShowSidebar() == initial {
+		t.Fatalf("ctrl+o should toggle rail")
 	}
 }
 
@@ -136,13 +137,13 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 		wantHelp   bool
 		shouldPersist bool
 	}{
-		{"valid layout", "/layout minimal", LayoutMinimal, "", "layout", false, true},
-		{"invalid layout", "/layout bad", "", "", "unknown layout", false, false},
+		{"layout toggles rail", "/layout minimal", "", "", "rail", false, true},
+		{"layout args ignored", "/layout bad", "", "", "rail", false, false},
 		{"valid palette", "/palette ember", "", "ember", "palette", false, true},
 		{"invalid palette", "/palette unknown", "", "", "unknown palette", false, false},
 		{"help", "/help", "", "", "", true, false},
 		{"unknown", "/unknown", "", "", "unknown command", false, false},
-		{"missing arg layout", "/layout", "", "", "usage:", false, false},
+		{"bare layout toggles rail", "/layout", "", "", "rail", false, false},
 	}
 
 	for _, tc := range cases {
@@ -186,13 +187,17 @@ func TestKeyHandlingPrecedenceGlobalBeforeTextarea(t *testing.T) {
 	if mm.ShowSidebar() {
 		t.Fatal("ctrl+o should toggle sidebar even when textarea focused")
 	}
-	// ctrl+l should cycle layout, not insert
+	// ctrl+l should toggle rail (alias of ctrl+o), not insert
 	m = newTestModel()
+	initial := m.ShowSidebar()
 	m.input.SetValue("test")
 	model, _ = m.Update(keyPress("ctrl+l"))
 	mm = model.(Model)
-	if mm.Layout() != LayoutSession {
-		t.Fatalf("ctrl+l should cycle layout even with textarea focus, got %q", mm.Layout())
+	if mm.ShowSidebar() == initial {
+		t.Fatalf("ctrl+l should toggle rail even with textarea focus, initial %v after %v", initial, mm.ShowSidebar())
+	}
+	if mm.input.Value() != "test" {
+		t.Fatalf("ctrl+l should not modify textarea")
 	}
 }
 
@@ -294,8 +299,10 @@ func TestDaemonErrorInFooter(t *testing.T) {
 	m.daemonErr = "daemon unreachable: dial failed"
 	m.SetSize(80, 24)
 	view := m.View().Content
+	// Search the whole frame: the boxed title bar occupies the first rows,
+	// so a fixed prefix window would miss the footer.
 	if !strings.Contains(view, "daemon unreachable") {
-		t.Fatalf("footer should show daemon error, view %q", view[:500])
+		t.Fatalf("footer should show daemon error, view %q", view)
 	}
 }
 

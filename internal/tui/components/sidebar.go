@@ -170,6 +170,32 @@ func (m SidebarModel) RenderColumn() string {
 	return style.Render(m.renderContent())
 }
 
+// RenderColumnCapped renders as a permanent column hard-capped to EXACTLY
+// Height rows (2 border + 2 padding + content). lipgloss Height is only a
+// minimum, so overlong card content would overflow the box and clip the
+// footer — here overlong content is truncated and short content is padded,
+// keeping the rail exactly railHeight rows as the TUI frame accounts.
+func (m SidebarModel) RenderColumnCapped() string {
+	inner := m.Height - 4 // 2 border rows + 2 padding rows
+	if inner < 1 {
+		inner = 1
+	}
+	lines := strings.Split(m.renderContent(), "\n")
+	if len(lines) > inner {
+		lines = lines[:inner]
+	}
+	for len(lines) < inner {
+		lines = append(lines, "")
+	}
+	style := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color(m.Data.Palette.Border)).
+		Background(lipgloss.Color(m.Data.Palette.BGElevated)).
+		Width(m.Width).
+		Padding(1, 1)
+	return style.Render(strings.Join(lines, "\n"))
+}
+
 // RenderOverlay renders as a floating overlay panel (hybrid/minimal layouts).
 func (m SidebarModel) RenderOverlay() string {
 	style := lipgloss.NewStyle().

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
 
-// ---------- 1. Layout distinctness ----------
+// ---------- 1. Layout distinctness (M2: single Status Rail) ----------
 
 func TestLayoutDistinctness_ThreeLayoutsDiffer(t *testing.T) {
 	seed := []components.Entry{
@@ -20,10 +21,9 @@ func TestLayoutDistinctness_ThreeLayoutsDiffer(t *testing.T) {
 		{Role: "assistant", Content: "world"},
 	}
 	sessions := []daemon.SessionResult{{ID: "sess-12345678", MessageCount: 2}}
-	makeView := func(layout string, showSidebar bool) string {
+	makeView := func(showRail bool) string {
 		m := newTestModel()
-		m.layout = layout
-		m.showSidebar = showSidebar
+		m.showSidebar = showRail
 		m.entries = seed
 		m.sessions = sessions
 		m.sessionID = "sess-12345678"
@@ -31,31 +31,29 @@ func TestLayoutDistinctness_ThreeLayoutsDiffer(t *testing.T) {
 		m.rebuildTranscript()
 		return m.View().Content
 	}
-	hybrid := makeView(LayoutHybrid, true)
-	session := makeView(LayoutSession, true)
-	minimal := makeView(LayoutMinimal, false)
-	if hybrid == session {
-		t.Fatal("hybrid and session layouts should be distinct")
+	railOn := makeView(true)
+	railOff := makeView(false)
+	if railOn == railOff {
+		t.Fatal("M2: rail on and rail off views should be distinct")
 	}
-	if hybrid == minimal {
-		t.Fatal("hybrid and minimal layouts should be distinct")
+	// Rail on should contain rail content (Context & tokens); rail off should be full-width without rail border
+	if !strings.Contains(railOn, "Context & tokens") {
+		t.Fatal("rail on should contain Context & tokens")
 	}
-	if session == minimal {
-		t.Fatal("session and minimal layouts should be distinct")
-	}
-	// Hybrid with sidebar on must contain overlay marker; minimal/session must not equal hybrid
-	if !strings.Contains(hybrid, "--- overlay ---") {
-		t.Fatal("hybrid with sidebar should contain overlay marker")
-	}
-	if strings.Contains(minimal, "--- overlay ---") {
-		t.Fatal("minimal should never contain overlay marker")
+	// Title bar and separator must be present in both
+	for _, v := range []string{railOn, railOff} {
+		if !strings.Contains(v, "forge") {
+			t.Fatalf("title bar missing forge, view %q", v[:200])
+		}
+		if !strings.Contains(v, "─") {
+			t.Fatalf("separator line missing")
+		}
 	}
 }
 
 func TestLayoutMinimalAuthoritativeNoOverlay(t *testing.T) {
 	seed := []components.Entry{{Role: "user", Content: "hello"}}
 	m1 := newTestModel()
-	m1.layout = LayoutMinimal
 	m1.showSidebar = true
 	m1.entries = seed
 	m1.SetSize(80, 24)
@@ -63,82 +61,71 @@ func TestLayoutMinimalAuthoritativeNoOverlay(t *testing.T) {
 	v1 := m1.View().Content
 
 	m2 := newTestModel()
-	m2.layout = LayoutMinimal
 	m2.showSidebar = false
 	m2.entries = seed
 	m2.SetSize(80, 24)
 	m2.rebuildTranscript()
 	v2 := m2.View().Content
 
-	if v1 != v2 {
-		t.Fatalf("minimal must be authoritative regardless of showSidebar flag: got different views")
+	if v1 == v2 {
+		t.Fatalf("M2: rail on vs off must be visually distinct")
 	}
-	if strings.Contains(v1, "--- overlay ---") {
-		t.Fatal("minimal must never render overlay even when showSidebar=true")
+	// Both have title bar + separator regardless of rail
+	for _, v := range []string{v1, v2} {
+		if !strings.Contains(v, "forge") {
+			t.Fatal("title bar missing")
+		}
 	}
 }
 
 func TestCycleLandsOnDistinctLayoutsWithNormalizedSidebar(t *testing.T) {
 	m := newTestModel()
-	m.layout = LayoutHybrid
 	m.showSidebar = true
 	m.SetSize(80, 24)
 	// Seed entries so views have content
 	m.entries = []components.Entry{{Role: "user", Content: "hello"}}
 	m.rebuildTranscript()
 
+	initialView := m.View().Content
 	seenViews := map[string]bool{}
-	seenViews[m.View().Content] = true
+	seenViews[initialView] = true
 
-	// hybrid -> session (normalized showSidebar true, renders column)
+	// M2: ctrl+l toggles rail (alias of ctrl+o)
 	model, _ := m.Update(keyPress("ctrl+l"))
 	m = model.(Model)
-	if m.Layout() != LayoutSession {
-		t.Fatalf("expected session after first cycle, got %q", m.Layout())
-	}
-	if !m.ShowSidebar() {
-		t.Fatal("session layout should normalize showSidebar to true")
+	if m.ShowSidebar() {
+		t.Fatalf("first ctrl+l should toggle rail off, got showSidebar %v", m.ShowSidebar())
 	}
 	v := m.View().Content
 	if seenViews[v] {
-		t.Fatal("session view should be visually distinct from hybrid")
+		t.Fatal("rail off view should be visually distinct from rail on")
 	}
-	seenViews[v] = true
-	if strings.Contains(v, "--- overlay ---") {
-		t.Fatal("session layout should render column, not overlay")
-	}
-
-	// session -> minimal (normalized showSidebar false)
-	model, _ = m.Update(keyPress("ctrl+l"))
-	m = model.(Model)
-	if m.Layout() != LayoutMinimal {
-		t.Fatalf("expected minimal after second cycle, got %q", m.Layout())
-	}
-	if m.ShowSidebar() {
-		t.Fatal("minimal layout should normalize showSidebar to false")
-	}
-	v = m.View().Content
-	if seenViews[v] {
-		t.Fatal("minimal view should be visually distinct from previous layouts")
-	}
-	seenViews[v] = true
-	if strings.Contains(v, "--- overlay ---") {
-		t.Fatal("minimal should never contain overlay")
+	offView := v
+	if strings.Contains(v, "Context & tokens") {
+		t.Fatal("rail off should not contain rail content")
 	}
 
-	// minimal -> hybrid (normalized showSidebar true)
+	// second ctrl+l -> back on
 	model, _ = m.Update(keyPress("ctrl+l"))
 	m = model.(Model)
-	if m.Layout() != LayoutHybrid {
-		t.Fatalf("expected hybrid after third cycle, got %q", m.Layout())
-	}
 	if !m.ShowSidebar() {
-		t.Fatal("hybrid layout should normalize showSidebar to true")
+		t.Fatal("second ctrl+l should toggle rail back on")
 	}
 	v = m.View().Content
-	// Hybrid after cycle should match initial hybrid view (since normalized)
-	if !strings.Contains(v, "--- overlay ---") {
-		t.Fatal("hybrid after cycle should contain overlay")
+	if !strings.Contains(v, "Context & vs") && !strings.Contains(v, "Context & tokens") {
+		t.Fatal("rail on should contain rail")
+	}
+	// ctrl+o also toggles
+	model, _ = m.Update(keyPress("ctrl+o"))
+	m = model.(Model)
+	if m.ShowSidebar() {
+		t.Fatal("ctrl+o should toggle rail off again")
+	}
+	v = m.View().Content
+	// Rail toggle is deterministic: rail off again must render exactly like
+	// the earlier rail-off frame (same toast, same chrome).
+	if v != offView {
+		t.Fatal("rail off again should equal the earlier rail-off view")
 	}
 }
 
@@ -192,9 +179,9 @@ func TestSpinnerV2_FPSAndDistinctStyle(t *testing.T) {
 	m2.SetSize(80, 24)
 	m2.rebuildTranscript()
 	view := m2.View().Content
-	// Fallback is braille dot if View empty, but with our Line spinner it should contain either Line char or braille fallback
+	// The animated spinner lives in the footer bar while generating.
 	if !strings.Contains(view, "working…") {
-		t.Fatalf("spinner line should show 'working…' beside pending user message, view missing")
+		t.Fatalf("footer spinner should show 'working…' while generating, view missing")
 	}
 	// Ensure style distinct: Line spinner frames are | / - \ not braille
 	// Check that the spinner model's frames contain no braille
@@ -209,8 +196,10 @@ func TestSpinnerBesidePendingUserMessage(t *testing.T) {
 	m.spinner = true
 	m.rebuildTranscript()
 	view := m.View().Content
+	// The footer bar spinner is the visible progress indicator while
+	// generating (the pending message itself carries the Working marker).
 	if !strings.Contains(view, "working…") {
-		t.Fatalf("spinner should be shown beside pending user message while generating, view missing working…")
+		t.Fatalf("footer spinner should show while generating, view missing working…")
 	}
 	// When streaming exists, the pending spinner line should not duplicate (only streaming caret)
 	m2 := newTestModel()
@@ -416,9 +405,18 @@ func TestScroll_StickToBottomPreserveAndForce(t *testing.T) {
 func TestViewMouseModeEnabled(t *testing.T) {
 	m := newTestModel()
 	m.SetSize(80, 24)
+	// Default is capture ON so wheel scrolling and click hotspots work out
+	// of the box; ctrl+m toggles to free text selection.
 	view := m.View()
 	if view.MouseMode != tea.MouseModeCellMotion {
-		t.Fatalf("View MouseMode should be CellMotion for wheel support, got %v", view.MouseMode)
+		t.Fatalf("View MouseMode should be CellMotion by default, got %v", view.MouseMode)
+	}
+	// ctrl+m disables capture for text selection.
+	model, _ := m.Update(keyPress("ctrl+m"))
+	mm := model.(Model)
+	view2 := mm.View()
+	if view2.MouseMode != 0 {
+		t.Fatalf("View MouseMode should be 0 after ctrl+m, got %v", view2.MouseMode)
 	}
 }
 
@@ -705,5 +703,65 @@ func TestDeltaCoalescing_PreservesTUI3SwapAndFailure(t *testing.T) {
 	m2 = model.(Model)
 	if len(m2.Entries()) != 1 || m2.Entries()[0].Streaming || !strings.Contains(m2.Entries()[0].Meta, "stream interrupted") {
 		t.Fatalf("failure semantics after coalesced deltas broken: %+v", m2.Entries())
+	}
+}
+
+// TestSoak_TickRearmBounded executes returned tick commands the way tea does
+// (concurrently) with a 1ms spinner, hunting the retest-5 runaway: if every
+// tick re-arms more than one successor, messages fork exponentially (GBs of
+// RAM + cores burned, the frozen TUI signature). Steady re-arm stays in the
+// low thousands over the deadline.
+func TestSoak_TickRearmBounded(t *testing.T) {
+	m := newTestModel()
+	fast := spinner.Line
+	fast.FPS = time.Millisecond
+	m.spinnerModel = spinner.New(spinner.WithSpinner(fast))
+	m.SetSize(80, 24)
+	m.spinner = true
+	pending := []tea.Cmd{
+		func() tea.Msg { return m.spinnerModel.Tick() },
+	}
+	const capMsgs = 20000
+	total := 0
+	deadline := time.Now().Add(2 * time.Second)
+	for len(pending) > 0 && total < capMsgs && time.Now().Before(deadline) {
+		batch := pending
+		pending = nil
+		var wg sync.WaitGroup
+		out := make(chan tea.Msg, 2*len(batch)+16)
+		for _, c := range batch {
+			if c == nil {
+				continue
+			}
+			wg.Add(1)
+			go func(c tea.Cmd) {
+				defer wg.Done()
+				if msg := c(); msg != nil {
+					out <- msg
+				}
+			}(c)
+		}
+		wg.Wait()
+		close(out)
+		for msg := range out {
+			total++
+			if total >= capMsgs {
+				break
+			}
+			// Unpack BatchMsg the way tea does: sub-commands execute.
+			if bm, ok := msg.(tea.BatchMsg); ok {
+				pending = append(pending, bm...)
+				continue
+			}
+			model, cmd := m.Update(msg)
+			m = model.(Model)
+			if cmd != nil {
+				pending = append(pending, cmd)
+			}
+		}
+	}
+	t.Logf("soak processed %d messages", total)
+	if total >= capMsgs {
+		t.Fatalf("tick re-arm fork: %d messages, successor count multiplies per tick", total)
 	}
 }

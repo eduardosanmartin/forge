@@ -3,8 +3,10 @@ package components
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // FooterModel renders the footer bar.
@@ -12,13 +14,13 @@ import (
 // ModelName is the current model (from ExecuteTurnResult.Model or config default).
 // When ShowSpinner is true, SpinnerView holds the animated frame (bubbles spinner); falls back to "⠋".
 // ShowMoreBelow indicates viewport is not at bottom (stick-to-bottom hint).
+// (Daemon version lives in the title bar; the footer keeps session state.)
 type FooterModel struct {
 	Palette       Palette
 	Width         int
 	Cwd           string
 	SessionID     string
 	DaemonAddr    string
-	Version       string
 	Toast         string
 	DaemonErr     string
 	ShowSpinner   bool
@@ -70,9 +72,6 @@ func (m FooterModel) Render() string {
 	if m.DaemonAddr != "" {
 		rightParts = append(rightParts, styleFaint.Render(m.DaemonAddr))
 	}
-	if m.Version != "" {
-		rightParts = append(rightParts, styleFaint.Render(m.Version))
-	}
 	if m.DaemonErr != "" {
 		rightParts = append(rightParts, styleError.Render(m.DaemonErr))
 	}
@@ -108,6 +107,46 @@ func (m FooterModel) Render() string {
 	// Simple two-column layout within width
 	// Use lipgloss to join.
 	sep := " │ "
+	// Box Width includes the borders, so the content area is 2 narrower.
+	// Keep the footer on a single content row: a wrapped footer would split
+	// fields mid-token ("daemon" / "unreachable") and break the frame
+	// geometry. The cwd yields from the left so right-side fields (model,
+	// tokens, errors) always stay intact: measure the fixed part and give
+	// the cwd exactly the remainder (tail-kept with an ellipsis).
+	// The [copiar] hotspot is always reserved room first: a stable,
+	// always-visible target beats a few more cwd cells.
+	const copyLabel = "[copiar]"
+	copyPart := styleAccent.Render(copyLabel)
+	copyNeed := lipgloss.Width(copyPart) + 1 // preceding space
+	area := m.Width - 2
+	if area < 1 {
+		area = 1
+	}
+	// Reserve the [copiar] button on roomy terminals so the cwd yields for
+	// it instead of the fallback truncator eating right-side fields.
+	reserveCopy := m.Width > 0 && area >= copyNeed+8
+	if m.Width > 0 && right != "" {
+		fixed := spinner + moreBelow + focusHint + styleBorder.Render(sep) + right
+		avail := area - lipgloss.Width(fixed)
+		if reserveCopy {
+			avail -= copyNeed
+		}
+		if avail < 1 {
+			avail = 1
+		}
+		if lipgloss.Width(m.Cwd) > avail {
+			runes := []rune(m.Cwd)
+			n := avail - 1
+			switch {
+			case n >= len(runes):
+				// Fits in runes (wide-char accounting) — keep whole cwd.
+			case n < 1:
+				left = styleDim.Render("…")
+			default:
+				left = styleDim.Render("…" + string(runes[len(runes)-n:]))
+			}
+		}
+	}
 	content := left
 	if right != "" {
 		// Pad between left and right
@@ -115,7 +154,21 @@ func (m FooterModel) Render() string {
 	} else if spinner != "" || moreBelow != "" || focusHint != "" {
 		content += spinner + moreBelow + focusHint
 	}
-	// Ensure footer fits width; truncate left if needed.
+	// Roomy terminals get the right-aligned [copiar] button (stable click
+	// target); absurdly narrow ones keep the plain single-row footer.
+	if reserveCopy {
+		bodyTarget := area - copyNeed
+		if lipgloss.Width(content) > bodyTarget {
+			content = ansi.Truncate(content, bodyTarget, "")
+		}
+		pad := area - lipgloss.Width(content) - copyNeed
+		if pad < 0 {
+			pad = 0
+		}
+		content += strings.Repeat(" ", pad) + " " + copyPart
+	} else if m.Width > 0 && lipgloss.Width(content) > area {
+		content = ansi.Truncate(content, area, "")
+	}
 	_ = fmt.Sprintf // avoid unused
 
 	bar := lipgloss.NewStyle().

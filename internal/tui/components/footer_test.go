@@ -10,7 +10,6 @@ func TestFooterRender(t *testing.T) {
 	m := NewFooter(pal, 80)
 	m.SessionID = "sess-abcdef1234567890"
 	m.DaemonAddr = "127.0.0.1:7777"
-	m.Version = "v0.0.0-dev"
 	content := m.Render()
 	if !strings.Contains(content, "sess-abc") { // short id 8 chars
 		t.Fatalf("footer missing short session id, got %q", content)

@@ -56,10 +56,11 @@ func TestSpinnerTicksDoNotRebuild(t *testing.T) {
 		// ticks didn't increment, so should be base+1
 		t.Fatalf("content change should increase RebuildCount: base %d now %d want %d", base, mm.RebuildCount(), base+1)
 	}
-	// View still shows working pending line without rebuild
+	// View still shows the footer spinner without rebuild (composed at
+	// View time from the spinner model frame).
 	view := mm.View().Content
 	if !strings.Contains(view, "working…") {
-		t.Fatalf("pending spinner line should be composed at View time, missing working…")
+		t.Fatalf("footer spinner should be composed at View time, missing working…")
 	}
 }
 
@@ -93,7 +94,9 @@ func TestSpinnerFrameAnimatesDeterministically(t *testing.T) {
 
 func TestSidebarThreeSectionsFixture(t *testing.T) {
 	m := newTestModel()
-	m.SetSize(80, 24)
+	// Tall terminal so the hard-capped rail fits all three cards: the rail
+	// is capped to the transcript height to protect the footer.
+	m.SetSize(80, 40)
 	m.totalTokens = 9999
 	m.turnCount = 5
 	m.latencyTotalMs = 300
@@ -292,8 +295,8 @@ func TestModelPanel_OpenListFromConfigNavigateSelect(t *testing.T) {
 	}
 	// Check view contains model panel and deferred note
 	view := mm.View().Content
-	if !strings.Contains(view, "model panel") {
-		t.Fatalf("view should contain model panel marker")
+	if !strings.Contains(view, "Select Model") {
+		t.Fatalf("view should contain model panel")
 	}
 	if !strings.Contains(view, "plugin-providers not listed") {
 		t.Fatalf("panel should document plugin-providers deferred")

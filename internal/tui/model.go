@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,21 +14,41 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
+	"github.com/eduardosanmartin/forge/internal/clipboard"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
-	"github.com/eduardosanmartin/forge/internal/tui/layouts"
+	"github.com/eduardosanmartin/forge/internal/version"
 )
 
-// Layout constants.
+// copyText writes text to the OS clipboard. Variable (not direct call) so
+// tests can substitute a fake without touching the real clipboard.
+var copyText = clipboard.Write
+
+// Layout constants — M2: single layout "Status Rail" replaces the 3-layout system.
+// The three values are retained for config compatibility but View is now unified.
+// ctrl+o toggles the rail; ctrl+l is an alias (documented in keys.go).
 const (
 	LayoutHybrid  = "hybrid"
 	LayoutSession = "session"
 	LayoutMinimal = "minimal"
 )
 
-// order for cycling.
+// order for cycling — deprecated in M2, retained for tests compatibility.
 var layoutOrder = []string{LayoutHybrid, LayoutSession, LayoutMinimal}
+
+// M2 rail constants
+const railWidth = 32 // ~250px at ~8px per cell; permanent rail width when visible
+
+// TUI version for title bar — from internal/version.Version; fallback "dev" if empty or "0.0.0-dev".
+func tuiVersion() string {
+	v := version.Version
+	if v == "" || v == "0.0.0-dev" {
+		return "dev"
+	}
+	return v
+}
 
 // Model is the single tea.Model for the TUI.
 type Model struct {
@@ -76,6 +97,17 @@ type Model struct {
 	spinnerModel spinner.Model
 	currentModel string    // from ExecuteTurnResult.Model (when present)
 	turnStart    time.Time // clock time when turn was sent
+	// pendingUserText snapshots the sent text so the turn's final stats
+	// ("34,4s :: 1,345 tokens") land on its message at turn end even if
+	// live events already swapped the local echo for the confirmed copy.
+	pendingUserText string
+	// lastWorkingElapsed is the last stamped elapsed second ("34,4s");
+	// ticks landing inside the same displayed second skip the rebuild.
+	lastWorkingElapsed string
+	// lastDaemonMsg is the clock time of the last successful daemon contact
+	// (event, turn result, message fetch) or turn send. The ghost-turn
+	// watchdog compares against it.
+	lastDaemonMsg time.Time
 	helpVisible  bool
 	helpViewport viewport.Model
 	// slash suggestions
@@ -103,6 +135,15 @@ type Model struct {
 	// Deprecated: retained for test compatibility; proxies to sessionsDropdown
 	sessionFocus    bool
 	sessionFocusIdx int
+
+	// TUI-7: M2 rail, mouse capture, rail panels, sidecar duration
+	mouseCapture bool   // true = MouseModeCellMotion, false = off (selection free)
+	railPanel    string // "" none, "context", "plugins", "turnstats"
+	// sidecar durations: persisted per-turn elapsed keyed by sessionID:seq.
+	// One global map holds all sessions, so it is loaded once at startup and
+	// needs no reload on session switch.
+	sidecar     map[string]int64 // map[compositeKey]durationMs
+	sidecarPath string           // .forge/tui-state.json
 }
 
 type pendingTool struct {
@@ -119,7 +160,9 @@ type slashSuggestion struct {
 
 var allSlashSuggestions = []slashSuggestion{
 	{"/help", "show help panel and keybindings"},
-	{"/layout", "change layout: hybrid | session | minimal"},
+	{"/layout", "toggle status rail (M2 single layout; args ignored)"},
+	{"/session", "open sessions panel (arrows + enter)"},
+	{"/copy", "copy last response to clipboard"},
 	{"/palette", "change palette"},
 	{"/resume", "resume current session"},
 	{"/model", "switch model"},
@@ -192,7 +235,20 @@ func NewModel(cfg TUIConfig, pal Palette, palName, configPath string, client TUI
 		clock:        realClock{},
 		pendingTools: make(map[string]pendingTool),
 		markedIDs:    make(map[string]bool),
+		// Wheel scroll and click hotspots first: mouse capture defaults ON.
+		// Free text selection is one keypress away (ctrl+m toggles capture
+		// off; shift+drag also bypasses it in most terminals). The footer
+		// shows "mouse off" while capture is off.
+		mouseCapture: true,
+		sidecar:      make(map[string]int64),
 	}
+	if configPath != "" {
+		m.sidecarPath = filepath.Join(filepath.Dir(configPath), "tui-state.json")
+	} else {
+		m.sidecarPath = filepath.Join(".forge", "tui-state.json")
+	}
+	// Load sidecar (ignore corrupt)
+	m.sidecar = loadSidecar(m.sidecarPath)
 	if m.saveFn == nil {
 		m.saveFn = func(c TUIConfig) error { return SaveTUIConfig(configPath, c) }
 	}
@@ -284,13 +340,13 @@ func (m *Model) SetClock(c Clock) { m.clock = c }
 func (m *Model) SetEventsChannel(ch <-chan daemon.JSONRPCNotification) { m.eventsCh = ch }
 
 func (m Model) effectiveTranscriptWidth() int {
-	if m.layout == LayoutSession && m.showSidebar {
-		sidebarW := 28
-		avail := m.width - sidebarW - 2 // gap for join/border
+	// M2: single rail layout. Rail width = 32 when visible, else full width.
+	if m.showSidebar {
+		avail := m.width - railWidth - 1 // 1 for vertical border/join
 		if avail < 20 {
 			avail = 20
-			if m.width > sidebarW+1 && avail > m.width-sidebarW-1 {
-				avail = m.width - sidebarW - 1
+			if m.width > railWidth+1 && avail > m.width-railWidth-1 {
+				avail = m.width - railWidth - 1
 				if avail < 10 {
 					avail = 10
 				}
@@ -304,21 +360,67 @@ func (m Model) effectiveTranscriptWidth() int {
 	return m.width
 }
 
+// Accessors for TUI-7
+func (m Model) IsMouseCapture() bool { return m.mouseCapture }
+func (m Model) RailPanel() string    { return m.railPanel }
+func (m Model) IsRailVisible() bool  { return m.showSidebar }
+
 // SetSize sets terminal size and propagates to subcomponents.
+//
+// Height accounting (TUI-7 footer fix): every chrome row is MEASURED or
+// explicitly reserved — no hardcoded stale footer height.
+//
+//	title bar     titleHeightRows (renderTitleBar bordered box: top border,
+//	                content, bottom border)
+//	transcript    remainder (this value)
+//	separator     1
+//	input         4 (+ suggestion box lines while suggestions are visible,
+//	                + 1 per inline overlay hint line: sessions dropdown,
+//	                model select)
+//	footer        lipgloss.Height of the rendered footer (the footer content
+//	                line and toast line are hard-truncated to the width so the
+//	                measurement can never go stale via wrapping) + 1 headroom
+//	                row while no toast is shown (a toast renders one extra line
+//	                above the footer bar and can appear at runtime without a
+//	                WindowSizeMsg)
+//
+// The animated spinner lives inside the footer bar, so no headroom row is
+// reserved for it; the pending message carries the static Working marker.
+//
+// Overlay toggles that change the input-area height (suggestions, sessions
+// dropdown, model panel) call relayout() so the footer's top position stays
+// pinned to (height - footerHeight) instead of drifting off-screen. Known
+// transient overflow outside this guarantee: none in the base frame; the
+// floating overlays (/help, dropdown list, model panel, rail panels) are
+// marker-stacked below the frame for TTY-free test determinism, matching the
+// documented TUI-4..6 rendering approach.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
-	// roughly allocate: transcript height = h - input - footer
+	footerH := m.measureFooterHeight(w)
+	if m.toast == "" {
+		footerH++ // toast appearance headroom (see comment above)
+	}
 	inputH := 4
-	footerH := 2
-	transH := h - inputH - footerH
-	if transH < 5 {
-		transH = 5
+	if m.suggestionsVisible && len(m.suggestions) > 0 {
+		if sugg := m.renderSuggestions(); sugg != "" {
+			inputH += lipgloss.Height(sugg) + 1 // suggestion box + join line
+		}
+	}
+	if m.sessionsDropdownVisible || m.sessionFocus {
+		inputH++ // inline "session focus" hint line above the input
+	}
+	if m.modelPanelVisible {
+		inputH++ // inline "model select" hint line above the input
+	}
+	transH := h - titleHeightRows /*title*/ - 1 /*separator*/ - inputH - footerH
+	if transH < 3 {
+		transH = 3 // floor guard: at extreme sizes clipping is unavoidable
 	}
 	tw := m.effectiveTranscriptWidth()
 	m.viewport.SetWidth(tw)
 	m.viewport.SetHeight(transH)
-	m.input.SetSize(tw, inputH)
+	m.input.SetSize(tw, 4)
 	// Help overlay should stay within terminal width with padding
 	hw := w - 4
 	if hw < 40 {
@@ -335,9 +437,181 @@ func (m *Model) SetSize(w, h int) {
 	m.helpViewport.SetHeight(hh)
 }
 
-// Init returns initial commands: fetch status and sessions.
+// relayout recomputes the chrome height budget at the current size. Called
+// whenever an overlay toggles that changes the input-area height, so the
+// footer top position remains pinned instead of clipping off-screen.
+func (m *Model) relayout() {
+	wasAtBottom := m.viewport.AtBottom()
+	m.SetSize(m.width, m.height)
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+func (m Model) measureFooterHeight(w int) int {
+	if w <= 0 {
+		w = m.width
+		if w <= 0 {
+			w = 80
+		}
+	}
+	// Build footer identical to View's footer composition for height measurement
+	compPal := toCompPalette(m.palette)
+	footer := components.FooterModel{
+		Palette:       compPal,
+		Width:         w,
+		Cwd:           m.cwd,
+		SessionID:     m.sessionID,
+		DaemonAddr:    m.daemonAddr,
+		Toast:         m.toast,
+		DaemonErr:     m.daemonErr,
+		ShowSpinner:   m.spinner,
+		SpinnerView:   m.spinnerModel.View(),
+		Layout:        m.footerLayoutLabel(),
+		ModelName:     m.currentModel,
+		Tokens:        m.totalTokens,
+		ShowMoreBelow: false,
+		FocusHint:     "",
+	}.Render()
+	h := lipgloss.Height(footer)
+	if h < 2 {
+		h = 2
+	}
+	return h
+}
+
+func (m Model) footerLayoutLabel() string {
+	if m.showSidebar {
+		return "rail on"
+	}
+	return "rail off"
+}
+
+// renderTitleBar renders the M2 full-width title bar: "forge <tui-version> ·
+// daemon <daemon-version>" left, cwd right. Rendered as a bordered box in the
+// same style as the footer bar (NormalBorder + BGElevated) so the version is
+// always visible as top chrome. The box is EXACTLY 3 rows (top border,
+// content, bottom border) — SetSize and handleMouseClick account for
+// titleHeightRows, and the cwd is hard-truncated so the content never wraps.
+func (m Model) renderTitleBar() string {
+	ver := tuiVersion()
+	daemonVer := m.daemonVers
+	if daemonVer == "" {
+		daemonVer = "dev"
+	}
+	left := fmt.Sprintf("forge %s · daemon %s", ver, daemonVer)
+	right := m.cwd
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	leftLen := lipgloss.Width(left)
+	if gap := width - leftLen - lipgloss.Width(right) - 2; gap < 1 || lipgloss.Width(right) > width-leftLen-2 {
+		// cwd does not fit next to the version block: truncate it to what remains
+		avail := width - leftLen - 2
+		if avail < 1 {
+			avail = 1
+		}
+		right = ansi.Truncate(right, avail, "…")
+	}
+	gap := width - leftLen - lipgloss.Width(right) - 2
+	if gap < 1 {
+		gap = 1
+	}
+	bar := left + strings.Repeat(" ", gap) + right
+	// Box Width includes the borders: cap the inner bar to the content area
+	// (width-2) so it can never wrap to a second row and break the frame.
+	inner := width - 2
+	if inner < 1 {
+		inner = 1
+	}
+	bar = ansi.Truncate(bar, inner, "")
+	content := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(m.palette.Text)).
+		Render(bar)
+	return lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color(m.palette.Border)).
+		Background(lipgloss.Color(m.palette.BGElevated)).
+		Width(width).
+		Render(content)
+}
+
+// titleHeightRows is the exact rendered height of the title bar box
+// (top border + content + bottom border). Keep in sync with renderTitleBar.
+const titleHeightRows = 3
+
+func (m Model) renderSeparator() string {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	line := strings.Repeat("─", w)
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(line)
+}
+
+// --- Sidecar for elapsed duration survival (TUI-7) ---
+// .forge/tui-state.json is a JSON map of composite keys "sessionID:seq" -> durationMs.
+// Written on executeTurnMsg arrival, loaded on session switch/startup, merged into assistant Entry.Meta.
+// Corrupt file -> ignore (return empty). No store schema changes.
+
+func sidecarKey(sessionID string, seq int) string {
+	return fmt.Sprintf("%s:%d", sessionID, seq)
+}
+
+func loadSidecar(path string) map[string]int64 {
+	out := make(map[string]int64)
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return out
+	}
+	var raw map[string]int64
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return out
+	}
+	return raw
+}
+
+func saveSidecar(path string, m map[string]int64) error {
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(dir, "tui-state-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// Init returns initial commands: fetch status and sessions, plus the input
+// cursor blink. The blink Cmd must be returned here: NewInput focuses the
+// textarea but its Focus Cmd was dropped, so without this the cursor stays
+// solid until the first keystroke restarts blinking.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.cmdStatus(), m.cmdListSessions())
+	return tea.Batch(m.cmdStatus(), m.cmdListSessions(), m.input.Focus())
 }
 
 func (m Model) cmdStatus() tea.Cmd {
@@ -501,9 +775,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var scmd tea.Cmd
 		m.spinnerModel, scmd = m.spinnerModel.Update(msg)
 		if m.spinner {
+			// Single tick driver: bubbles re-arms itself with an
+			// incremented tag (stale ticks rejected on ID+tag). Appending
+			// a second re-arm here forked successors exponentially —
+			// GBs of queued ticks and burned cores on long turns.
 			cmds = append(cmds, scmd)
-			if nxt := m.cmdSpinnerTick(); nxt != nil {
-				cmds = append(cmds, nxt)
+			// In-bubble elapsed: rebuild at most once per displayed second.
+			if m.stampWorkingElapsed() {
+				m.rebuildTranscript()
+			}
+			// Ghost-turn watchdog: silent turns recover visibly.
+			if wcmd := m.checkWatchdog(); wcmd != nil {
+				cmds = append(cmds, wcmd)
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -521,6 +804,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport, _ = m.viewport.Update(msg)
 		return m, nil
 
+	case tea.MouseClickMsg:
+		m.handleMouseClick(tea.Mouse(msg))
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.SetSize(msg.Width, msg.Height)
 		m.rebuildTranscript()
@@ -531,6 +818,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.cmdWaitEvent(m.eventsCh)
 
 	case daemonEventMsg:
+		// Any daemon traffic resets the ghost-turn watchdog clock.
+		m.touchDaemon()
 		// After processing, re-arm wait for next event.
 		cmds = append(cmds, m.handleDaemonEvent(msg.notif))
 		if m.eventsCh != nil {
@@ -602,8 +891,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.latencyCount++
 				}
 			}
-			m.lastError = truncateError(msg.err.Error(), 80)
-			// RF-2.6 failure semantics: if a streaming preview is in-flight,
+		m.lastError = truncateError(msg.err.Error(), 80)
+		// Turn ended in error: keep the elapsed on the pending message
+		// (no token count is known); without a clock just clear the marker.
+		meta := ""
+		if !m.turnStart.IsZero() && m.clock != nil {
+			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+		}
+		if m.finalizeWorkingMarkers(meta) {
+			m.rebuildTranscript()
+		}
+		// RF-2.6 failure semantics: if a streaming preview is in-flight,
 			// keep the partial text visible but mark it as interrupted — do NOT
 			// silently delete what the user was reading. This preserves the
 			// live preview as evidence of the failure point.
@@ -620,31 +918,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.res != nil {
+			// A completed turn result is daemon contact (resets watchdog).
+			m.touchDaemon()
 			// Update current model (documented source: ExecuteTurnResult.Model when present).
 			if msg.res.Model != "" {
 				m.currentModel = msg.res.Model
 			}
 			// Compute CLIENT-side elapsed from send to arrival using injected Clock.
 			elapsedStr := ""
+			var durationMs int64 = -1
 			if !m.turnStart.IsZero() && m.clock != nil {
 				elapsed := m.clock.Now().Sub(m.turnStart)
 				if elapsed < 0 {
 					elapsed = 0
 				}
-				if elapsed < time.Second {
-					elapsedStr = fmt.Sprintf("%dms", elapsed.Milliseconds())
-				} else {
-					elapsedStr = fmt.Sprintf("%.1fs", elapsed.Seconds())
-				}
+				durationMs = elapsed.Milliseconds()
+				elapsedStr = formatDurationMs(durationMs)
 			}
 			// Turn stats: count and latency
 			m.turnCount++
-			if !m.turnStart.IsZero() && m.clock != nil {
-				elapsedDur := m.clock.Now().Sub(m.turnStart)
-				if elapsedDur >= 0 {
-					m.latencyTotalMs += elapsedDur.Milliseconds()
-					m.latencyCount++
-				}
+			if durationMs >= 0 {
+				m.latencyTotalMs += durationMs
+				m.latencyCount++
 			}
 			// Accumulate tokens.
 			if msg.res.Usage != nil {
@@ -672,29 +967,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					fresh = append(fresh, mr)
 				}
 			}
-			newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
-			// Inject model+elapsed into assistant entries Meta: "<model> · <elapsed>"
-			// When both present join with " · ", otherwise show whichever is available.
-			if elapsedStr != "" || m.currentModel != "" {
-				metaPiece := ""
-				if m.currentModel != "" && elapsedStr != "" {
-					metaPiece = m.currentModel + " · " + elapsedStr
-				} else if m.currentModel != "" {
-					metaPiece = m.currentModel
-				} else {
-					metaPiece = elapsedStr
+		newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
+		// Turn summary on the FINAL assistant entry: "tokens T · model ·
+		// elapsed" in dim. Intermediate entries keep their per-call meta;
+		// the last reply carries the canonical turn totals.
+		turnTokens := 0
+		if msg.res.Usage != nil {
+			turnTokens = msg.res.Usage.TotalTokens
+		} else {
+			for _, mr := range msg.res.Messages {
+				if mr.Usage != nil {
+					turnTokens += mr.Usage.TotalTokens
 				}
-				for i, e := range newEntries {
-					if e.Role == "assistant" && !e.IsTool {
-						// Append to existing meta (e.g. tokens) with separator if needed.
-						if e.Meta != "" && metaPiece != "" {
-							newEntries[i].Meta = e.Meta + " · " + metaPiece
-						} else if metaPiece != "" {
-							newEntries[i].Meta = metaPiece
-						}
-						break // only first assistant entry gets model/elapsed per turn
+			}
+		}
+		summaryParts := []string{}
+		if turnTokens > 0 {
+			summaryParts = append(summaryParts, fmt.Sprintf("tokens %d", turnTokens))
+		}
+		if m.currentModel != "" {
+			summaryParts = append(summaryParts, m.currentModel)
+		}
+		if elapsedStr != "" {
+			summaryParts = append(summaryParts, elapsedStr)
+		}
+		if len(summaryParts) > 0 {
+			summary := strings.Join(summaryParts, " · ")
+			for i := len(newEntries) - 1; i >= 0; i-- {
+				if newEntries[i].Role == "assistant" && !newEntries[i].IsTool {
+					newEntries[i].Meta = summary
+					newEntries[i].Summary = true
+					break
+				}
+			}
+		}
+			// Sidecar persistence for elapsed survival (TUI-7): persist per-turn duration keyed by sessionID:seq
+			// Documented sidecar .forge/tui-state.json survives reloads; corrupt file ignored.
+			if durationMs >= 0 && m.sessionID != "" {
+				for _, e := range newEntries {
+					if e.Role == "assistant" && !e.IsTool && e.Seq != 0 {
+						key := sidecarKey(m.sessionID, e.Seq)
+						m.sidecar[key] = durationMs
+						break // only first assistant per turn (matches elapsed injection)
 					}
 				}
+				_ = saveSidecar(m.sidecarPath, m.sidecar)
 			}
 			// Streaming confirmation swap (TUI-3): if a streaming preview is
 			// active, the authoritative assistant entry replaces it in-place
@@ -748,6 +1065,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.lastSeq = mr.Seq
 				}
 			}
+			// Turn completed: stamp "elapsed :: tokens" onto its user
+			// message (the echo was replaced by its confirmed copy above;
+			// the stats survive on whichever copy remains).
+			stats := ""
+			if durationMs >= 0 {
+				stats = formatWorkingElapsed(time.Duration(durationMs) * time.Millisecond)
+				turnTokens := 0
+				if msg.res.Usage != nil {
+					turnTokens = msg.res.Usage.TotalTokens
+				} else {
+					for _, mr := range msg.res.Messages {
+						if mr.Usage != nil {
+							turnTokens += mr.Usage.TotalTokens
+						}
+					}
+				}
+				if turnTokens > 0 {
+					stats += " :: " + formatTokens(turnTokens) + " tokens"
+				}
+			}
+			m.finalizeWorkingMarkers(stats)
 			m.rebuildTranscript()
 		}
 		return m, nil
@@ -757,6 +1095,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toast = msg.err.Error()
 			return m, nil
 		}
+		// Fresh daemon contact (resets watchdog even when nothing is new).
+		m.touchDaemon()
 		// Append only messages newer than what we already rendered (dedup guard).
 		var fresh []daemon.MessageResult
 		for _, mr := range msg.res.Messages {
@@ -766,6 +1106,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(fresh) > 0 {
 			newEntries := components.EntriesFromMessages(fresh, nil)
+			// Merge sidecar durations into reloaded entries (TUI-7): elapsed
+			// survives restarts/session switches via .forge/tui-state.json.
+			newEntries = mergeSidecarDurations(newEntries, m.sidecar, m.sessionID, m.currentModel)
+			// Absorb the local echo when its confirmed copy arrives here
+			// (watchdog refetch or live catch-up): same content-match rule
+			// as the turn-end merge, so no duplicate user bubble lingers.
+			for _, e := range newEntries {
+				if e.Role == "user" {
+					m.absorbLocalEcho(e)
+				}
+			}
 			m.entries = append(m.entries, newEntries...)
 			for _, mr := range fresh {
 				if mr.Seq > m.lastSeq {
@@ -779,6 +1130,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case haltResultMsg:
 		m.spinner = false
 		m.deltaPending = false
+		// Halt ends the turn: keep the elapsed on the pending message if
+		// the echo survived (no token count is known on halt).
+		meta := ""
+		if !m.turnStart.IsZero() && m.clock != nil {
+			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+		}
+		if m.finalizeWorkingMarkers(meta) {
+			m.rebuildTranscript()
+		}
 		if msg.err != nil {
 			m.toast = msg.err.Error()
 		} else {
@@ -844,6 +1204,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		// Rail panel intercepts: esc closes it, any panel overlay closes on esc
+		if m.railPanel != "" {
+			if msg.String() == "esc" {
+				m.railPanel = ""
+				return m, nil
+			}
+			// Any other key when rail panel visible? Let global handle but esc is priority.
+			// For simplicity, allow esc only; other keys close as well? Spec: Esc closes any panel.
+			// Keep rail panel until esc or toggle.
+		}
 		// Help overlay intercepts everything: esc or any key closes it.
 		if m.helpVisible {
 			m.helpVisible = false
@@ -851,9 +1221,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Sessions dropdown (TUI-6) intercepts BEFORE suggestions and globals — floating overlay like /help
 		if m.sessionsDropdownVisible || m.sessionFocus {
-			// Normalize legacy sessionFocus to dropdown semantics for backward compat
-			isDropdown := m.sessionsDropdownVisible || m.sessionFocus
-			_ = isDropdown
 			switch msg.String() {
 			case "up":
 				if len(m.sessions) > 0 {
@@ -894,15 +1261,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if len(m.sessions) > 0 && idx >= 0 && idx < len(m.sessions) {
 					sel := m.sessions[idx]
-					m.sessionID = sel.ID
-					m.lastSeq = 0
-					m.entries = nil
-					m.rebuildTranscriptForceBottom()
+				m.sessionID = sel.ID
+				m.lastSeq = 0
+				m.entries = nil
+				m.pendingUserText = ""
+				m.rebuildTranscriptForceBottom()
 					m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 					m.suggestionsVisible = false
 					m.sessionsDropdownVisible = false
 					m.sessionFocus = false
 					m.input.Focus()
+					m.relayout() // focus hint row leaves the input area
 					// Refresh plugins/skills on session switch if cheap (async)
 					var cmdsSwitch []tea.Cmd
 					if m.client != nil {
@@ -922,17 +1291,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
 				m.input.Focus()
+				m.relayout()
 				return m, nil
 			case "esc":
 				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
 				m.input.Focus()
+				m.relayout()
 				return m, nil
 			default:
 				if key.Matches(msg, m.keyMap.GrabSession) {
 					m.sessionsDropdownVisible = false
 					m.sessionFocus = false
 					m.input.Focus()
+					m.relayout()
 					return m, nil
 				}
 				// Any other key consumed, not sent to input
@@ -959,6 +1331,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.modelPanelList) > 0 && m.modelPanelIdx >= 0 && m.modelPanelIdx < len(m.modelPanelList) {
 					chosen := m.modelPanelList[m.modelPanelIdx]
 					m.modelPanelVisible = false
+					m.relayout() // model select hint row leaves the input area
 					if m.sessionID == "" {
 						m.toast = "no session"
 						return m, nil
@@ -970,15 +1343,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.cmdSwitchModel(chosen)
 				}
 				m.modelPanelVisible = false
+				m.relayout()
 				return m, nil
 			case "esc":
 				m.modelPanelVisible = false
+				m.relayout()
 				return m, nil
 			default:
 				return m, nil
 			}
 		}
-		// Suggestion navigation intercepts before global keys
+		// Suggestion navigation intercepts before global keys.
+		// TUI-7 fix: Enter only completes when completion would actually
+		// CHANGE the input. When the input already equals the highlighted
+		// suggestion — exactly ("/model") or with a trailing space
+		// ("/model ") — Enter dismisses the suggestions and falls through
+		// to the global send path instead of completing into a no-op.
 		if m.suggestionsVisible && len(m.suggestions) > 0 {
 			switch msg.String() {
 			case "up":
@@ -995,13 +1375,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.suggestionComplete()
 				return m, nil
 			case "esc":
-				m.suggestionsVisible = false
-				m.suggestions = nil
-				m.suggestionIdx = 0
+				m.dismissSuggestions()
 				return m, nil
 			case "enter":
-				// tab or enter COMPLETES the highlighted suggestion into the input
-				// (enter sends only when no suggestion is highlighted)
+				if sel, ok := m.highlightedSuggestion(); ok {
+					cur := m.input.Value()
+					if strings.TrimSpace(cur) == sel.Command || cur == sel.Command+" " {
+						m.dismissSuggestions()
+						m.relayout() // suggestion box rows leave the input area
+						break // fall through to global enter handling (send)
+					}
+				}
 				m.suggestionComplete()
 				return m, nil
 			}
@@ -1024,12 +1408,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.cmdHalt()
 		case key.Matches(msg, m.keyMap.ToggleSidebar):
 			m.toggleSidebar()
+			if err := m.persistConfig(); err != nil {
+				m.toast = err.Error()
+			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.CycleLayout):
 			m.cycleLayout()
 			// persist
 			if err := m.persistConfig(); err != nil {
 				m.toast = err.Error()
+			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ToggleMouse):
+			m.mouseCapture = !m.mouseCapture
+			if m.mouseCapture {
+				m.toast = "mouse capture on (text selection via shift+drag)"
+			} else {
+				m.toast = "mouse capture off (text selection free)"
+			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ShowContext):
+			if m.railPanel == "context" {
+				m.railPanel = ""
+			} else {
+				m.railPanel = "context"
+			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ShowPlugins):
+			if m.railPanel == "plugins" {
+				m.railPanel = ""
+			} else {
+				m.railPanel = "plugins"
+			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ShowTurnStats):
+			if m.railPanel == "turnstats" {
+				m.railPanel = ""
+			} else {
+				m.railPanel = "turnstats"
 			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.GrabSession):
@@ -1052,6 +1468,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionsDropdownIdx = idx
 			m.sessionFocusIdx = idx
 			m.input.Blur()
+			m.relayout() // inline focus hint adds a row above the input
 			// Refresh plugins/skills if cheap (async, optional)
 			var refreshCmds []tea.Cmd
 			if pc := m.cmdRefreshPlugins(); pc != nil {
@@ -1065,12 +1482,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case msg.String() == "esc":
-			if m.suggestionsVisible {
-				m.suggestionsVisible = false
-				m.suggestions = nil
-				m.suggestionIdx = 0
-				return m, nil
-			}
+			// Esc priority is handled earlier in the chain: rail panel (top
+			// of KeyPressMsg), help overlay, sessions dropdown, model panel,
+			// suggestions. Reaching here means nothing was open.
 			return m, nil
 		default:
 			// Scroll keys forwarded to viewport when help closed and not in focus mode
@@ -1095,8 +1509,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toast = "turn in flight… ctrl+h to halt"
 					return m, nil
 				}
-				// Close suggestions on send
-				m.suggestionsVisible = false
+				// Close suggestions on send (normally already dismissed by the
+				// suggestion intercept's exact-match path; safety net).
+				if m.suggestionsVisible {
+					m.dismissSuggestions()
+					m.relayout()
+				}
 				text := strings.TrimSpace(m.input.Value())
 				if text == "" {
 					return m, nil
@@ -1105,7 +1523,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if strings.HasPrefix(text, "/") {
 					if done, cmd := m.handleSlash(text); done {
 						m.input.Reset()
-						m.suggestionsVisible = false
+						m.dismissSuggestions()
 						return m, cmd
 					}
 				}
@@ -1121,9 +1539,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
 					}
 				}
-				// Normal turn: optimistic local echo, clear input, spinner, execute.
-				// The daemon-confirmed copy replaces this echo in executeTurnMsg.
-				m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true})
+			// Normal turn: optimistic local echo, clear input, spinner, execute.
+			// The daemon-confirmed copy replaces this echo in executeTurnMsg.
+			// The echo carries the Working marker so the pending message is
+			// visibly marked for the whole turn (finalized on turn end).
+			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: workingMarker})
+			m.pendingUserText = text
+			m.lastWorkingElapsed = ""
 				m.rebuildTranscriptForceBottom()
 				m.input.Reset()
 				m.suggestionsVisible = false
@@ -1131,11 +1553,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.clock == nil {
 					m.clock = realClock{}
 				}
-				m.turnStart = m.clock.Now()
-				m.toast = ""
-				// Animated spinner: tick loop while m.spinner, plus immediate frame
-				tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
-				return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate, m.cmdSpinnerTick())
+			m.turnStart = m.clock.Now()
+			m.touchDaemon()
+			m.toast = ""
+			// Animated spinner: single driver. tickImmediate primes the
+			// first frame; bubbles re-arms itself per tick (tag-guarded),
+			// so no second re-arm here (that forked exponentially).
+			tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
+			return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate)
 			}
 		}
 	}
@@ -1344,47 +1769,25 @@ func (m *Model) handleToolCallEvent(payload daemon.ToolCallEventPayload) tea.Cmd
 }
 
 func (m *Model) toggleSidebar() {
-	// Per-layout toggle semantics (documented):
-	// - hybrid: toggles overlay visibility
-	// - session: toggles column visibility
-	// - minimal: toggles internal flag but View() is authoritative and ALWAYS renders Minimal (no overlay),
-	//   so the toggle has no visual effect in minimal. This guarantees the three layouts remain visually distinct
-	//   even when showSidebar was toggled in minimal before cycling.
+	// M2 Status Rail: ctrl+o toggles the rail. Hidden = full-width transcript (M1-style).
+	// showSidebar now means rail visible.
 	m.showSidebar = !m.showSidebar
 	m.config.Sidebar = m.showSidebar
-	// Recompute effective width so transcript never overflows terminal in session column mode.
-	m.viewport.SetWidth(m.effectiveTranscriptWidth())
-	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
+	if m.showSidebar {
+		m.toast = "rail on"
+	} else {
+		m.toast = "rail off"
+	}
+	// relayout recomputes effective width (rail steals 33 cols from the
+	// transcript) and re-measures the footer at the current size.
+	m.relayout()
 	m.rebuildTranscript()
 }
 
 func (m *Model) cycleLayout() {
-	idx := 0
-	for i, l := range layoutOrder {
-		if l == m.layout {
-			idx = i
-			break
-		}
-	}
-	m.layout = layoutOrder[(idx+1)%len(layoutOrder)]
-	m.config.Layout = m.layout
-	// Normalize showSidebar per layout for distinct visuals (fixes LAYOUT COLLAPSE):
-	// hybrid → sidebar on (overlay), session → sidebar on (column), minimal → sidebar OFF (no overlay).
-	// View() is also authoritative: Minimal always renders Minimal regardless of flag.
-	// This ensures ctrl+l always lands on a visually different state.
-	switch m.layout {
-	case LayoutHybrid:
-		m.showSidebar = true
-	case LayoutSession:
-		m.showSidebar = true
-	case LayoutMinimal:
-		m.showSidebar = false
-	}
-	m.config.Sidebar = m.showSidebar
-	// Update viewport/input width for session column layout observability.
-	m.viewport.SetWidth(m.effectiveTranscriptWidth())
-	m.input.SetSize(m.effectiveTranscriptWidth(), 4)
-	m.rebuildTranscript()
+	// M2: ctrl+l is an alias of ctrl+o (rail toggle). The 3-layout cycle is
+	// removed; the footer layout label reports "rail on"/"rail off".
+	m.toggleSidebar()
 }
 
 func (m *Model) persistConfig() error {
@@ -1405,24 +1808,13 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 	cmd := parts[0]
 	switch cmd {
 	case "/layout":
-		if len(parts) < 2 {
-			m.toast = "usage: /layout <hybrid|session|minimal>"
-			return true, nil
-		}
-		name := parts[1]
-		if !IsValidLayout(name) {
-			m.toast = fmt.Sprintf("unknown layout %q", name)
-			return true, nil
-		}
-		m.layout = name
-		// Recompute effective width for session column observability
-		m.viewport.SetWidth(m.effectiveTranscriptWidth())
-		m.input.SetSize(m.effectiveTranscriptWidth(), 4)
-		m.rebuildTranscript()
+		// M2: the 3-layout system is gone — /layout is a keyboard alias for
+		// the rail toggle (same as ctrl+o / ctrl+l). Arguments are accepted
+		// and ignored so stale muscle memory ("/layout minimal") still does
+		// something sensible instead of failing.
+		m.toggleSidebar()
 		if err := m.persistConfig(); err != nil {
 			m.toast = err.Error()
-		} else {
-			m.toast = fmt.Sprintf("layout → %s", name)
 		}
 		return true, nil
 	case "/palette":
@@ -1455,6 +1847,35 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 			return true, nil
 		}
 		return true, m.cmdResume()
+	case "/session":
+		// Opens the floating sessions panel (same UX as /model): arrows
+		// navigate, enter switches, esc closes. ctrl+g only enters sidebar
+		// focus mode (no visible list) — this command is the discoverable
+		// path to the panel. Closes the model panel: exclusive.
+		m.modelPanelVisible = false
+		if len(m.sessions) == 0 {
+			m.toast = "no sessions"
+			return true, nil
+		}
+		m.sessionsDropdownVisible = true
+		m.sessionFocus = true
+		idx := 0
+		for i, s := range m.sessions {
+			if s.ID == m.sessionID {
+				idx = i
+				break
+			}
+		}
+		m.sessionsDropdownIdx = idx
+		m.sessionFocusIdx = idx
+		m.input.Blur()
+		m.relayout()
+		return true, nil
+	case "/copy":
+		// Copies the last assistant response to the OS clipboard (local
+		// operation: no client/session needed).
+		m.copyLastResponse()
+		return true, nil
 	case "/model":
 		if len(parts) < 2 {
 			// TUI-6: /model with no argument opens floating selection panel listing available models
@@ -1469,6 +1890,7 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 			m.modelPanelList = list
 			m.modelPanelIdx = 0
 			m.modelPanelVisible = true
+			m.relayout() // model select hint adds a row above the input
 			return true, nil
 		}
 		name := parts[1]
@@ -1504,6 +1926,37 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		m.toast = fmt.Sprintf("unknown command %q (/help for list)", cmd)
 		return true, nil
 	}
+}
+
+// lastAssistantText returns the latest assistant reply body for /copy and
+// the footer [copiar] hotspot. Skips tool entries, streaming previews,
+// blanks and "(empty)"/"(tool calls)" placeholders (copying those is noise).
+func (m Model) lastAssistantText() string {
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		e := m.entries[i]
+		if e.Role != "assistant" || e.IsTool || e.Streaming {
+			continue
+		}
+		if text := strings.TrimSpace(e.Content); text != "" && text != "(empty)" && text != "(tool calls)" {
+			return e.Content
+		}
+	}
+	return ""
+}
+
+// copyLastResponse copies the last assistant reply to the OS clipboard,
+// reporting the outcome as a toast.
+func (m *Model) copyLastResponse() {
+	text := m.lastAssistantText()
+	if text == "" {
+		m.toast = "no response to copy yet"
+		return
+	}
+	if err := copyText(text); err != nil {
+		m.toast = "copy failed: " + truncateError(err.Error(), 80)
+		return
+	}
+	m.toast = fmt.Sprintf("copied %d chars", len([]rune(text)))
 }
 
 func toCompPalette(p Palette) components.Palette {
@@ -1642,27 +2095,122 @@ func (m *Model) rebuildTranscriptForceBottom() {
 	m.rebuildTranscriptInternal(true)
 }
 
-// pendingSpinnerLine composes the dynamic spinner pending line at View time.
-// It is NOT part of the static transcript content and does NOT trigger a rebuild.
-func (m Model) pendingSpinnerLine() string {
-	if !m.spinner || m.findStreamingIndex() != -1 {
-		return ""
-	}
-	hasPendingUser := false
-	for _, e := range m.entries {
-		if e.Role == "user" {
-			hasPendingUser = true
+// workingMarker is the static in-transcript marker shown under the user's
+// pending message for the whole turn ("◌ Working…"). Unlike the animated
+// pending spinner line below the transcript (dynamic, composed at View time),
+// the marker lives in the entry Meta so it needs no per-tick rebuild and is
+// visible even while streaming (caret phase) or mid-turn tool iterations.
+// Set on send, cleared on turn end (executeTurnMsg success/error, halt).
+const workingMarker = "◌ Working…"
+
+// finalizeWorkingMarkers stamps the turn's final stats ("34,4s :: 1,345
+// tokens", or just elapsed when no token count is known) onto its user
+// message: the LAST entry matching the sent text (confirmed copy wins over
+// the local echo) or carrying the Working marker. Single match keeps
+// duplicate echo+confirmed pairs from showing the line twice; any other
+// leftover marker is cleared. An empty meta simply clears the marker.
+func (m *Model) finalizeWorkingMarkers(meta string) bool {
+	target := -1
+	for i := len(m.entries) - 1; i >= 0; i-- {
+		e := m.entries[i]
+		if e.Role != "user" {
+			continue
+		}
+		// Match the bare marker or a tick-stamped one ("◌ Working… (34,4s)").
+		if strings.HasPrefix(e.Meta, workingMarker) || (m.pendingUserText != "" && strings.TrimSpace(e.Content) == m.pendingUserText) {
+			target = i
 			break
 		}
 	}
-	if !hasPendingUser {
-		return ""
+	changed := false
+	for i := range m.entries {
+		if m.entries[i].Role != "user" {
+			continue
+		}
+		if i == target {
+			if m.entries[i].Meta != meta {
+				m.entries[i].Meta = meta
+				changed = true
+			}
+		} else if strings.HasPrefix(m.entries[i].Meta, workingMarker) {
+			m.entries[i].Meta = ""
+			changed = true
+		}
 	}
-	frame := m.spinnerModel.View()
-	if frame == "" {
-		frame = "⠋"
+	m.pendingUserText = ""
+	m.lastWorkingElapsed = ""
+	return changed
+}
+
+// formatWorkingElapsed renders a duration for the Working marker:
+// "0,3s", "34,4s" (comma decimal, owner's locale), "2m05s" past a minute.
+func formatWorkingElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
 	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render(frame + " working…")
+	if d >= time.Minute {
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	return strings.Replace(fmt.Sprintf("%.1f", d.Seconds()), ".", ",", 1) + "s"
+}
+
+// touchDaemon records successful daemon contact for the ghost-turn
+// watchdog. No clock (tests constructing Model bare) means no tracking.
+func (m *Model) touchDaemon() {
+	if m.clock == nil {
+		return
+	}
+	m.lastDaemonMsg = m.clock.Now()
+}
+
+// watchdogSilence bounds silent turns: spinner on, no tool running, and no
+// daemon traffic for this long means the turn is a ghost (finished or dead
+// daemon-side, lost in delivery). Kept comfortably below the daemon-side
+// turn timeout so the UI recovers first with a visible halt + refetch.
+const watchdogSilence = 240 * time.Second
+
+// checkWatchdog halts a ghost turn visibly and refetches anything missed.
+// Returns nil unless all hold: spinner on, no outstanding tool call (a
+// running tool legitimately goes silent), tracked clock, and silence past
+// the bound. Long tool runs are never halted by this path; the daemon-side
+// turn timeout owns execution hangs.
+func (m *Model) checkWatchdog() tea.Cmd {
+	if !m.spinner || len(m.pendingTools) > 0 {
+		return nil
+	}
+	if m.turnStart.IsZero() || m.clock == nil || m.lastDaemonMsg.IsZero() {
+		return nil
+	}
+	if m.clock.Now().Sub(m.lastDaemonMsg) < watchdogSilence {
+		return nil
+	}
+	m.toast = "no daemon activity for 4m — halting ghost turn"
+	return tea.Batch(m.cmdHalt(), m.cmdGetMessagesSince(m.lastSeq))
+}
+
+// stampWorkingElapsed refreshes the in-bubble Working elapsed ("◌ Working…
+// (34,4s)") at most once per displayed second. The entry Meta is
+// width-wrapped at build time, so the bubble box never breaks. Returns true
+// if the transcript changed (caller rebuilds). Ticks that land inside the
+// same displayed second are no-ops, keeping the TUI-6 no-rebuild-per-tick
+// invariant for steady state.
+func (m *Model) stampWorkingElapsed() bool {
+	if m.turnStart.IsZero() || m.clock == nil {
+		return false
+	}
+	s := formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+	if s == m.lastWorkingElapsed {
+		return false
+	}
+	m.lastWorkingElapsed = s
+	stamped := false
+	for i := range m.entries {
+		if m.entries[i].Role == "user" && strings.HasPrefix(m.entries[i].Meta, workingMarker) {
+			m.entries[i].Meta = workingMarker + " (" + s + ")"
+			stamped = true
+		}
+	}
+	return stamped
 }
 
 func (m *Model) rebuildTranscriptInternal(forceBottom bool) {
@@ -1680,10 +2228,13 @@ func (m *Model) rebuildTranscriptInternal(forceBottom bool) {
 
 func (m *Model) updateSuggestions() {
 	val := m.input.Value()
+	wasVisible := m.suggestionsVisible
+	wasCount := len(m.suggestions)
 	if !strings.HasPrefix(val, "/") {
-		m.suggestionsVisible = false
-		m.suggestions = nil
-		m.suggestionIdx = 0
+		m.dismissSuggestions()
+		if wasVisible {
+			m.relayout() // suggestion box rows leave the input area
+		}
 		return
 	}
 	prefix := strings.Fields(val)
@@ -1703,9 +2254,10 @@ func (m *Model) updateSuggestions() {
 		filtered = allSlashSuggestions
 	}
 	if len(filtered) == 0 {
-		m.suggestionsVisible = false
-		m.suggestions = nil
-		m.suggestionIdx = 0
+		m.dismissSuggestions()
+		if wasVisible {
+			m.relayout()
+		}
 		return
 	}
 	m.suggestions = filtered
@@ -1713,6 +2265,27 @@ func (m *Model) updateSuggestions() {
 	if m.suggestionIdx >= len(filtered) {
 		m.suggestionIdx = 0
 	}
+	if !wasVisible || len(filtered) != wasCount {
+		m.relayout() // suggestion box rows enter/change the input area
+	}
+}
+
+// highlightedSuggestion returns the currently highlighted suggestion, if any.
+func (m Model) highlightedSuggestion() (slashSuggestion, bool) {
+	if !m.suggestionsVisible || len(m.suggestions) == 0 {
+		return slashSuggestion{}, false
+	}
+	if m.suggestionIdx < 0 || m.suggestionIdx >= len(m.suggestions) {
+		return slashSuggestion{}, false
+	}
+	return m.suggestions[m.suggestionIdx], true
+}
+
+// dismissSuggestions hides the suggestion list without completing.
+func (m *Model) dismissSuggestions() {
+	m.suggestionsVisible = false
+	m.suggestions = nil
+	m.suggestionIdx = 0
 }
 
 func (m *Model) suggestionComplete() {
@@ -1725,9 +2298,8 @@ func (m *Model) suggestionComplete() {
 	sel := m.suggestions[m.suggestionIdx].Command
 	// Complete with trailing space for commands expecting args; bare commands also get space for ergonomics.
 	m.input.SetValue(sel + " ")
-	m.suggestionsVisible = false
-	m.suggestions = nil
-	m.suggestionIdx = 0
+	m.dismissSuggestions()
+	m.relayout() // suggestion box rows leave the input area
 }
 
 func (m Model) renderSuggestions() string {
@@ -1779,7 +2351,29 @@ func (m *Model) openHelp() {
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("  ctrl+j        newline (portable alternative)"))
 	sb.WriteString("\n")
-	sb.WriteString(dimStyle.Render("  / prefix      slash suggestions: ↑/↓ navigate, tab/enter complete, esc dismiss; enter sends only when no suggestion highlighted"))
+	sb.WriteString(dimStyle.Render("  / prefix      slash suggestions: ↑/↓ navigate, tab/enter complete, esc dismiss; enter sends when input equals suggestion"))
+	sb.WriteString("\n\n")
+	sb.WriteString(textStyle.Render("M2 Status Rail:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+o / ctrl+l  toggle rail (full-width when hidden)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+1        Context & tokens panel"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+2        Plugins & skills panel (enable/disable via forge plugin/skill CLI)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+3        Turn stats panel (avg latency, last 5 errors)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  click rail card  open detail panel; esc closes"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  click session id in footer  open sessions dropdown; click model name  open /model panel"))
+	sb.WriteString("\n\n")
+	sb.WriteString(textStyle.Render("Mouse & Selection:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  mouse capture on by default (cell motion for wheel/click)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  shift+drag    bypass capture for text selection (Windows Terminal honors it)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+m        toggle mouse capture on/off (footer toast)"))
 	sb.WriteString("\n\n")
 	sb.WriteString(textStyle.Render("Keybindings:"))
 	sb.WriteString("\n")
@@ -1821,22 +2415,6 @@ func (m *Model) openHelp() {
 	m.helpViewport.GotoTop()
 }
 
-func (m *Model) cmdSpinnerTick() tea.Cmd {
-	if !m.spinner {
-		return nil
-	}
-	// Schedule next tick via spinner model's FPS
-	id := m.spinnerModel.ID()
-	// Use the spinner's FPS for deterministic interval.
-	fps := m.spinnerModel.Spinner.FPS
-	if fps == 0 {
-		fps = time.Second / 2
-	}
-	return tea.Tick(fps, func(t time.Time) tea.Msg {
-		return spinner.TickMsg{Time: t, ID: id}
-	})
-}
-
 func (m *Model) cycleSession() (bool, tea.Cmd) {
 	if len(m.sessions) == 0 {
 		m.toast = "no sessions"
@@ -1859,6 +2437,7 @@ func (m *Model) cycleSession() (bool, tea.Cmd) {
 	// For minimal viable: clear all entries and reload transcript via GetMessagesSince(0)
 	// Spec says entries replaced, lastSeq reset, echo cleared — so clear entries wholesale.
 	m.entries = nil
+	m.pendingUserText = ""
 	m.rebuildTranscriptForceBottom()
 	m.toast = fmt.Sprintf("session → %s", next.ID[:8])
 	// Also clear suggestions
@@ -1874,31 +2453,37 @@ func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
 	m.sessionID = sel.ID
 	m.lastSeq = 0
 	m.entries = nil
+	m.pendingUserText = ""
 	m.rebuildTranscriptForceBottom()
 	m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 	m.suggestionsVisible = false
 	return true, m.cmdGetMessagesSince(0)
 }
 
-// View routes by layout.
+// View renders M2 "Status Rail" layout: title bar (full-width, top) +
+// transcript (left) + rail (right, 32 cols, three cards) + accent separator
+// (full-width) above the input + input + footer.
+//
+// Mouse hit-testing (TUI-7): zones are derived in handleMouseClick from the
+// SAME constants this function renders with (title row 1, viewport height,
+// input 4, measured footer height). Documented fragility: rail card zones are
+// equal thirds of the rail column and footer hotspots are fixed right-edge
+// bands, so both drift if card content or footer composition changes; the
+// pure zone functions (HitTestRail, HitTestFooter) are covered by tests.
 func (m Model) View() tea.View {
-	// Build subcomponents
+	// Title bar (full-width, top)
+	titleBar := m.renderTitleBar()
+	// Transcript as rendered (the animated spinner lives only in the
+	// footer bar; the pending message itself carries the Working marker
+	// with its tick-stamped elapsed, wrapped safely inside its bubble).
 	transcriptView := m.viewport.View()
-	// Dynamic pending spinner line (TUI-6): composes at View time without transcript rebuild.
-	transcriptViewWithPending := transcriptView
-	if line := m.pendingSpinnerLine(); line != "" {
-		transcriptViewWithPending = transcriptView + "\n" + line
-	}
-
 	inputView := m.input.View()
-	// Slash suggestions floating list above input
 	if m.suggestionsVisible {
 		suggView := m.renderSuggestions()
 		if suggView != "" {
 			inputView = suggView + "\n" + inputView
 		}
 	}
-	// Sessions dropdown hint in input area (replaces old session focus hint) — keep "focus" word for backward compat with TUI-5 tests
 	if m.sessionsDropdownVisible {
 		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · esc/ctrl+g close")
 		inputView = focusHint + "\n" + inputView
@@ -1906,14 +2491,10 @@ func (m Model) View() tea.View {
 		mpHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ model select: ↑/↓ navigate · enter select · esc close")
 		inputView = mpHint + "\n" + inputView
 	} else if m.sessionFocus {
-		// Deprecated compat: old inline focus hint still renders if set via legacy path
 		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · esc/ctrl+g back")
 		inputView = focusHint + "\n" + inputView
 	}
-
 	compPal := toCompPalette(m.palette)
-
-	// Footer: show "more below" hint when viewport not at bottom (stick-to-bottom)
 	showMoreBelow := false
 	if len(m.entries) > 0 && !m.viewport.AtBottom() {
 		showMoreBelow = true
@@ -1923,34 +2504,38 @@ func (m Model) View() tea.View {
 		footerHint = "session focus"
 	} else if m.modelPanelVisible {
 		footerHint = "model select"
+	} else if m.railPanel != "" {
+		footerHint = m.railPanel + " panel"
 	}
-	toastWithHint := m.toast
-	if showMoreBelow && m.toast == "" {
-		// Footer hint via MoreBelow field is handled in FooterModel; keep toast clean
+	if m.railPanel != "" && footerHint == "" {
+		footerHint = m.railPanel
 	}
-
+	if !m.mouseCapture {
+		if footerHint != "" {
+			footerHint += " · mouse off"
+		} else {
+			footerHint = "mouse off"
+		}
+	}
 	footer := components.FooterModel{
 		Palette:       compPal,
 		Width:         m.width,
 		Cwd:           m.cwd,
 		SessionID:     m.sessionID,
 		DaemonAddr:    m.daemonAddr,
-		Version:       m.daemonVers,
-		Toast:         toastWithHint,
+		Toast:         m.toast,
 		DaemonErr:     m.daemonErr,
 		ShowSpinner:   m.spinner,
 		SpinnerView:   m.spinnerModel.View(),
-		Layout:        m.layout,
+		Layout:        m.footerLayoutLabel(),
 		ModelName:     m.currentModel,
 		Tokens:        m.totalTokens,
 		ShowMoreBelow: showMoreBelow,
 		FocusHint:     footerHint,
 	}.Render()
-
-	// Sidebar redesign TUI-6: three sections — Context & tokens, Plugins & skills, Turn stats.
-	// Documented limitation: context window % requires daemon-side token accounting; TUI shows
-	// "turns in window: N" from local entries (cheaply available) and omits compaction status
-	// (not cheaply available via existing RPC). This is honest about what exists.
+	// Separator above input (accent)
+	separator := m.renderSeparator()
+	// Sidebar / rail data (M2: same three cards as TUI-6 sidebar, now in permanent rail)
 	avgLatencyStr := ""
 	if m.latencyCount > 0 {
 		avgMs := m.latencyTotalMs / int64(m.latencyCount)
@@ -1961,7 +2546,6 @@ func (m Model) View() tea.View {
 		}
 	}
 	turnsInWindow := len(m.entries)
-	// Heuristic: each turn has user+assistant; but we show raw entries as "turns in window" for honesty
 	sidebarData := components.SidebarData{
 		Palette:       compPal,
 		TotalTokens:   m.totalTokens,
@@ -1972,72 +2556,81 @@ func (m Model) View() tea.View {
 		Plugins:       m.plugins,
 		Skills:        m.skills,
 	}
+	railHeight := m.viewport.Height()
+	if railHeight < 5 {
+		railHeight = 5
+	}
 	sidebar := components.SidebarModel{
 		Data:   sidebarData,
-		Width:  28,
-		Height: m.height - 2, // approx
+		Width:  railWidth,
+		Height: railHeight,
 	}
-
-	var content string
-	switch m.layout {
-	case LayoutSession:
-		if m.showSidebar {
-			content = layouts.Session(sidebar, transcriptViewWithPending, inputView, footer)
-		} else {
-			content = layouts.Minimal(transcriptViewWithPending, inputView, footer)
-		}
-	case LayoutMinimal:
-		// Authoritative: Minimal always renders Minimal, never Hybrid, even if showSidebar true.
-		// This ensures three layouts are visually distinct at all times.
-		content = layouts.Minimal(transcriptViewWithPending, inputView, footer)
-	default: // hybrid
-		content = layouts.Hybrid(transcriptViewWithPending, inputView, footer, sidebar, m.showSidebar)
+	// Main row: transcript + optional rail. RenderColumnCapped hard-caps the
+	// rail box to EXACTLY railHeight rows (lipgloss Height is only a minimum,
+	// so uncapped card content would overflow and clip the footer).
+	var mainRow string
+	if m.showSidebar {
+		railView := sidebar.RenderColumnCapped()
+		mainRow = lipgloss.JoinHorizontal(lipgloss.Top, transcriptView, railView)
+	} else {
+		mainRow = transcriptView
 	}
-
-	// Help floating overlay (viewport) on top of base content
+	content := strings.Join([]string{titleBar, mainRow, separator, inputView, footer}, "\n")
+	// Floating overlays render OVER the bottom rows of the main row so they
+	// stay on screen: anything appended below the frame is cut off live and
+	// invisible. The frame keeps exactly terminal height; the overlay covers
+	// transcript rows (keyboard-driven; esc closes).
+	maxOverlayRows := len(strings.Split(mainRow, "\n"))
+	if maxOverlayRows < 3 {
+		maxOverlayRows = 3
+	}
+	float := func(box string) {
+		mainRow = floatOverlay(mainRow, box, maxOverlayRows)
+		content = strings.Join([]string{titleBar, mainRow, separator, inputView, footer}, "\n")
+	}
 	if m.helpVisible {
-		helpStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(m.palette.Border)).
-			Background(lipgloss.Color(m.palette.BGElevated)).
-			Width(m.width-4).
-			Height(m.height-4).
-			Padding(1, 1)
-		helpBox := helpStyle.Render(m.helpViewport.View())
-		// For deterministic TTY-free test, stack help below base with marker; real overlay would be centered.
-		content = content + "\n--- help overlay ---\n" + helpBox
+		helpLines := strings.Split(m.helpViewport.View(), "\n")
+		helpCap := maxOverlayRows - 4 // borders + padding
+		if helpCap < 1 {
+			helpCap = 1
+		}
+		if len(helpLines) > helpCap {
+			helpLines = helpLines[:helpCap]
+		}
+		helpStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Border)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(1, 1)
+		float(helpStyle.Render(strings.Join(helpLines, "\n")))
 	}
-	// Sessions dropdown floating overlay (like /help) — compact floating panel.
-	// Position: floating overlay stacked below base with marker for TTY-free determinism;
-	// real TUI would center it as a compact panel. Documented as floating overlay.
 	if m.sessionsDropdownVisible {
-		dropdown := m.renderSessionsDropdown()
-		boxStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(m.palette.Accent)).
-			Background(lipgloss.Color(m.palette.BGElevated)).
-			Padding(0, 1)
-		box := boxStyle.Render(dropdown)
-		content = content + "\n--- sessions dropdown ---\n" + box
+		dropdown := m.renderSessionsDropdown(maxOverlayRows)
+		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Accent)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+		float(boxStyle.Render(dropdown))
 	}
-	// Model selection floating panel (like /help)
 	if m.modelPanelVisible {
-		panel := m.renderModelPanel()
-		boxStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(m.palette.Accent)).
-			Background(lipgloss.Color(m.palette.BGElevated)).
-			Padding(0, 1)
-		box := boxStyle.Render(panel)
-		content = content + "\n--- model panel ---\n" + box
+		panel := m.renderModelPanel(maxOverlayRows)
+		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Accent)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+		float(boxStyle.Render(panel))
 	}
-
-	// Wrap with palette background
+	if m.railPanel != "" {
+		var panel string
+		switch m.railPanel {
+		case "context":
+			panel = m.renderContextPanel()
+		case "plugins":
+			panel = m.renderPluginsPanel()
+		case "turnstats":
+			panel = m.renderTurnStatsPanel()
+		}
+		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Accent)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+		float(boxStyle.Render(capLines(panel, maxOverlayRows-2)))
+	}
 	bg := lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BG)).Foreground(lipgloss.Color(m.palette.Text)).Width(m.width).Height(m.height).Render(content)
-
 	v := tea.NewView(bg)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	if m.mouseCapture {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = 0
+	}
 	return v
 }
 
@@ -2135,15 +2728,87 @@ func (m Model) loadAvailableModels() []string {
 	return out
 }
 
-func (m Model) renderSessionsDropdown() string {
-	if len(m.sessions) == 0 {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no sessions)")
+// floatOverlay places a pre-built overlay box over the bottom rows of the
+// main row (transcript area), keeping the frame exactly terminal height.
+// boxLines longer than maxRows fall back to replacing the whole area
+// (shouldn't happen: callers cap content before boxing so borders survive).
+func floatOverlay(mainRow, box string, maxRows int) string {
+	bl := strings.Split(box, "\n")
+	if len(bl) > maxRows {
+		bl = bl[:maxRows]
 	}
+	ml := strings.Split(mainRow, "\n")
+	if len(bl) >= len(ml) {
+		return strings.Join(bl, "\n")
+	}
+	copy(ml[len(ml)-len(bl):], bl)
+	return strings.Join(ml, "\n")
+}
+
+// windowRange returns the [start,end) slice of an n-item list to show around
+// idx within budget rows.
+func windowRange(n, idx, budget int) (start, end int) {
+	if budget < 1 {
+		budget = 1
+	}
+	if n <= 0 {
+		return 0, 0
+	}
+	if n <= budget {
+		return 0, n
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= n {
+		idx = n - 1
+	}
+	start = idx - budget/2
+	if start < 0 {
+		start = 0
+	}
+	end = start + budget
+	if end > n {
+		end = n
+		start = end - budget
+	}
+	return start, end
+}
+
+// capLines hard-caps text to max rows so a later box keeps intact borders.
+func capLines(s string, max int) string {
+	if max < 1 {
+		max = 1
+	}
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) <= max {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[:max-1], "\n") + "\n" + "…"
+}
+
+func (m Model) renderSessionsDropdown(maxRows int) string {
 	var sb strings.Builder
 	// Keep "Sessions ● focus" for backward compat with TUI-5 tests that assert this substring
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Sessions ● focus")
+	// Window the list so the panel fits the transcript area: title + hint
+	// take 2 rows, the caller box adds 2 border rows.
+	budget := maxRows - 4
+	if budget < 1 {
+		budget = 1
+	}
+	n := len(m.sessions)
+	start, end := windowRange(n, m.sessionsDropdownIdx, budget)
+	if n > budget {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(
+			fmt.Sprintf(" (%d/%d)", m.sessionsDropdownIdx+1, n))
+	}
 	sb.WriteString(title + "\n")
-	for i, s := range m.sessions {
+	if n == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no sessions)") + "\n")
+	}
+	for i := start; i < end; i++ {
+		s := m.sessions[i]
 		id := s.ID
 		if len(id) > 12 {
 			id = id[:12]
@@ -2182,15 +2847,28 @@ func (m Model) renderSessionsDropdown() string {
 	return sb.String()
 }
 
-func (m Model) renderModelPanel() string {
+func (m Model) renderModelPanel(maxRows int) string {
 	if len(m.modelPanelList) == 0 {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no models)")
 	}
 	var sb strings.Builder
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Select Model")
+	// Window the list so the panel fits the transcript area: title +
+	// deferred note + hint take 3 rows, the caller box adds 2 border rows.
+	budget := maxRows - 5
+	if budget < 1 {
+		budget = 1
+	}
+	n := len(m.modelPanelList)
+	start, end := windowRange(n, m.modelPanelIdx, budget)
+	if n > budget {
+		title += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(
+			fmt.Sprintf(" (%d/%d)", m.modelPanelIdx+1, n))
+	}
 	sb.WriteString(title + "\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("plugin-providers not listed yet (deferred)") + "\n")
-	for i, mdl := range m.modelPanelList {
+	for i := start; i < end; i++ {
+		mdl := m.modelPanelList[i]
 		line := "  " + mdl
 		if mdl == m.currentModel {
 			line = "● " + mdl
@@ -2204,6 +2882,259 @@ func (m Model) renderModelPanel() string {
 	}
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("↑/↓ navigate · enter select · esc close"))
 	return sb.String()
+}
+
+// --- TUI-7 rail panels (floating detail panels) ---
+
+func (m Model) renderContextPanel() string {
+	var sb strings.Builder
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Context & tokens")
+	sb.WriteString(title + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(fmt.Sprintf("session tokens: %s", formatTokens(m.totalTokens))) + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(fmt.Sprintf("turns in window: %d", len(m.entries))) + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(fmt.Sprintf("current model: %s", m.currentModel)) + "\n")
+	if m.currentModel == "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(model not set)") + "\n")
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("window % unavailable via RPC — shows local turns") + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("esc to close") + "\n")
+	return sb.String()
+}
+
+func (m Model) renderPluginsPanel() string {
+	var sb strings.Builder
+	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim))
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Plugins & skills")
+	sb.WriteString(title + "\n")
+	if len(m.plugins) == 0 && len(m.skills) == 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no plugins/skills)") + "\n")
+	} else {
+		for _, p := range m.plugins {
+			status := "disabled"
+			if p.Enabled {
+				status = "enabled"
+			}
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(p.Name) + " " + lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("["+status+"]") + "\n")
+		}
+		for _, s := range m.skills {
+			status := "disabled"
+			if s.Enabled {
+				status = "enabled"
+			}
+			line := textStyle.Render(s.Name) + " " + dimStyle.Render("["+status+"]")
+			if s.Category != "" {
+				line += " " + dimStyle.Render("("+s.Category+")")
+			}
+			sb.WriteString(line)
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("enable/disable via: forge plugin/skill CLI") + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("esc to close") + "\n")
+	return sb.String()
+}
+
+func (m Model) renderTurnStatsPanel() string {
+	var sb strings.Builder
+	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Turn stats")
+	sb.WriteString(title + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(fmt.Sprintf("turns: %d", m.turnCount)) + "\n")
+	avg := "—"
+	if m.latencyCount > 0 {
+		avgMs := m.latencyTotalMs / int64(m.latencyCount)
+		if avgMs < 1000 {
+			avg = fmt.Sprintf("%dms", avgMs)
+		} else {
+			avg = fmt.Sprintf("%.1fs", float64(avgMs)/1000)
+		}
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("avg latency: ") + lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(avg) + "\n")
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("last errors (last 5):") + "\n")
+	// Show lastError (single truncated last error) and toast history? For now show lastError only, plus count.
+	if m.lastError != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("  • "+truncateError(m.lastError, 60)) + "\n")
+	} else {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("  —") + "\n")
+	}
+	if m.toast != "" && m.toast != m.lastError {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("  • "+truncateError(m.toast, 60)) + "\n")
+	}
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("esc to close") + "\n")
+	return sb.String()
+}
+
+// --- Hit testing (pure functions for tests; documented fragility: Y mapping assumes fixed heights) ---
+
+// HitTestRail maps a click Y to a rail card identifier. Pure function for tests.
+// railTop is the Y where the rail column starts (after title bar), railHeight is its height.
+// Returns "" if outside rail.
+func HitTestRail(y, railTop, railHeight int) string {
+	if y < railTop || y >= railTop+railHeight {
+		return ""
+	}
+	rel := y - railTop
+	third := railHeight / 3
+	if third == 0 {
+		third = 1
+	}
+	if rel < third {
+		return "context"
+	}
+	if rel < 2*third {
+		return "plugins"
+	}
+	return "turnstats"
+}
+
+// HitTestFooter maps a click in the footer to a hotspot. Pure function.
+// footerTop is Y where footer starts, footerHeight is its height, width is terminal width.
+// X positions from the right edge: [copiar] is right-aligned (last ~8 cols
+// plus slack), then session ~20, then model ~20.
+// Returns "copy", "session", "model", or "".
+func HitTestFooter(x, y, footerTop, footerHeight, width int) string {
+	if y < footerTop || y >= footerTop+footerHeight {
+		return ""
+	}
+	// Approximate zones: rightmost 10 cols = copy, next 20 = session, next 20 = model
+	if width <= 0 {
+		return ""
+	}
+	if x >= width-10 {
+		return "copy"
+	}
+	if x >= width-30 {
+		return "session"
+	}
+	if x >= width-50 {
+		return "model"
+	}
+	return ""
+}
+
+func (m *Model) handleMouseClick(mouse tea.Mouse) {
+	x, y := mouse.X, mouse.Y
+	// Compute geometry: titleBar titleHeightRows, then main rail area, then separator, input, footer
+	titleH := titleHeightRows
+	transH := m.viewport.Height()
+	if transH <= 0 {
+		transH = m.height - titleHeightRows - 1 - 4 - m.measureFooterHeight(m.width)
+		if transH < 5 {
+			transH = 5
+		}
+	}
+	footerH := m.measureFooterHeight(m.width)
+	separatorY := titleH + transH
+	inputY := separatorY + 1
+	footerTop := inputY + 4
+	// Rail hit: only if visible and click in rail X region and Y in transcript range
+	if m.showSidebar {
+		railXStart := m.width - railWidth
+		if x >= railXStart && y >= titleH && y < titleH+transH {
+			card := HitTestRail(y, titleH, transH)
+			if card != "" {
+				if m.railPanel == card {
+					m.railPanel = ""
+				} else {
+					m.railPanel = card
+				}
+				return
+			}
+		}
+	}
+	// Footer hotspots
+	if y >= footerTop && y < footerTop+footerH {
+		hotspot := HitTestFooter(x, y, footerTop, footerH, m.width)
+		switch hotspot {
+		case "session":
+			// Clicking session id opens sessions dropdown (closes model panel: exclusive)
+			m.modelPanelVisible = false
+			if len(m.sessions) > 0 {
+				if m.sessionsDropdownVisible {
+					m.sessionsDropdownVisible = false
+					m.sessionFocus = false
+					m.input.Focus()
+				} else {
+					m.sessionsDropdownVisible = true
+					m.sessionFocus = true
+					idx := 0
+					for i, s := range m.sessions {
+						if s.ID == m.sessionID {
+							idx = i
+							break
+						}
+					}
+					m.sessionsDropdownIdx = idx
+					m.sessionFocusIdx = idx
+					m.input.Blur()
+				}
+			} else {
+				m.toast = "no sessions"
+			}
+			m.relayout()
+			return
+		case "model":
+			// Clicking model name opens /model panel (closes dropdown: exclusive)
+			m.sessionsDropdownVisible = false
+			m.sessionFocus = false
+			list := m.loadAvailableModels()
+			if len(list) == 0 {
+				m.toast = "no models configured"
+				m.relayout()
+				return
+			}
+			m.modelPanelList = list
+			m.modelPanelIdx = 0
+			m.modelPanelVisible = true
+			m.relayout()
+			return
+		case "copy":
+			// Clicking [copiar] copies the last assistant response.
+			// Non-modal: panels and focus stay as they are.
+			m.copyLastResponse()
+			return
+		}
+	}
+}
+
+// mergeSidecarDurations merges persisted per-turn durations from the sidecar
+// into reloaded assistant entries: Meta becomes "<model> · <elapsed>" when
+// empty, or appends " · <elapsed>" when Meta already exists (e.g. "tokens N").
+// Pure function: no model state mutation, safe to test directly.
+func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64, sessionID, currentModel string) []components.Entry {
+	if sessionID == "" || len(sidecar) == 0 || len(entries) == 0 {
+		return entries
+	}
+	for i, e := range entries {
+		if e.Role != "assistant" || e.IsTool || e.Seq == 0 {
+			continue
+		}
+		durMs, ok := sidecar[sidecarKey(sessionID, e.Seq)]
+		if !ok {
+			continue
+		}
+		elapsedStr := formatDurationMs(durMs)
+		switch {
+		case e.Meta == "":
+			if currentModel != "" {
+				entries[i].Meta = currentModel + " · " + elapsedStr
+			} else {
+				entries[i].Meta = elapsedStr
+			}
+		case !strings.Contains(e.Meta, elapsedStr):
+			entries[i].Meta = e.Meta + " · " + elapsedStr
+		}
+	}
+	return entries
+}
+
+// formatDurationMs renders a duration in ms for Meta lines ("123ms" under a
+// second, "1.2s" above). Shared by live elapsed injection and sidecar merge.
+func formatDurationMs(durMs int64) string {
+	if durMs < 1000 {
+		return fmt.Sprintf("%dms", durMs)
+	}
+	return fmt.Sprintf("%.1fs", float64(durMs)/1000)
 }
 
 
