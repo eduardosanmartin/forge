@@ -100,6 +100,9 @@ func ResolveDaemonAddr(explicit string) (string, error) {
 type Client struct {
 	url      string
 	addr     string
+	// explicitAddr is the raw addr argument from Connect (""
+	// means it was resolved from ~/.forge/daemon.addr).
+	explicitAddr string
 	logger   *slog.Logger
 	lifeCtx  context.Context
 	lifeStop context.CancelFunc
@@ -141,9 +144,10 @@ func Connect(ctx context.Context, addr string) (*Client, error) {
 
 	lifeCtx, lifeStop := context.WithCancel(context.Background())
 	c := &Client{
-		addr:     resolved,
-		url:      "ws://" + resolved + "/ws",
-		logger:   logger,
+		addr:         resolved,
+		url:          "ws://" + resolved + "/ws",
+		explicitAddr: strings.TrimSpace(addr),
+		logger:       logger,
 		lifeCtx:  lifeCtx,
 		lifeStop: lifeStop,
 		connWait: make(chan struct{}),
@@ -261,6 +265,18 @@ func (c *Client) reconnect() *websocket.Conn {
 		}
 		waited += backoff
 		backoff = min(backoff*2, reconnectMax)
+
+		// A restarted daemon listens on a new port: re-resolve the addr
+		// file (unless an explicit addr was given) so reconnect follows
+		// restarts instead of hammering the dead port until the budget
+		// runs out ("daemon unreachable for 30s" on a live daemon).
+		if c.explicitAddr == "" {
+			if resolved, rerr := ResolveDaemonAddr(""); rerr == nil && resolved != "" && resolved != c.addr {
+				c.addr = resolved
+				c.url = "ws://" + resolved + "/ws"
+				c.logger.Info("daemon addr changed, following restart", "addr", c.addr)
+			}
+		}
 
 		dialCtx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 		conn, _, err := websocket.Dial(dialCtx, c.url, nil)

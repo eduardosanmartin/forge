@@ -301,3 +301,63 @@ func connectRaw(t *testing.T, addr string) *Client {
 	t.Cleanup(func() { _ = cl.Close() })
 	return cl
 }
+
+// TestClientFollowsDaemonRestart is the retest-9 regression test: when the
+// daemon restarts on a new port (new daemon.addr), a file-resolved client
+// must follow it instead of hammering the dead port for 30s ("daemon
+// unreachable" on a live daemon).
+func TestClientFollowsDaemonRestart(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("USERPROFILE", tmp)
+	t.Setenv("HOME", tmp)
+	forgeDir := filepath.Join(tmp, ".forge")
+	if err := os.MkdirAll(forgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	addrFile := filepath.Join(forgeDir, "daemon.addr")
+	writeAddr := func(addr string) {
+		t.Helper()
+		if err := os.WriteFile(addrFile, []byte(addr+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rwA := newRawWSServer(t)
+	writeAddr(rwA.addr)
+	cl, err := Connect(context.Background(), "")
+	if err != nil {
+		t.Fatalf("connect via file: %v", err)
+	}
+	t.Cleanup(func() { _ = cl.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var res struct {
+		Echo bool `json:"echo"`
+	}
+	if err := cl.Call(ctx, "before.restart", nil, &res); err != nil || !res.Echo {
+		t.Fatalf("pre-restart call failed: %v", err)
+	}
+
+	// Daemon restart: old listener fully gone (refused), new server on a
+	// new port, addr file rewritten — exactly what `forge serve` does.
+	rwA.dropAll()
+	rwA.srv.Close()
+	rwB := newRawWSServer(t)
+	writeAddr(rwB.addr)
+
+	// The client must follow the restart and serve new calls.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := cl.Call(cctx, "after.restart", nil, &res)
+		ccancel()
+		if err == nil && res.Echo {
+			break // followed the restart
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client never followed daemon restart: last error %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
