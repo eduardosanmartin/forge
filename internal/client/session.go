@@ -42,6 +42,15 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (*daemon.Sess
 	return &result, nil
 }
 
+// BranchSession creates a branch from sourceID at atSeq.
+func (c *Client) BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (*daemon.SessionResult, error) {
+	var result daemon.SessionResult
+	if err := c.Call(ctx, daemon.MethodBranchSession, daemon.BranchSessionParams{SourceSessionID: sourceID, AtSeq: atSeq, Metadata: metadata}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // MarkSuccess marks a session as human-verified successful.
 func (c *Client) MarkSuccess(ctx context.Context, sessionID string) error {
 	var result map[string]any

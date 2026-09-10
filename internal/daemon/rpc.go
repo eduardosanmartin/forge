@@ -109,6 +109,7 @@ const (
 	MethodGetSession       = "session.get"
 	MethodListSessions     = "session.list"
 	MethodDeleteSession    = "session.delete"
+	MethodBranchSession    = "session.branch"
 	MethodExecuteTurn      = "session.execute_turn"
 	MethodGetMessages      = "session.get_messages"
 	MethodGetMessagesSince = "session.get_messages_since"
@@ -188,6 +189,13 @@ type ResumeSessionParams struct {
 type SwitchModelParams struct {
 	SessionID string `json:"session_id"` // session whose metadata records the choice
 	Model     string `json:"model"`
+}
+
+// BranchSessionParams for session.branch.
+type BranchSessionParams struct {
+	SourceSessionID string         `json:"source_session_id"`
+	AtSeq           int            `json:"at_seq,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 // SessionMarkSuccessParams for session.mark_success.

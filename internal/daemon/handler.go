@@ -42,6 +42,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleListSessions(ctx, req)
 	case MethodDeleteSession:
 		return h.handleDeleteSession(ctx, req)
+	case MethodBranchSession:
+		return h.handleBranchSession(ctx, req)
 	case MethodExecuteTurn:
 		return h.handleExecuteTurn(ctx, req)
 	case MethodGetMessages:
@@ -168,6 +170,36 @@ func (h *Handler) handleDeleteSession(ctx context.Context, req *JSONRPCRequest) 
 	}
 
 	return h.resultResponse(req.ID, map[string]any{"deleted": true})
+}
+
+func (h *Handler) handleBranchSession(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BranchSessionParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SourceSessionID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "source_session_id is required", nil)
+	}
+	if params.AtSeq < 0 {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "at_seq must be >= 0", nil)
+	}
+	session, err := h.mgr.BranchSession(ctx, params.SourceSessionID, params.AtSeq, params.Metadata)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "source session not found", nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "branch session failed", err.Error())
+	}
+	result := SessionResult{
+		ID:        session.ID,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.UpdatedAt,
+		Metadata:  session.Metadata,
+	}
+	if msgs, err := h.mgr.GetMessagesSince(ctx, session.ID, 0); err == nil {
+		result.MessageCount = len(msgs)
+	}
+	return h.resultResponse(req.ID, result)
 }
 
 func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {

@@ -102,6 +102,10 @@ func (r *REPL) Run(ctx context.Context) error {
 			r.cmdNew(ctx)
 		case strings.HasPrefix(line, "/attach"):
 			r.cmdAttach(ctx, line)
+		case strings.HasPrefix(line, "/branch"):
+			r.cmdBranch(ctx, line)
+		case strings.HasPrefix(line, "/switch"):
+			r.cmdSwitch(ctx, line)
 		case line == "/success" || strings.HasPrefix(line, "/success "):
 			r.cmdSuccess(ctx, line)
 		case strings.HasPrefix(line, "/halt"):
@@ -157,9 +161,11 @@ func (r *REPL) drainEvents(ch <-chan daemon.JSONRPCNotification) {
 func (r *REPL) printHelp() {
 	r.writeln("Commands:")
 	r.writeln("  /model <name>   hot-swap the default LLM model")
-	r.writeln("  /sessions       list sessions")
+	r.writeln("  /sessions       list sessions (branch parent shown)")
 	r.writeln("  /new            start a new session")
 	r.writeln("  /attach <id>    switch to an existing session (replays last messages)")
+	r.writeln("  /branch [at]    branch current session (optional at seq)")
+	r.writeln("  /switch <id>    switch to a branch/session")
 	r.writeln("  /success        mark current session as successful (human gate)")
 	r.writeln("  /halt [id]      emergency-halt current or given session")
 	r.writeln("  /resume <id>    resume a halted session")
@@ -198,15 +204,80 @@ func (r *REPL) cmdSessions(ctx context.Context) {
 		r.writef("error: %v\n", err)
 		return
 	}
-	r.writef("%-38s %-17s %6s %s\n", "SESSION", "CREATED", "MSGS", "MODEL")
+	r.writef("%-38s %-17s %6s %-10s %s\n", "SESSION", "CREATED", "MSGS", "BRANCH", "MODEL")
 	for _, s := range res.Sessions {
 		model := "-"
 		if m, ok := s.Metadata["model"].(string); ok && m != "" {
 			model = m
 		}
-		r.writef("%-38s %-17s %6d %s\n",
-			s.ID, formatTimestamp(s.CreatedAt), s.MessageCount, model)
+		branch := "-"
+		if p, ok := s.Metadata["branch_parent"].(string); ok && p != "" {
+			if len(p) > 8 {
+				branch = p[:8]
+			} else {
+				branch = p
+			}
+		}
+		r.writef("%-38s %-17s %6d %-10s %s\n",
+			s.ID, formatTimestamp(s.CreatedAt), s.MessageCount, branch, model)
 	}
+}
+
+func (r *REPL) cmdBranch(ctx context.Context, line string) {
+	atSeq := 0
+	if arg, ok := splitCommandArg(line); ok {
+		if n, err := parsePositiveInt(arg); err == nil {
+			atSeq = n
+		} else {
+			r.writef("usage: /branch [at_seq]\n")
+			return
+		}
+	}
+	if r.sessionID == "" {
+		r.writeln("no current session to branch")
+		return
+	}
+	var res daemon.SessionResult
+	if err := r.client.Call(ctx, daemon.MethodBranchSession,
+		daemon.BranchSessionParams{SourceSessionID: r.sessionID, AtSeq: atSeq}, &res); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	r.sessionID = res.ID
+	r.writef("branched to %s (at_seq=%d, msgs=%d)\n", res.ID, atSeq, res.MessageCount)
+}
+
+func (r *REPL) cmdSwitch(ctx context.Context, line string) {
+	arg, ok := splitCommandArg(line)
+	if !ok {
+		r.writeln("usage: /switch <id>")
+		return
+	}
+	var sess daemon.SessionResult
+	if err := r.client.Call(ctx, daemon.MethodGetSession,
+		daemon.GetSessionParams{SessionID: arg}, &sess); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	r.sessionID = arg
+	r.writef("switched to %s\n", arg)
+	// Replay last messages for context.
+	var msgs daemon.GetMessagesResult
+	if err := r.client.Call(ctx, daemon.MethodGetMessages,
+		daemon.GetMessagesParams{SessionID: arg, Limit: replHistoryReplay}, &msgs); err == nil {
+		for _, m := range msgs.Messages {
+			r.writef("[%s] %s\n", m.Role, oneLine(m.Content))
+		}
+	}
+}
+
+func parsePositiveInt(s string) (int, error) {
+	var n int
+	_, err := fmt.Sscanf(s, "%d", &n)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid int %q", s)
+	}
+	return n, nil
 }
 
 func (r *REPL) cmdNew(ctx context.Context) {
