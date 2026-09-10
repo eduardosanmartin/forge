@@ -90,8 +90,11 @@ func TestRegistry_Execute_UnknownTool(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.Content != "ERROR: unknown tool unknown.tool" {
+	if !contains(result.Content, "ERROR: unknown tool unknown.tool") {
 		t.Errorf("Expected error for unknown tool, got: %s", result.Content)
+	}
+	if !contains(result.Content, "(available:") {
+		t.Errorf("Unknown-tool error should list available tools, got: %s", result.Content)
 	}
 }
 
@@ -104,7 +107,7 @@ func TestRegistry_Execute_SchemaValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Content != "ERROR: schema validation: path: required field is missing" {
+	if !contains(result.Content, "ERROR: schema validation: path: required field is missing") {
 		t.Errorf("Expected missing field error, got: %s", result.Content)
 	}
 

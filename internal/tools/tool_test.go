@@ -203,6 +203,26 @@ func TestValidateArgs(t *testing.T) {
 	}
 }
 
+// TestValidateArgs_MissingFieldIncludesDescription verifies the retest-4
+// fix: a missing required field error carries the field's schema description
+// so the model can self-correct (e.g. fs_list without path).
+func TestValidateArgs_MissingFieldIncludesDescription(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string", "description": "Path to list"},
+		},
+		"required": []any{"path"},
+	}
+	err := ValidateArgs(schema, map[string]any{})
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+	if !contains(err.Error(), "path") || !contains(err.Error(), "Path to list") {
+		t.Errorf("Error should name the field and its hint, got: %v", err)
+	}
+}
+
 // TestBuildPermsRequest tests the BuildPermsRequest function.
 func TestBuildPermsRequest(t *testing.T) {
 	tests := []struct {

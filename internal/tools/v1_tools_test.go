@@ -261,9 +261,9 @@ func TestRegistry_Execute_CustomToolsCleanErrorsOnBadInput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Execute(%s): %v", tc.tool, err)
 			}
-			if res.Content != tc.wantText {
-				t.Errorf("Execute(%s) = %q, want %q", tc.tool, res.Content, tc.wantText)
-			}
+		if !contains(res.Content, tc.wantText) {
+			t.Errorf("Execute(%s) = %q, want substring %q", tc.tool, res.Content, tc.wantText)
+		}
 		})
 	}
 
@@ -313,7 +313,7 @@ func TestRegistryWithDeps_BaseToolBehaviorUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fs_read validation: %v", err)
 	}
-	if res.Content != "ERROR: schema validation: path: required field is missing" {
+	if !contains(res.Content, "ERROR: schema validation: path: required field is missing") {
 		t.Errorf("base schema validation changed: %s", res.Content)
 	}
 }

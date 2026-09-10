@@ -51,7 +51,21 @@ func ValidateArgs(schema map[string]any, args map[string]any) error {
 			continue
 		}
 		if _, exists := args[field]; !exists {
-			return &SchemaValidationError{Field: field, Msg: "required field is missing"}
+			// Include the field's schema description so the model can
+			// self-correct (e.g. fs_list without path gets the hint to use
+			// "." for the workspace root) instead of failing the turn.
+			hint := "required field is missing"
+			if props, _ := schema["properties"].(map[string]any); props != nil {
+				if ps, _ := props[field].(map[string]any); ps != nil {
+					if desc, _ := ps["description"].(string); desc != "" {
+						if len(desc) > 160 {
+							desc = desc[:157] + "..."
+						}
+						hint = "required field is missing (" + desc + ")"
+					}
+				}
+			}
+			return &SchemaValidationError{Field: field, Msg: hint}
 		}
 	}
 

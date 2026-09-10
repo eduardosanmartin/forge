@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/eduardosanmartin/forge/internal/anchor"
@@ -123,7 +124,12 @@ type PermRequestSource interface {
 func (r *Registry) Execute(ctx context.Context, name string, args map[string]any) (Result, error) {
 	tool, ok := r.Get(name)
 	if !ok {
-		return Result{Content: "ERROR: unknown tool " + name}, nil
+		// Name the available tools so the model can self-correct instead of
+		// guessing again: small models sometimes invent names (e.g. "tool").
+		r.mu.RLock()
+		available := append([]string(nil), r.toolOrder...)
+		r.mu.RUnlock()
+		return Result{Content: "ERROR: unknown tool " + name + " (available: " + strings.Join(available, ", ") + ")"}, nil
 	}
 
 	// 1. Validate args against JSON schema
