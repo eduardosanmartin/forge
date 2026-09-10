@@ -11,8 +11,9 @@ package version
 import "fmt"
 
 var (
-	// Version is the semantic version of this build; "0.0.0-dev" when unset.
-	Version = "0.0.0-dev"
+	// Version is the semantic version of this build; "v3" at v3 close (bare vN
+	// continuity with v2; see docs/EXIT-VERIFICATION-v3.md naming section).
+	Version = "v3"
 
 	// Commit identifies the source revision the binary was built from.
 	Commit = "none"
