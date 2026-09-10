@@ -60,9 +60,12 @@ type ModelForStepSelector interface {
 // OnDelta is called for each text delta when streaming; it is ignored when
 // streaming is disabled. The callback must be non-blocking; the agent does not
 // enforce ordering beyond sequential delta emission.
+// Timeout overrides the configured agent.max_turn_seconds for this turn when
+// positive; zero/negative keeps the configured default.
 type TurnOptions struct {
 	StreamingEnabled bool
 	OnDelta          func(delta string)
+	Timeout          time.Duration
 }
 
 // ChatStreamer matches providers/registries that support streaming.
@@ -80,6 +83,7 @@ type Agent struct {
 	store         StoreInterface
 	logger        *slog.Logger
 	maxIterations int
+	maxTurnSeconds int
 }
 
 // NewAgent creates a new Agent from configuration and dependencies.
@@ -98,6 +102,10 @@ func NewAgent(
 	if cfg != nil && cfg.Agent.MaxIterations > 0 {
 		maxIterations = cfg.Agent.MaxIterations
 	}
+	maxTurnSeconds := config.DefaultAgentMaxTurnSeconds
+	if cfg != nil && cfg.Agent.MaxTurnSeconds > 0 {
+		maxTurnSeconds = cfg.Agent.MaxTurnSeconds
+	}
 	return &Agent{
 		cfg:           cfg,
 		ctxAssembler:  NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
@@ -107,6 +115,7 @@ func NewAgent(
 		store:         store,
 		logger:        logger,
 		maxIterations: maxIterations,
+		maxTurnSeconds: maxTurnSeconds,
 	}
 }
 
@@ -114,6 +123,16 @@ func NewAgent(
 // context assembler. Intended to be called once at construction time.
 func (a *Agent) SetV1Deps(deps V1Deps) {
 	a.ctxAssembler.SetV1Deps(deps)
+}
+
+// timeoutError reports a turn timeout with the actionable config pointer,
+// mirroring the max_iterations message style. A non-deadline ctx error
+// (e.g. caller cancellation) is reported as-is.
+func (a *Agent) timeoutError(ctx context.Context, timeout time.Duration) error {
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("turn aborted: turn timeout after %s — raise agent.max_turn_seconds in .forge/config.json", timeout)
+	}
+	return fmt.Errorf("turn aborted: %w", ctx.Err())
 }
 
 // ExecuteTurn runs one complete turn: user message -> assistant -> tool calls -> ... -> final answer.
@@ -130,6 +149,19 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		Metrics: TurnMetrics{
 			StartTime: startTime,
 		},
+	}
+
+	// Turn timeout: the whole turn (store, LLM, tools) is bounded so a hung
+	// provider fails visibly instead of locking the caller forever. A
+	// positive per-turn override wins over the configured default.
+	timeout := time.Duration(a.maxTurnSeconds) * time.Second
+	if opts.Timeout > 0 {
+		timeout = opts.Timeout
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 
 	// Check if session is halted via metadata
@@ -178,6 +210,13 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		iterationCount++
 		if iterationCount > a.maxIterations {
 			result.Error = fmt.Errorf("turn aborted: agent reached max_iterations (%d) after %d iterations — raise agent.max_iterations in .forge/config.json", a.maxIterations, iterationCount-1)
+			result.Halted = true
+			break
+		}
+		// Belt-and-suspenders alongside ctx cancellation (which unblocks
+		// in-flight LLM/tool calls): fail fast without another round trip.
+		if ctx.Err() != nil {
+			result.Error = a.timeoutError(ctx, timeout)
 			result.Halted = true
 			break
 		}
@@ -240,7 +279,11 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		totalLLMTimeMs += llmElapsed
 
 		if err != nil {
-			result.Error = fmt.Errorf("llm chat: %w", err)
+			if ctx.Err() == context.DeadlineExceeded {
+				result.Error = a.timeoutError(ctx, timeout)
+			} else {
+				result.Error = fmt.Errorf("llm chat: %w", err)
+			}
 			result.Halted = true
 			break
 		}
@@ -418,6 +461,35 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 // consumeStream assembles text and tool calls from a StreamChunk channel.
 // It forwards each text delta to onDelta when non-nil.
 // A chunk with Error != "" is treated as terminal mid-stream failure.
+// mergeToolCallDelta folds one streamed tool-call fragment into the
+// accumulated list. OpenAI-style streaming sends a call across chunks: the
+// first carries id/name, follow-ups carry only argument slices with an empty
+// name. Appending fragments verbatim executed half-calls (fs_list with no
+// args → schema ERROR, plus an unnamed call → unknown-tool ERROR) so the
+// real call never ran. An empty-name fragment continues the last open entry
+// while its arguments are still incomplete JSON; a named fragment always
+// starts a new entry (parallel calls and pre-assembled provider calls are
+// never merged).
+func mergeToolCallDelta(calls []llm.ToolCall, frag llm.ToolCall) []llm.ToolCall {
+	if frag.Function.Name == "" && len(calls) > 0 {
+		last := &calls[len(calls)-1]
+		if last.Function.Name != "" && !json.Valid([]byte(last.Function.Arguments)) {
+			last.Function.Arguments += frag.Function.Arguments
+			if last.ID == "" {
+				last.ID = frag.ID
+			}
+			if last.Type == "" {
+				last.Type = frag.Type
+			}
+			return calls
+		}
+	}
+	return append(calls, frag)
+}
+
+// consumeStream assembles text and tool calls from a StreamChunk channel.
+// It forwards each text delta to onDelta when non-nil.
+// A chunk with Error != "" is treated as terminal mid-stream failure.
 // Context cancellation is respected and produces a context error.
 func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string)) (string, []llm.ToolCall, *llm.Usage, string, error) {
 	var (
@@ -456,7 +528,9 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 					}
 				}
 				if len(choice.Delta.ToolCalls) > 0 {
-					toolCalls = append(toolCalls, choice.Delta.ToolCalls...)
+					for _, frag := range choice.Delta.ToolCalls {
+						toolCalls = mergeToolCallDelta(toolCalls, frag)
+					}
 				}
 				if choice.FinishReason != nil && *choice.FinishReason != "" {
 					finishReason = *choice.FinishReason

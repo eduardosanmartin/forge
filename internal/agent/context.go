@@ -26,6 +26,14 @@ Redaction is applied to sensitive data (secrets, tokens, paths outside workspace
 
 When you need to use a tool, invoke it via the function calling mechanism.
 Do not simulate tool output or pretend tools succeeded — wait for actual results.
+Call ONLY tools from the provided tool list — never invent tool names. If you
+need a capability you do not see, say so in text instead of guessing a name.
+
+To list files, call fs_list with {"path": "."} for the workspace root. The
+path argument is always required for fs_* tools — never call them without it.
+
+If a tool call returns an ERROR, read the message, fix exactly what it names,
+and retry the corrected call. Do not abandon the task after one tool error.
 
 Optional arguments with a default: OMIT them entirely instead of inventing
 values (never guess directories such as /workspace or /tmp). If a call fails

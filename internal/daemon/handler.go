@@ -231,6 +231,8 @@ func summarizeTurn(result *ExecuteTurnResult) {
 	}
 
 	// Mark each trace entry OK/failed by matching the tool result content.
+	// A call with no recorded result (never executed) is NOT ok — the old
+	// default marked it successful, hiding streaming-fragment calls.
 	traceIdx := 0
 	for i := range result.Messages {
 		if result.Messages[i].Role != "assistant" {
@@ -238,8 +240,8 @@ func summarizeTurn(result *ExecuteTurnResult) {
 		}
 		for _, tc := range result.Messages[i].ToolCalls {
 			if traceIdx < len(result.ToolTrace) {
-				content := toolResults[tc.ID]
-				result.ToolTrace[traceIdx].OK = !strings.HasPrefix(content, "ERROR:")
+				content, found := toolResults[tc.ID]
+				result.ToolTrace[traceIdx].OK = found && !strings.HasPrefix(content, "ERROR:")
 				traceIdx++
 			}
 		}

@@ -158,14 +158,21 @@ const (
 
 // AgentConfig bounds the agent turn loop (TUI-6).
 // MaxIterations caps tool-call iterations per turn (default 10).
+// MaxTurnSeconds caps total wall-clock seconds per turn (default 300): a hung
+// provider fails the turn visibly instead of locking the UI forever.
 // Zero or negative values in a config file are invalid and fall back to
 // defaults (handled in mergeInto), matching the LimitsConfig pattern.
 type AgentConfig struct {
 	MaxIterations int `json:"max_iterations"`
+	MaxTurnSeconds int `json:"max_turn_seconds"`
 }
 
-// Default agent caps (TUI-6, owner decision).
+// Default agent caps (TUI-6, owner decision; timeout added retest-5).
 const DefaultAgentMaxIterations = 10
+
+// DefaultAgentMaxTurnSeconds bounds a turn at 5 minutes: well above healthy
+// slow turns on free tiers (~2min observed), far below a real hang.
+const DefaultAgentMaxTurnSeconds = 300
 
 // Config is the full forge configuration document.
 type Config struct {
@@ -210,7 +217,7 @@ func Defaults() *Config {
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
 		},
-		Agent: AgentConfig{MaxIterations: DefaultAgentMaxIterations},
+		Agent: AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds},
 	}
 }
 
@@ -270,7 +277,8 @@ type fileLimits struct {
 // merging can distinguish "field absent" from "field set to zero value".
 // Zero/negative values are treated as invalid and fall back to defaults.
 type fileAgent struct {
-	MaxIterations *int `json:"max_iterations"`
+	MaxIterations  *int `json:"max_iterations"`
+	MaxTurnSeconds *int `json:"max_turn_seconds"`
 }
 
 // fileConfig mirrors Config with presence-tracking pointers so that merging
@@ -368,6 +376,9 @@ func Load(filePaths ...string) (*Config, error) {
 	if cfg.Agent.MaxIterations <= 0 {
 		cfg.Agent.MaxIterations = DefaultAgentMaxIterations
 	}
+	if cfg.Agent.MaxTurnSeconds <= 0 {
+		cfg.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
+	}
 	return cfg, nil
 }
 
@@ -440,6 +451,14 @@ func mergeInto(dst *Config, fc *fileConfig) {
 				dst.Agent.MaxIterations = v
 			} else {
 				dst.Agent.MaxIterations = DefaultAgentMaxIterations
+			}
+		}
+		if fc.Agent.MaxTurnSeconds != nil {
+			v := *fc.Agent.MaxTurnSeconds
+			if v > 0 {
+				dst.Agent.MaxTurnSeconds = v
+			} else {
+				dst.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
 			}
 		}
 	}

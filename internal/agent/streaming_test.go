@@ -332,3 +332,67 @@ func streamContains(s, substr string) bool {
 		return false
 	})()
 }
+
+// TestConsumeStream_MergesToolCallFragments is the retest-4 regression test:
+// OpenAI-style streaming sends one call across chunks (name first, argument
+// slices after). Fragments must merge into a single call — verbatim appends
+// executed fs_list with no args plus an unnamed call, so the real call never
+// ran and the turn died empty.
+func TestConsumeStream_MergesToolCallFragments(t *testing.T) {
+	ctx := context.Background()
+	head := llm.ToolCall{ID: "call_1", Type: "function", Function: llm.ToolCallFunction{Name: "fs_list", Arguments: ""}}
+	tail := llm.ToolCall{Function: llm.ToolCallFunction{Arguments: `{"path":"."}`}}
+	fr := "tool_calls"
+	ch := make(chan llm.StreamChunk, 8)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{head}}}}}
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tail}}}}}
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
+	}()
+	_, calls, _, finish, err := consumeStream(ctx, ch, nil)
+	if err != nil {
+		t.Fatalf("consumeStream: %v", err)
+	}
+	if finish != "tool_calls" {
+		t.Fatalf("finish = %q, want tool_calls", finish)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("fragments should merge into 1 call, got %d: %+v", len(calls), calls)
+	}
+	if calls[0].Function.Name != "fs_list" {
+		t.Fatalf("merged name = %q, want fs_list", calls[0].Function.Name)
+	}
+	if calls[0].Function.Arguments != `{"path":"."}` {
+		t.Fatalf("merged args = %q, want path call", calls[0].Function.Arguments)
+	}
+	if calls[0].ID != "call_1" {
+		t.Fatalf("merged id = %q, want call_1", calls[0].ID)
+	}
+}
+
+// TestConsumeStream_KeepsDistinctCallsSeparate guards the merge: two named
+// calls (parallel) and pre-assembled provider calls must never fuse.
+func TestConsumeStream_KeepsDistinctCallsSeparate(t *testing.T) {
+	ctx := context.Background()
+	ch := make(chan llm.StreamChunk, 8)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{ID: "call_1", Type: "function", Function: llm.ToolCallFunction{Name: "fs_read", Arguments: `{"path":"a"}`}},
+				{ID: "call_2", Type: "function", Function: llm.ToolCallFunction{Name: "fs_read", Arguments: `{"path":"b"}`}},
+			},
+		}}}}
+		fr := "tool_calls"
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
+	}()
+	_, calls, _, _, err := consumeStream(ctx, ch, nil)
+	if err != nil {
+		t.Fatalf("consumeStream: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("distinct calls must stay separate, got %d: %+v", len(calls), calls)
+	}
+}
