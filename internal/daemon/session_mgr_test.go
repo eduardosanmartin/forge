@@ -98,6 +98,54 @@ func (m *testStore) DeleteSession(ctx context.Context, id string) error {
 	return nil
 }
 
+func (m *testStore) BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src, ok := m.sessions[sourceID]
+	if !ok {
+		return store.Session{}, store.ErrSessionNotFound
+	}
+	if atSeq < 0 {
+		return store.Session{}, fmt.Errorf("branch: atSeq must be >= 0")
+	}
+	merged := map[string]any{}
+	for k, v := range src.Metadata {
+		merged[k] = v
+	}
+	if metadata != nil {
+		for k, v := range metadata {
+			merged[k] = v
+		}
+	}
+	merged["branch_parent"] = src.ID
+	merged["branch_at_seq"] = atSeq
+	if root, ok := src.Metadata["branch_root"]; ok {
+		merged["branch_root"] = root
+	} else {
+		merged["branch_root"] = src.ID
+	}
+	id := "test-session-" + randomID()
+	branched := store.Session{ID: id, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli(), Metadata: merged}
+	m.sessions[id] = branched
+	// Copy messages up to atSeq (0 = all)
+	srcMsgs := m.messages[sourceID]
+	var toCopy []store.Message
+	for _, msg := range srcMsgs {
+		if atSeq == 0 || msg.Seq <= atSeq {
+			toCopy = append(toCopy, msg)
+		}
+	}
+	for _, msg := range toCopy {
+		cp := msg
+		cp.SessionID = id
+		cp.Seq = len(m.messages[id]) + 1
+		cp.ID = int64(cp.Seq)
+		cp.CreatedAt = time.Now().UnixMilli()
+		m.messages[id] = append(m.messages[id], cp)
+	}
+	return branched, nil
+}
+
 func (m *testStore) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -568,5 +616,68 @@ func TestSessionManagerExecuteTurnSkipsIndexingWhenRetrievalDisabled(t *testing.
 
 	if got := retriever.Len(); got != 0 {
 		t.Errorf("retriever indexed %d chunks with retrieval disabled, want 0", got)
+	}
+}
+
+func TestSessionManagerBranchSession(t *testing.T) {
+	tests := []struct {
+		name  string
+		atSeq int
+		want  int
+	}{
+		{name: "full copy", atSeq: 0, want: 2},
+		{name: "partial at 1", atSeq: 1, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := slog.New(slog.DiscardHandler)
+			store := newTestStore()
+			llmReg := newTestLLMRegistry()
+			toolsReg := newTestToolsRegistry()
+			emergency := NewEmergencyState(logger)
+			cfg := config.Defaults()
+			permsEng := newTestPermsEngine()
+			mgr := NewSessionManager(store, llmReg, toolsReg, emergency, logger, cfg, permsEng, store)
+			src, _ := mgr.CreateSession(context.Background(), nil)
+			if _, err := mgr.ExecuteTurn(context.Background(), src.ID, "hello"); err != nil {
+				t.Fatalf("execute turn: %v", err)
+			}
+			branched, err := mgr.BranchSession(context.Background(), src.ID, tt.atSeq, map[string]any{"note": "branch"})
+			if err != nil {
+				t.Fatalf("branch: %v", err)
+			}
+			if branched.ID == src.ID {
+				t.Fatal("branch id must differ")
+			}
+			if branched.Metadata["branch_parent"] != src.ID {
+				t.Errorf("branch_parent = %v, want %s", branched.Metadata["branch_parent"], src.ID)
+			}
+			msgs, _ := mgr.GetMessagesSince(context.Background(), branched.ID, 0)
+			if len(msgs) != tt.want {
+				t.Fatalf("branched messages: got %d, want %d", len(msgs), tt.want)
+			}
+			// Branches diverge independently.
+			if _, err := mgr.ExecuteTurn(context.Background(), branched.ID, "branch hello"); err != nil {
+				t.Fatalf("branch turn: %v", err)
+			}
+			srcMsgs, _ := mgr.GetMessagesSince(context.Background(), src.ID, 0)
+			if len(srcMsgs) != 2 {
+				t.Fatalf("src untouched: got %d, want 2", len(srcMsgs))
+			}
+			branchedMsgs, _ := mgr.GetMessagesSince(context.Background(), branched.ID, 0)
+			expected := tt.want + 2 // each turn adds user+assistant
+			if len(branchedMsgs) != expected {
+				t.Fatalf("branched after new turn: got %d, want %d", len(branchedMsgs), expected)
+			}
+		})
+	}
+}
+
+func TestSessionManagerBranchNotFound(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	store := newTestStore()
+	mgr := NewSessionManager(store, newTestLLMRegistry(), newTestToolsRegistry(), NewEmergencyState(logger), logger, config.Defaults(), newTestPermsEngine(), store)
+	if _, err := mgr.BranchSession(context.Background(), "nope", 0, nil); err == nil {
+		t.Fatal("expected error for missing source")
 	}
 }

@@ -115,6 +115,53 @@ func (f *fakeStore) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) BranchSession(_ context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	src, ok := f.sessions[sourceID]
+	if !ok {
+		return store.Session{}, store.ErrSessionNotFound
+	}
+	if atSeq < 0 {
+		return store.Session{}, fmt.Errorf("branch: atSeq must be >= 0")
+	}
+	merged := map[string]any{}
+	for k, v := range src.Metadata {
+		merged[k] = v
+	}
+	if metadata != nil {
+		for k, v := range metadata {
+			merged[k] = v
+		}
+	}
+	merged["branch_parent"] = src.ID
+	merged["branch_at_seq"] = atSeq
+	if root, ok := src.Metadata["branch_root"]; ok {
+		merged["branch_root"] = root
+	} else {
+		merged["branch_root"] = src.ID
+	}
+	f.nextSess++
+	id := fmt.Sprintf("sess-%03d", f.nextSess)
+	branched := store.Session{ID: id, CreatedAt: time.Now().UnixMilli(), UpdatedAt: time.Now().UnixMilli(), Metadata: merged}
+	f.sessions[id] = branched
+	f.order = append(f.order, id)
+	srcMsgs := f.msgs[sourceID]
+	for _, m := range srcMsgs {
+		if atSeq != 0 && m.Seq > atSeq {
+			continue
+		}
+		cp := m
+		cp.SessionID = id
+		f.nextMsgID++
+		cp.ID = f.nextMsgID
+		cp.Seq = len(f.msgs[id]) + 1
+		cp.CreatedAt = time.Now().UnixMilli()
+		f.msgs[id] = append(f.msgs[id], cp)
+	}
+	return branched, nil
+}
+
 func (f *fakeStore) AppendMessage(_ context.Context, msg *store.Message) (int, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

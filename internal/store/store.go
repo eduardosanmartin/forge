@@ -156,6 +156,74 @@ func (s *Store) CreateSession(ctx context.Context, metadata map[string]any) (Ses
 	}, nil
 }
 
+// BranchSession creates a new session branched from sourceID.
+// When atSeq > 0 only messages with seq <= atSeq are copied; when atSeq == 0
+// the full transcript is copied. Branch lineage is recorded in metadata
+// ("branch_parent", "branch_at_seq").
+func (s *Store) BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (Session, error) {
+	source, err := s.GetSession(ctx, sourceID)
+	if err != nil {
+		return Session{}, err
+	}
+	msgs, err := s.GetMessagesSince(ctx, sourceID, 0)
+	if err != nil {
+		return Session{}, fmt.Errorf("branch: read source messages: %w", err)
+	}
+	// Filter by atSeq when requested.
+	if atSeq > 0 {
+		filtered := msgs[:0]
+		for _, m := range msgs {
+			if m.Seq <= atSeq {
+				filtered = append(filtered, m)
+			}
+		}
+		msgs = filtered
+	} else if atSeq < 0 {
+		return Session{}, fmt.Errorf("branch: atSeq must be >= 0")
+	}
+
+	// Merge metadata: start from source metadata, layer caller metadata, then lineage.
+	merged := map[string]any{}
+	for k, v := range source.Metadata {
+		merged[k] = v
+	}
+	if metadata != nil {
+		for k, v := range metadata {
+			merged[k] = v
+		}
+	}
+	merged["branch_parent"] = source.ID
+	merged["branch_at_seq"] = atSeq
+	// Preserve original root lineage if source itself was a branch.
+	if root, ok := source.Metadata["branch_root"]; ok {
+		merged["branch_root"] = root
+	} else {
+		merged["branch_root"] = source.ID
+	}
+
+	branched, err := s.CreateSession(ctx, merged)
+	if err != nil {
+		return Session{}, fmt.Errorf("branch: create session: %w", err)
+	}
+	// Copy messages preserving role/content/tool columns.
+	for _, m := range msgs {
+		cp := &Message{
+			SessionID:  branched.ID,
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+			Usage:      m.Usage,
+		}
+		if _, _, err := s.AppendMessage(ctx, cp); err != nil {
+			return Session{}, fmt.Errorf("branch: copy message seq %d: %w", m.Seq, err)
+		}
+	}
+	// Re-read to return fresh metadata/timestamps after copies.
+	return s.GetSession(ctx, branched.ID)
+}
+
 // GetSession retrieves a session by ID.
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	var session Session

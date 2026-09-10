@@ -23,6 +23,7 @@ type StoreInterface interface {
 	UpdateSessionMetadata(ctx context.Context, id string, metadata map[string]any) error
 	ListSessions(ctx context.Context, limit, offset int) ([]store.Session, error)
 	DeleteSession(ctx context.Context, id string) error
+	BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error)
 	AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error)
 	GetMessages(ctx context.Context, sessionID string, limit, offset int) ([]store.Message, error)
 	GetMessagesSince(ctx context.Context, sessionID string, sinceSeq int) ([]store.Message, error)
@@ -156,6 +157,18 @@ func (m *SessionManager) GetSession(ctx context.Context, id string) (store.Sessi
 		return store.Session{}, false
 	}
 	return session, true
+}
+
+// BranchSession creates a new session branched from sourceID at atSeq.
+func (m *SessionManager) BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error) {
+	session, err := m.store.BranchSession(ctx, sourceID, atSeq, metadata)
+	if err != nil {
+		return store.Session{}, err
+	}
+	if m.logger != nil {
+		m.logger.Info("session branched", "source_id", sourceID, "branch_id", session.ID, "at_seq", atSeq)
+	}
+	return session, nil
 }
 
 // ListSessions returns all sessions.
