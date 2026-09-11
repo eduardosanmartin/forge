@@ -50,5 +50,8 @@
   "agent": {
     "max_iterations": 10,
     "max_turn_seconds": 300
+  },
+  "project": {
+    "sensitivity": "general"
   }
 }

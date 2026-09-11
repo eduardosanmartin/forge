@@ -174,6 +174,21 @@ const DefaultAgentMaxIterations = 10
 // slow turns on free tiers (~2min observed), far below a real hang.
 const DefaultAgentMaxTurnSeconds = 300
 
+// ProjectConfig holds project sensitivity classification (RNF-9).
+// Sensitivity is a ceiling on autonomy (general | regulado | datos-sensibles).
+// Canonical values are the spec's Spanish terms; English aliases low/medium/high
+// and regulated/sensitive are normalized to the canonical forms on Validate/Load.
+type ProjectConfig struct {
+	Sensitivity string `json:"sensitivity"`
+}
+
+// Sensitivity canonical values (RNF-9.1, spec §7.2).
+const (
+	SensitivityGeneral   = "general"
+	SensitivityRegulated = "regulado"
+	SensitivitySensitive = "datos-sensibles"
+)
+
 // Config is the full forge configuration document.
 type Config struct {
 	SchemaVersion   int                 `json:"schema_version"`
@@ -187,6 +202,7 @@ type Config struct {
 	LLM             LLMConfig           `json:"llm"`
 	Limits          LimitsConfig        `json:"limits"`
 	Agent           AgentConfig         `json:"agent"`
+	Project         ProjectConfig       `json:"project"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -217,7 +233,8 @@ func Defaults() *Config {
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
 		},
-		Agent: AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds},
+		Agent:   AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds},
+		Project: ProjectConfig{Sensitivity: SensitivityGeneral},
 	}
 }
 
@@ -295,6 +312,7 @@ type fileConfig struct {
 	LLM             *LLMConfig          `json:"llm"`
 	Limits          *fileLimits         `json:"limits"`
 	Agent           *fileAgent          `json:"agent"`
+	Project         *ProjectConfig      `json:"project"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -379,6 +397,12 @@ func Load(filePaths ...string) (*Config, error) {
 	if cfg.Agent.MaxTurnSeconds <= 0 {
 		cfg.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
 	}
+	// Normalize sensitivity alias to canonical form and default empty to general.
+	if normalized, ok := normalizeSensitivity(cfg.Project.Sensitivity); ok {
+		cfg.Project.Sensitivity = normalized
+	} else if strings.TrimSpace(cfg.Project.Sensitivity) == "" {
+		cfg.Project.Sensitivity = SensitivityGeneral
+	}
 	return cfg, nil
 }
 
@@ -461,6 +485,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 				dst.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
 			}
 		}
+	}
+	if fc.Project != nil {
+		dst.Project = *fc.Project
 	}
 }
 
@@ -674,7 +701,100 @@ func (c *Config) Validate() error {
 
 	violations = append(violations, validatePermissions(c.Permissions)...)
 
+	if _, ok := normalizeSensitivity(c.Project.Sensitivity); !ok && strings.TrimSpace(c.Project.Sensitivity) != "" {
+		violations = append(violations, fmt.Errorf(
+			"project.sensitivity %q is invalid (allowed: %q, %q, %q — aliases: low, medium, high, regulated, sensitive)",
+			c.Project.Sensitivity, SensitivityGeneral, SensitivityRegulated, SensitivitySensitive))
+	} else if strings.TrimSpace(c.Project.Sensitivity) == "" {
+		c.Project.Sensitivity = SensitivityGeneral
+	} else if n, ok := normalizeSensitivity(c.Project.Sensitivity); ok {
+		c.Project.Sensitivity = n
+	}
+
 	return errors.Join(violations...)
+}
+
+// normalizeSensitivity canonicalizes sensitivity aliases to the spec's Spanish
+// values (RNF-9.1). Empty input is considered unknown; caller decides default.
+func normalizeSensitivity(s string) (string, bool) {
+	trimmed := strings.TrimSpace(strings.ToLower(s))
+	switch trimmed {
+	case "", "general", "low":
+		if trimmed == "" {
+			return "", false
+		}
+		return SensitivityGeneral, true
+	case "regulado", "regulated", "medium":
+		return SensitivityRegulated, true
+	case "datos-sensibles", "datos_sensibles", "datos sensibles", "sensitive", "high", "restricted":
+		return SensitivitySensitive, true
+	default:
+		return "", false
+	}
+}
+
+// SensitivityRank reports the maximum autonomy rank allowed for a given
+// sensitivity level. Higher rank means more autonomy. Used to enforce
+// RNF-9.2 ceiling: datos-sensibles hard-caps to supervised (1), regulado to
+// checkpoint (2), general to autonomous (3). dry_run (0) is always allowed.
+func SensitivityRank(s string) int {
+	n, ok := normalizeSensitivity(s)
+	if !ok {
+		if strings.TrimSpace(s) == "" {
+			n = SensitivityGeneral
+		} else {
+			return -1
+		}
+	}
+	switch n {
+	case SensitivitySensitive:
+		return 1 // supervised
+	case SensitivityRegulated:
+		return 2 // checkpoint
+	default:
+		return 3 // autonomous (general)
+	}
+}
+
+// AutonomyRank maps mode strings to increasing autonomy ranks.
+// Unknown mode returns -1.
+func AutonomyRank(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "dry_run", "dry-run":
+		return 0
+	case "supervised":
+		return 1
+	case "checkpoint":
+		return 2
+	case "autonomous":
+		return 3
+	default:
+		return -1
+	}
+}
+
+// ValidateAutonomyAgainstSensitivity enforces RNF-9.3: a manifest requesting
+// more autonomy than the project's sensitivity ceiling is rejected, never
+// silently degraded. It also enforces the regulado pre-merge guard: regulado
+// projects must declare a required pre-merge checkpoint.
+func ValidateAutonomyAgainstSensitivity(mode, sensitivity string, hasPreMergeRequired bool) error {
+	modeRank := AutonomyRank(mode)
+	if modeRank < 0 {
+		return fmt.Errorf("unknown autonomy mode %q", mode)
+	}
+	ceil := SensitivityRank(sensitivity)
+	if ceil < 0 {
+		return fmt.Errorf("unknown sensitivity %q", sensitivity)
+	}
+	if modeRank > ceil {
+		return fmt.Errorf("autonomy mode %q exceeds project sensitivity ceiling %q (max rank %d, requested %d) — RNF-9.3", mode, sensitivity, ceil, modeRank)
+	}
+	if normalized, _ := normalizeSensitivity(sensitivity); normalized == SensitivityRegulated && modeRank >= 2 {
+		if !hasPreMergeRequired {
+			return fmt.Errorf("project sensitivity %q requires a checkpoint with trigger before_merge and required:true (RNF-9.2)", sensitivity)
+		}
+	}
+	return nil
 }
 
 // validatePermissions checks the permissions section structurally. Glob
