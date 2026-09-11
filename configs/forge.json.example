@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "default_provider": "ollama",
   "providers": {
     "ollama": {
@@ -12,7 +12,12 @@
         "qwen2.5-coder:0.5b",
         "neolinschen/llama-coding:3b",
         "relational/VULCAN"
-      ]
+      ],
+      "model_roles": {
+        "cheap": "qwen2.5-coder:1.5b",
+        "generation": "qwen2.5-coder:7b",
+        "reasoning": "relational/VULCAN"
+      }
     }
   },
   "storage": {
@@ -29,5 +34,21 @@
     "fs": { "read": ["./**"], "write": ["./**"] },
     "shell": { "allow": ["go", "git"], "require_isolation": true },
     "git": { "allow": ["status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"] }
+  },
+  "tui": {
+    "layout": "hybrid",
+    "palette": "ember",
+    "sidebar": true
+  },
+  "llm": {
+    "streaming": false
+  },
+  "limits": {
+    "plugin_wasm_max_bytes": 2097152,
+    "skill_file_max_bytes": 1048576
+  },
+  "agent": {
+    "max_iterations": 10,
+    "max_turn_seconds": 300
   }
 }
