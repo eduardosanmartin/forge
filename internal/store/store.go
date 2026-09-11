@@ -224,6 +224,78 @@ func (s *Store) BranchSession(ctx context.Context, sourceID string, atSeq int, m
 	return s.GetSession(ctx, branched.ID)
 }
 
+// MergeBranch appends the source branch tail onto target.
+// Tail is all messages in source with seq > branch_at_seq (stored in
+// source metadata at branch time). When source is not a branch
+// (no branch_at_seq), the entire transcript is the tail (seq > 0).
+// Merge metadata (merged_from, merged_at, merged_count) is recorded on
+// target. Append is message-wise; seq numbers on target continue monotonic.
+func (s *Store) MergeBranch(ctx context.Context, sourceID, targetID string) (Session, error) {
+	if sourceID == targetID {
+		return Session{}, fmt.Errorf("merge: source and target must differ")
+	}
+	source, err := s.GetSession(ctx, sourceID)
+	if err != nil {
+		return Session{}, err
+	}
+	if _, err := s.GetSession(ctx, targetID); err != nil {
+		return Session{}, err
+	}
+	atSeq := branchAtSeq(source.Metadata)
+	tail, err := s.GetMessagesSince(ctx, sourceID, atSeq)
+	if err != nil {
+		return Session{}, fmt.Errorf("merge: read source tail: %w", err)
+	}
+	for _, m := range tail {
+		cp := &Message{
+			SessionID:  targetID,
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  m.ToolCalls,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+			Usage:      m.Usage,
+		}
+		if _, _, err := s.AppendMessage(ctx, cp); err != nil {
+			return Session{}, fmt.Errorf("merge: append seq %d: %w", m.Seq, err)
+		}
+	}
+	mergeMeta := map[string]any{
+		"merged_from":  sourceID,
+		"merged_at":    nowMs(),
+		"merged_count": len(tail),
+	}
+	if atSeq != 0 {
+		mergeMeta["merged_at_seq"] = atSeq
+	}
+	if err := s.UpdateSessionMetadata(ctx, targetID, mergeMeta); err != nil {
+		return Session{}, fmt.Errorf("merge: record metadata: %w", err)
+	}
+	return s.GetSession(ctx, targetID)
+}
+
+func branchAtSeq(meta map[string]any) int {
+	if meta == nil {
+		return 0
+	}
+	v, ok := meta["branch_at_seq"]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
 // GetSession retrieves a session by ID.
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	var session Session

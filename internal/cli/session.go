@@ -26,6 +26,7 @@ func newSessionCommand() *cobra.Command {
 	cmd.AddCommand(newSessionSuccessCommand())
 	cmd.AddCommand(newSessionReplayCommand())
 	cmd.AddCommand(newSessionBranchCommand())
+	cmd.AddCommand(newSessionMergeCommand())
 	cmd.AddCommand(newSessionListCommand())
 	cmd.AddCommand(newSessionSwitchCommand())
 	return cmd
@@ -134,6 +135,55 @@ func runSessionBranch(ctx context.Context, sourceID string, atSeq int) error {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "Branched %s -> %s (at_seq=%d, msgs=%d)\n", sourceID, res.ID, atSeq, res.MessageCount)
+	return nil
+}
+
+func newSessionMergeCommand() *cobra.Command {
+	var into string
+	cmd := &cobra.Command{
+		Use:   "merge <source-session-id> --into <target-session-id>",
+		Short: "Merge a branch tail into a target session (append-tail)",
+		Long:  "Appends the source session's tail (messages after branch_at_seq) onto the target session and records merge metadata (merged_from). No 3-way conflict resolution — append-tail only.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if into == "" {
+				return fmt.Errorf("flag --into is required")
+			}
+			return runSessionMerge(cmd.Context(), args[0], into)
+		},
+	}
+	cmd.Flags().StringVar(&into, "into", "", "target session id to merge into (required)")
+	_ = cmd.MarkFlagRequired("into")
+	return cmd
+}
+
+func runSessionMerge(ctx context.Context, sourceID, targetID string) error {
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		return daemonHint(err)
+	}
+	defer cl.Close()
+	res, err := cl.MergeSession(ctx, sourceID, targetID)
+	if err != nil {
+		return err
+	}
+	mergedFrom, _ := res.Metadata["merged_from"].(string)
+	mergedCount := 0
+	switch v := res.Metadata["merged_count"].(type) {
+	case float64:
+		mergedCount = int(v)
+	case int:
+		mergedCount = v
+	case int64:
+		mergedCount = int(v)
+	}
+	if mergedFrom == "" {
+		mergedFrom = sourceID
+	}
+	fmt.Fprintf(os.Stdout, "Merged %s -> %s (msgs=%d, branch=%s)\n", mergedFrom, res.ID, res.MessageCount, mergedFrom)
+	if mergedCount >= 0 {
+		fmt.Fprintf(os.Stdout, "Appended %d messages from %s (merged_from=%s)\n", mergedCount, sourceID, mergedFrom)
+	}
 	return nil
 }
 

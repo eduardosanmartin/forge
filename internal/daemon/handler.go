@@ -44,6 +44,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleDeleteSession(ctx, req)
 	case MethodBranchSession:
 		return h.handleBranchSession(ctx, req)
+	case MethodMergeSession:
+		return h.handleMergeSession(ctx, req)
 	case MethodExecuteTurn:
 		return h.handleExecuteTurn(ctx, req)
 	case MethodGetMessages:
@@ -189,6 +191,36 @@ func (h *Handler) handleBranchSession(ctx context.Context, req *JSONRPCRequest) 
 			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "source session not found", nil)
 		}
 		return NewErrorResponse(req.ID, ErrCodeInternalError, "branch session failed", err.Error())
+	}
+	result := SessionResult{
+		ID:        session.ID,
+		CreatedAt: session.CreatedAt,
+		UpdatedAt: session.UpdatedAt,
+		Metadata:  session.Metadata,
+	}
+	if msgs, err := h.mgr.GetMessagesSince(ctx, session.ID, 0); err == nil {
+		result.MessageCount = len(msgs)
+	}
+	return h.resultResponse(req.ID, result)
+}
+
+func (h *Handler) handleMergeSession(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params MergeSessionParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SourceSessionID == "" || params.TargetSessionID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "source_session_id and target_session_id are required", nil)
+	}
+	session, err := h.mgr.MergeBranch(ctx, params.SourceSessionID, params.TargetSessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+		}
+		if err.Error() == "merge: source and target must differ" {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "merge session failed", err.Error())
 	}
 	result := SessionResult{
 		ID:        session.ID,

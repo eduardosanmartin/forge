@@ -146,6 +146,63 @@ func (m *testStore) BranchSession(ctx context.Context, sourceID string, atSeq in
 	return branched, nil
 }
 
+func (m *testStore) MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sourceID == targetID {
+		return store.Session{}, fmt.Errorf("merge: source and target must differ")
+	}
+	src, ok := m.sessions[sourceID]
+	if !ok {
+		return store.Session{}, store.ErrSessionNotFound
+	}
+	tgt, ok := m.sessions[targetID]
+	if !ok {
+		return store.Session{}, store.ErrSessionNotFound
+	}
+	atSeq := 0
+	if v, ok := src.Metadata["branch_at_seq"]; ok {
+		switch n := v.(type) {
+		case int:
+			atSeq = n
+		case int64:
+			atSeq = int(n)
+		case float64:
+			atSeq = int(n)
+		}
+	}
+	for _, msg := range m.messages[sourceID] {
+		if msg.Seq <= atSeq {
+			continue
+		}
+		cp := msg
+		cp.SessionID = targetID
+		cp.Seq = len(m.messages[targetID]) + 1
+		cp.ID = int64(cp.Seq)
+		cp.CreatedAt = time.Now().UnixMilli()
+		m.messages[targetID] = append(m.messages[targetID], cp)
+	}
+	// Count tail for metadata.
+	tailCount := 0
+	for _, msg := range m.messages[sourceID] {
+		if msg.Seq > atSeq {
+			tailCount++
+		}
+	}
+	if tgt.Metadata == nil {
+		tgt.Metadata = map[string]any{}
+	}
+	tgt.Metadata["merged_from"] = sourceID
+	tgt.Metadata["merged_count"] = tailCount
+	tgt.Metadata["merged_at"] = time.Now().UnixMilli()
+	if atSeq != 0 {
+		tgt.Metadata["merged_at_seq"] = atSeq
+	}
+	tgt.UpdatedAt = time.Now().UnixMilli()
+	m.sessions[targetID] = tgt
+	return tgt, nil
+}
+
 func (m *testStore) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

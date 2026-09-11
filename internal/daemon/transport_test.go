@@ -58,6 +58,9 @@ func (m *mockStoreForTransport) DeleteSession(ctx context.Context, id string) er
 func (m *mockStoreForTransport) BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error) {
 	return store.Session{ID: "branched", CreatedAt: 1, UpdatedAt: 1, Metadata: map[string]any{"branch_parent": sourceID, "branch_at_seq": atSeq}}, nil
 }
+func (m *mockStoreForTransport) MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error) {
+	return store.Session{ID: targetID, CreatedAt: 1, UpdatedAt: 1, Metadata: map[string]any{"merged_from": sourceID}}, nil
+}
 func (m *mockStoreForTransport) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
 	return 0, 0, nil
 }

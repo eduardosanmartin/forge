@@ -110,6 +110,7 @@ const (
 	MethodListSessions     = "session.list"
 	MethodDeleteSession    = "session.delete"
 	MethodBranchSession    = "session.branch"
+	MethodMergeSession     = "session.merge"
 	MethodExecuteTurn      = "session.execute_turn"
 	MethodGetMessages      = "session.get_messages"
 	MethodGetMessagesSince = "session.get_messages_since"
@@ -196,6 +197,12 @@ type BranchSessionParams struct {
 	SourceSessionID string         `json:"source_session_id"`
 	AtSeq           int            `json:"at_seq,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+// MergeSessionParams for session.merge.
+type MergeSessionParams struct {
+	SourceSessionID string `json:"source_session_id"`
+	TargetSessionID string `json:"target_session_id"`
 }
 
 // SessionMarkSuccessParams for session.mark_success.

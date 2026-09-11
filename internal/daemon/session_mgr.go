@@ -24,6 +24,7 @@ type StoreInterface interface {
 	ListSessions(ctx context.Context, limit, offset int) ([]store.Session, error)
 	DeleteSession(ctx context.Context, id string) error
 	BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error)
+	MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error)
 	AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error)
 	GetMessages(ctx context.Context, sessionID string, limit, offset int) ([]store.Message, error)
 	GetMessagesSince(ctx context.Context, sessionID string, sinceSeq int) ([]store.Message, error)
@@ -167,6 +168,18 @@ func (m *SessionManager) BranchSession(ctx context.Context, sourceID string, atS
 	}
 	if m.logger != nil {
 		m.logger.Info("session branched", "source_id", sourceID, "branch_id", session.ID, "at_seq", atSeq)
+	}
+	return session, nil
+}
+
+// MergeBranch appends the source branch tail onto target per store semantics.
+func (m *SessionManager) MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error) {
+	session, err := m.store.MergeBranch(ctx, sourceID, targetID)
+	if err != nil {
+		return store.Session{}, err
+	}
+	if m.logger != nil {
+		m.logger.Info("session merged", "source_id", sourceID, "target_id", targetID)
 	}
 	return session, nil
 }

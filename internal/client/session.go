@@ -51,6 +51,15 @@ func (c *Client) BranchSession(ctx context.Context, sourceID string, atSeq int, 
 	return &result, nil
 }
 
+// MergeSession appends source tail onto target.
+func (c *Client) MergeSession(ctx context.Context, sourceID, targetID string) (*daemon.SessionResult, error) {
+	var result daemon.SessionResult
+	if err := c.Call(ctx, daemon.MethodMergeSession, daemon.MergeSessionParams{SourceSessionID: sourceID, TargetSessionID: targetID}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // MarkSuccess marks a session as human-verified successful.
 func (c *Client) MarkSuccess(ctx context.Context, sessionID string) error {
 	var result map[string]any

@@ -104,6 +104,8 @@ func (r *REPL) Run(ctx context.Context) error {
 			r.cmdAttach(ctx, line)
 		case strings.HasPrefix(line, "/branch"):
 			r.cmdBranch(ctx, line)
+		case strings.HasPrefix(line, "/merge"):
+			r.cmdMerge(ctx, line)
 		case strings.HasPrefix(line, "/switch"):
 			r.cmdSwitch(ctx, line)
 		case line == "/success" || strings.HasPrefix(line, "/success "):
@@ -165,6 +167,7 @@ func (r *REPL) printHelp() {
 	r.writeln("  /new            start a new session")
 	r.writeln("  /attach <id>    switch to an existing session (replays last messages)")
 	r.writeln("  /branch [at]    branch current session (optional at seq)")
+	r.writeln("  /merge <branch> [target]  merge branch tail into target (default: current session)")
 	r.writeln("  /switch <id>    switch to a branch/session")
 	r.writeln("  /success        mark current session as successful (human gate)")
 	r.writeln("  /halt [id]      emergency-halt current or given session")
@@ -269,6 +272,31 @@ func (r *REPL) cmdSwitch(ctx context.Context, line string) {
 			r.writef("[%s] %s\n", m.Role, oneLine(m.Content))
 		}
 	}
+}
+
+func (r *REPL) cmdMerge(ctx context.Context, line string) {
+	rest, ok := splitCommandArg(line)
+	if !ok {
+		r.writeln("usage: /merge <branch-id> [target-id]")
+		return
+	}
+	fields := strings.Fields(rest)
+	sourceID := fields[0]
+	targetID := r.sessionID
+	if len(fields) > 1 {
+		targetID = fields[1]
+	}
+	if targetID == "" {
+		r.writeln("no target session (provide target-id or start a session)")
+		return
+	}
+	var res daemon.SessionResult
+	if err := r.client.Call(ctx, daemon.MethodMergeSession,
+		daemon.MergeSessionParams{SourceSessionID: sourceID, TargetSessionID: targetID}, &res); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	r.writef("merged %s -> %s (msgs=%d)\n", sourceID, targetID, res.MessageCount)
 }
 
 func parsePositiveInt(s string) (int, error) {
