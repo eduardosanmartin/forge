@@ -1,4 +1,17 @@
 // Package agent implements subagent spawning with bounded context and branch isolation.
+//
+// Follow-ups (intentionally out of scope for this slice, per spec):
+//   - Full parallel scheduler: true concurrent child turns with bounded
+//     concurrency and priority queue onto the single LLM provider (RNF-1.5).
+//     Currently sequential (tool calls in one turn execute serially); parallel
+//     is structurally blocked by single SQLite connection and single provider queue.
+//   - Cross-session subagents: children that outlive the parent session.
+//   - Subagent checkpoint UI: visualizing/merging branch transcripts.
+//
+// Safety: child inherits same perms.Engine and tools.Registry instance => equal
+// floor, never wider; explicit narrowing via custom deny or policy is future work.
+// Token/file budget is recorded in branch metadata; hard enforcement beyond
+// max_iterations clamping is a follow-up.
 package agent
 
 import (
