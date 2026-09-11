@@ -31,14 +31,24 @@ func testManifest(mode string) *Manifest {
 }
 
 func okExecutor(tokens, iters int) Executor {
-	return func(_ context.Context, _ Task) (int, int, error) {
-		return tokens, iters, nil
+	return func(_ context.Context, _ Task) (ExecResult, error) {
+		return ExecResult{Tokens: tokens, Iterations: iters}, nil
+	}
+}
+
+func executorWithTools(tokens, iters int, tools []string) Executor {
+	return func(_ context.Context, _ Task) (ExecResult, error) {
+		// Return a non-nil slice to signal "records available".
+		if tools == nil {
+			tools = []string{}
+		}
+		return ExecResult{Tokens: tokens, Iterations: iters, ToolCalls: tools}, nil
 	}
 }
 
 func failingExecutor(err error) Executor {
-	return func(_ context.Context, _ Task) (int, int, error) {
-		return 0, 1, err
+	return func(_ context.Context, _ Task) (ExecResult, error) {
+		return ExecResult{Iterations: 1}, err
 	}
 }
 
@@ -102,9 +112,9 @@ func TestRunnerBudgetKillTokens(t *testing.T) {
 	r := &Runner{
 		Manifest: m,
 		Config:   cfg,
-		Executor: func(_ context.Context, _ Task) (int, int, error) {
+		Executor: func(_ context.Context, _ Task) (ExecResult, error) {
 			count++
-			return 4, 1, nil
+			return ExecResult{Tokens: 4, Iterations: 1}, nil
 		},
 		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
 	}
@@ -230,9 +240,9 @@ func TestRunnerDryRunNoExecution(t *testing.T) {
 	r := &Runner{
 		Manifest: m,
 		Config:   cfg,
-		Executor: func(_ context.Context, _ Task) (int, int, error) {
+		Executor: func(_ context.Context, _ Task) (ExecResult, error) {
 			called = true
-			return 0, 0, nil
+			return ExecResult{}, nil
 		},
 	}
 	rep, err := r.Run(context.Background())
@@ -311,4 +321,123 @@ func TestRunnerRespectsContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected cancel error")
 	}
+}
+
+func TestRunnerHighSensitivityToolCallInspection(t *testing.T) {
+	cases := []struct {
+		name       string
+		goal       string
+		toolCalls  []string
+		wantPaused bool
+	}{
+		{
+			name:       "adversarial innocuous goal but real fs_write must pause",
+			goal:       "analyze codebase and summarize findings",
+			toolCalls:  []string{"fs_read", "fs_write"},
+			wantPaused: true,
+		},
+		{
+			name:       "adversarial innocuous goal with shell_exec must pause",
+			goal:       "review documentation for clarity",
+			toolCalls:  []string{"shell_exec"},
+			wantPaused: true,
+		},
+		{
+			name:       "read-only tools must not trigger after_task pause",
+			goal:       "analyze codebase and summarize findings",
+			toolCalls:  []string{"fs_read", "fs_list"},
+			wantPaused: false,
+		},
+		{
+			name:       "empty tool set must not pause even if goal looks like write",
+			goal:       "analyze codebase",
+			toolCalls:  []string{},
+			wantPaused: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testManifest(ModeSupervised)
+			m.HITL.Checkpoints = []Checkpoint{{ID: "pre-merge", Trigger: TriggerBeforeMerge, Required: true}}
+			m.Tasks = []Task{{ID: "t1", Goal: tc.goal}}
+			cfg := config.Defaults()
+			cfg.Project.Sensitivity = config.SensitivitySensitive
+			paused := false
+			r := &Runner{
+				Manifest: m,
+				Config:   cfg,
+				Executor: executorWithTools(5, 1, tc.toolCalls),
+				OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+					if cp.Trigger == TriggerAfterTask && cp.ID == "sensitivity-high-after-task" {
+						paused = true
+						return false, nil
+					}
+					// before_task high sensitivity also pauses; auto-approve it to reach after_task
+					if cp.Trigger == TriggerBeforeTask {
+						return true, nil
+					}
+					return true, nil
+				},
+			}
+			_, err := r.Run(context.Background())
+			isPaused := err != nil && strings.Contains(err.Error(), "paused")
+			if tc.wantPaused && !isPaused {
+				t.Fatalf("expected pause for tools %v, got err %v paused=%v", tc.toolCalls, err, paused)
+			}
+			if !tc.wantPaused && isPaused && paused {
+				t.Fatalf("unexpected after_task pause for tools %v, err %v", tc.toolCalls, err)
+			}
+		})
+	}
+}
+
+func TestRunnerHighSensitivityFallbackWhenToolRecordsUnavailable(t *testing.T) {
+	t.Run("nil ToolCalls falls back to goal heuristic and pauses on write goal", func(t *testing.T) {
+		m := testManifest(ModeSupervised)
+		m.HITL.Checkpoints = []Checkpoint{{ID: "pre-merge", Trigger: TriggerBeforeMerge, Required: true}}
+		m.Tasks = []Task{{ID: "t1", Goal: "write file foo"}}
+		cfg := config.Defaults()
+		cfg.Project.Sensitivity = config.SensitivitySensitive
+		r := &Runner{
+			Manifest: m,
+			Config:   cfg,
+			Executor: okExecutor(5, 1), // ToolCalls nil -> heuristic fallback
+			OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+				if cp.Trigger == TriggerBeforeTask {
+					return true, nil
+				}
+				if cp.Trigger == TriggerAfterTask {
+					return false, nil
+				}
+				return true, nil
+			},
+		}
+		_, err := r.Run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "paused") {
+			t.Fatalf("expected pause via heuristic fallback, got %v", err)
+		}
+	})
+	t.Run("nil ToolCalls with innocuous goal does not trigger after_task", func(t *testing.T) {
+		m := testManifest(ModeSupervised)
+		m.HITL.Checkpoints = []Checkpoint{{ID: "pre-merge", Trigger: TriggerBeforeMerge, Required: true}}
+		m.Tasks = []Task{{ID: "t1", Goal: "analyze code"}}
+		cfg := config.Defaults()
+		cfg.Project.Sensitivity = config.SensitivitySensitive
+		r := &Runner{
+			Manifest: m,
+			Config:   cfg,
+			Executor: okExecutor(5, 1), // nil ToolCalls, innocuous goal
+			OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+				// Approve before_task to reach after_task decision point.
+				return true, nil
+			},
+		}
+		rep, err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected pause for innocuous goal with nil ToolCalls, err %v", err)
+		}
+		if rep.Status != StatusCompleted {
+			t.Fatalf("status %q want completed", rep.Status)
+		}
+	})
 }

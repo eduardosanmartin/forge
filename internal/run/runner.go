@@ -9,9 +9,20 @@ import (
 	"github.com/eduardosanmartin/forge/internal/config"
 )
 
-// Executor executes one task goal and returns consumed tokens and iterations.
+// ExecResult is the outcome of one task execution, including the actual
+// tool calls observed during the turn. ToolCalls may be nil when the
+// executor cannot report tool records (legacy path); callers must treat
+// nil as "unavailable" and fall back to heuristics, while an empty slice
+// means "no tools executed".
+type ExecResult struct {
+	Tokens    int
+	Iterations int
+	ToolCalls []string
+}
+
+// Executor executes one task goal and returns its result.
 // Implementations may call agent.ExecuteTurn via daemon or a mock in tests.
-type Executor func(ctx context.Context, task Task) (tokens int, iterations int, err error)
+type Executor func(ctx context.Context, task Task) (ExecResult, error)
 
 // Checkpointer is called when a required checkpoint triggers. Returning true
 // means approved to continue; false means pause and persist state (HITL).
@@ -192,6 +203,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		// Execute with bounded retries (RF-11.4 circuit breaker).
 		maxRetries := r.Manifest.Budget.MaxRetriesPerTask
 		var lastErr error
+		var lastExecRes ExecResult
 		succeeded := false
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			// Wall-clock may have elapsed during previous attempt; re-check before retry.
@@ -212,17 +224,18 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 					execCtx, cancel = context.WithTimeout(ctx, time.Millisecond)
 				}
 			}
-			tTokens, tIters, tErr := r.Executor(execCtx, task)
+			execRes, tErr := r.Executor(execCtx, task)
 			if cancel != nil {
 				cancel()
 			}
 			if execCtx.Err() == context.DeadlineExceeded {
 				tErr = fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
 			}
-			r.budget.AddTurn(tTokens, tIters)
+			r.budget.AddTurn(execRes.Tokens, execRes.Iterations)
 			r.state.Budget = r.budget
 			r.state.UpdatedAt = r.now()
 			_ = r.persistState()
+			lastExecRes = execRes
 			if tErr == nil {
 				succeeded = true
 				lastErr = nil
@@ -271,10 +284,21 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 			return r.killedReport(err)
 		}
 
-		// RNF-9 high sensitivity also forces checkpoint after every fs-write/shell task.
-		// Minimal: if high sensitivity, treat every just-completed task as needing after_task pause
-		// when the task goal suggests a write/shell operation.
-		needsAfterHigh := needsHighCheckpoint && taskTouchesFSOrShell(task)
+		// RNF-9 high sensitivity forces checkpoint after every task that executed
+		// a write-class tool. We inspect the ACTUAL tool calls observed during the
+		// turn (fs_write, shell_exec, git, etc.) and only fall back to the
+		// goal-text heuristic when tool records are unavailable (nil ToolCalls).
+		// A turn that executed a write-class tool must trigger the pause
+		// regardless of how the goal text was phrased.
+		needsAfterHigh := false
+		if needsHighCheckpoint {
+			if lastExecRes.ToolCalls != nil {
+				needsAfterHigh = taskExecutedWrite(lastExecRes.ToolCalls)
+			} else {
+				// Heuristic fallback when tool records are unavailable.
+				needsAfterHigh = taskTouchesFSOrShell(task)
+			}
+		}
 		var afterCP *Checkpoint
 		if needsAfterHigh {
 			afterCP = &Checkpoint{ID: "sensitivity-high-after-task", Trigger: TriggerAfterTask, Required: true}
@@ -495,8 +519,30 @@ func configNormalize(s string) (string, bool) {
 
 func taskTouchesFSOrShell(t Task) bool {
 	g := strings.ToLower(t.Goal)
-	// Heuristic for the minimal slice: treat any task mentioning fs.write,
-	// shell, or file creation as sensitive-touching. Real enforcement would
-	// inspect tool calls per turn, not goal text.
+	// Heuristic fallback ONLY when tool records are unavailable. Real
+	// enforcement inspects the actual tool calls executed during the turn.
 	return strings.Contains(g, "fs.") || strings.Contains(g, "write") || strings.Contains(g, "shell") || strings.Contains(g, "file") || strings.Contains(g, "migrate")
+}
+
+func isWriteTool(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "fs_write", "fs.write", "shell_exec", "shell.exec", "git":
+		return true
+	}
+	// Treat any tool whose name contains "write" as write-class for forward
+	// compatibility (e.g., future fs_write_file variants).
+	if strings.Contains(n, "write") {
+		return true
+	}
+	return false
+}
+
+func taskExecutedWrite(toolCalls []string) bool {
+	for _, tc := range toolCalls {
+		if isWriteTool(tc) {
+			return true
+		}
+	}
+	return false
 }
