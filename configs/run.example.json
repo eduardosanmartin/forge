@@ -1,0 +1,45 @@
+{
+  "run_id": "example-billing",
+  "mode": "checkpoint",
+  "goal": "Implement billing module with tests and docs",
+  "spec": "# SPEC — billing module\n- Types: Invoice, LineItem\n- Logic: total with tax, discount\n- Tests: unit + integration\n- Docs: README snippet",
+  "budget": {
+    "max_wall_clock": "30m",
+    "max_tokens": 50000,
+    "max_iterations": 30,
+    "max_retries_per_task": 3
+  },
+  "git": {
+    "isolation": "branch",
+    "base_branch": "main",
+    "work_branch": "run/example-billing",
+    "commit_per_task": true,
+    "merge_to_base": "manual"
+  },
+  "hitl": {
+    "checkpoints": [
+      {
+        "id": "post-decomposition",
+        "trigger": "after_spec_decomposition",
+        "required": true
+      },
+      {
+        "id": "pre-merge",
+        "trigger": "before_merge",
+        "required": true
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "t1",
+      "goal": "scaffold billing types and interfaces",
+      "done_criteria": "go vet + file exists"
+    },
+    {
+      "id": "t2",
+      "goal": "implement billing logic with unit tests",
+      "done_criteria": "go test ./internal/billing -count 1 passes"
+    }
+  ]
+}
