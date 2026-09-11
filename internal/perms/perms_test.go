@@ -388,6 +388,72 @@ func TestShellMatching(t *testing.T) {
 	})
 }
 
+func TestShellGlobMatching(t *testing.T) {
+	cases := []struct {
+		name      string
+		allow     []string
+		command   string
+		wantAllow bool
+		wantRule  string
+	}{
+		{name: "star matches anything", allow: []string{"*"}, command: "anything", wantAllow: true, wantRule: "shell.exec:*"},
+		{name: "star matches arbitrary executable", allow: []string{"*"}, command: "cmd.exe", wantAllow: true, wantRule: "shell.exec:*"},
+		{name: "star via full path", allow: []string{"*"}, command: "/usr/bin/nonexistent-tool-xyz", wantAllow: true, wantRule: "shell.exec:*"},
+		{name: "py star matches python", allow: []string{"py*"}, command: "python", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "py star matches py", allow: []string{"py*"}, command: "py", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "py star matches py3", allow: []string{"py*"}, command: "py3", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "py star case-insensitive", allow: []string{"py*"}, command: "PYTHON", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "py star via path", allow: []string{"py*"}, command: "/opt/python/bin/python3", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "py star does not match cmd", allow: []string{"py*"}, command: "cmd", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "py star does not match go", allow: []string{"py*"}, command: "go", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "question mark matches single char", allow: []string{"go?"}, command: "got", wantAllow: true, wantRule: "shell.exec:go?"},
+		{name: "question mark does not match bare go", allow: []string{"go?"}, command: "go", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "question mark does not match longer", allow: []string{"go?"}, command: "gofmt", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "character class matches g", allow: []string{"[gp]*"}, command: "go", wantAllow: true, wantRule: "shell.exec:[gp]*"},
+		{name: "character class matches p", allow: []string{"[gp]*"}, command: "python", wantAllow: true, wantRule: "shell.exec:[gp]*"},
+		{name: "character class denies npm", allow: []string{"[gp]*"}, command: "npm", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "character class range case-insensitive", allow: []string{"[a-z]*"}, command: "Go", wantAllow: true, wantRule: "shell.exec:[a-z]*"},
+		{name: "exact entry unchanged — go does not match gofmt", allow: []string{"go"}, command: "gofmt", wantAllow: false, wantRule: "default-deny:" + string(KindShell)},
+		{name: "exact entry case-insensitive still works", allow: []string{"go"}, command: "GO", wantAllow: true, wantRule: "shell.exec:go"},
+		{name: "multiple globs first match wins rule", allow: []string{"go", "py*"}, command: "python", wantAllow: true, wantRule: "shell.exec:py*"},
+		{name: "multiple globs second is star", allow: []string{"py*", "*"}, command: "cmd", wantAllow: true, wantRule: "shell.exec:*"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, _ := newTestEngine(t, func(p *PermissionsPolicy) {
+				p.Shell.Allow = tc.allow
+			})
+			d := eng.Check(Request{Kind: KindShell, Command: tc.command})
+			if d.Allowed != tc.wantAllow || d.Rule != tc.wantRule {
+				t.Errorf("Check(command=%q, allow=%v) = %+v, want allowed=%v rule=%q", tc.command, tc.allow, d, tc.wantAllow, tc.wantRule)
+			}
+		})
+	}
+}
+
+func TestShellAllowRejectsMalformedGlob(t *testing.T) {
+	root := testWorkspaceRoot(t)
+	cases := []struct {
+		name   string
+		allow  []string
+		substr string
+	}{
+		{name: "unterminated bracket", allow: []string{"[abc"}, substr: "permissions.shell.allow[0]"},
+		{name: "unterminated bracket second entry", allow: []string{"go", "[z"}, substr: "permissions.shell.allow[1]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(PermissionsPolicy{Shell: ShellPermissions{Allow: tc.allow}}, root, nil)
+			if err == nil {
+				t.Fatalf("New with allow=%v succeeded; want validation error", tc.allow)
+			}
+			if !strings.Contains(err.Error(), tc.substr) {
+				t.Errorf("error %q does not mention %q", err.Error(), tc.substr)
+			}
+		})
+	}
+}
+
 func TestGitAllowlistViaEngine(t *testing.T) {
 	allowedSubcommands := []string{"status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"}
 	eng, _ := newTestEngine(t, nil)

@@ -94,6 +94,11 @@ type FSPermissions struct {
 }
 
 // ShellPermissions allows shell executables by base name (case-insensitive).
+// Entries without glob meta (*, ?, [...]) match exactly via EqualFold.
+// Entries containing glob meta match the base name case-insensitively as a
+// glob (see shell matching in evaluate). An entry of "*" matches any
+// executable and effectively disables deny-by-default for shell; this is
+// intentional and was explicitly requested by the owner.
 type ShellPermissions struct {
 	Allow []string `json:"allow"`
 }
@@ -175,7 +180,7 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	if err := validatePatternList("permissions.fs.write", policy.FS.Write); err != nil {
 		return nil, err
 	}
-	if err := validateAllowList("permissions.shell.allow", policy.Shell.Allow); err != nil {
+	if err := validateShellAllowList("permissions.shell.allow", policy.Shell.Allow); err != nil {
 		return nil, err
 	}
 	if err := validateAllowList("permissions.git.allow", policy.Git.Allow); err != nil {
@@ -217,6 +222,43 @@ func validateAllowList(section string, entries []string) error {
 	return nil
 }
 
+// validateShellAllowList validates shell.allow entries: non-empty and, when
+// glob meta is present, syntactically valid as a glob (same style as fs
+// pattern validation, eagerly at construction time).
+func validateShellAllowList(section string, entries []string) error {
+	for i, e := range entries {
+		if strings.TrimSpace(e) == "" {
+			return fmt.Errorf("%s[%d]: entries must be non-empty", section, i)
+		}
+		if containsShellGlobMeta(e) {
+			if _, err := filepath.Match(strings.ToLower(e), "a"); err != nil {
+				return fmt.Errorf("%s[%d] %q: %w", section, i, e, err)
+			}
+		}
+	}
+	return nil
+}
+
+// containsShellGlobMeta reports whether s contains glob meta that switches it
+// to pattern matching. Kept deliberately tiny: *, ?, or '[' suffices to
+// identify the glob form the owner asked for.
+func containsShellGlobMeta(s string) bool {
+	return strings.Contains(s, "*") || strings.Contains(s, "?") || strings.Contains(s, "[")
+}
+
+// shellGlobMatches reports whether the glob pattern matches the base name
+// case-insensitively. Matcher choice: filepath.Match with lowercased inputs
+// is used because pathmatch only implements '*' within a single segment and
+// cannot handle '?' or '[...]'; lowercasing gives the same case-insensitive
+// behavior as the exact EqualFold path.
+func shellGlobMatches(pattern, base string) bool {
+	matched, err := filepath.Match(strings.ToLower(pattern), strings.ToLower(base))
+	if err != nil {
+		return false
+	}
+	return matched
+}
+
 // Check evaluates req against the policy and returns the decision. Exactly
 // one audit record ("perm.check") is emitted per call when a logger is
 // attached. Evaluation order, first match wins:
@@ -256,7 +298,17 @@ func (e *Engine) evaluate(req Request) Decision {
 		for _, allowed := range e.shellAllow {
 			// Base-name comparison is case-insensitive on ALL platforms:
 			// Windows filenames are case-preserving-insensitive and POSIX
-			// builds prefer predictability over pedantry here.
+			// builds prefer predictability over pedantry here. When the
+			// allow entry contains glob meta (*, ?, [...]) it is matched as
+			// a case-insensitive glob against the base name; "*" alone thus
+			// matches any executable and effectively disables deny-by-default
+			// for shell (owner explicitly requested this escape hatch).
+			if containsShellGlobMeta(allowed) {
+				if shellGlobMatches(allowed, base) {
+					return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
+				}
+				continue
+			}
 			if strings.EqualFold(base, allowed) {
 				return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
 			}

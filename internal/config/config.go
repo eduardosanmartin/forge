@@ -697,6 +697,12 @@ func validatePermissions(p PermissionsPolicy) []error {
 		if strings.TrimSpace(entry) == "" {
 			errs = append(errs, fmt.Errorf(
 				"permissions.shell.allow[%d]: entries must be non-empty command names", i))
+			continue
+		}
+		if strings.Contains(entry, "*") || strings.Contains(entry, "?") || strings.Contains(entry, "[") {
+			if _, err := filepath.Match(strings.ToLower(entry), "a"); err != nil {
+				errs = append(errs, fmt.Errorf("permissions.shell.allow[%d] %q: %v", i, entry, err))
+			}
 		}
 	}
 	for i, entry := range p.Git.Allow {
