@@ -136,7 +136,64 @@ func NewSessionManager(
 		opt(mgr)
 	}
 
+	// RF-1.3: first-class spawn mechanism via tool (chosen over daemon RPC because
+	// the agent loop already has tool-calling orchestration with perm fencing and
+	// session-scoped context; a tool reuses that path with no new transport).
+	mgr.wireSubagentTool()
+
 	return mgr
+}
+
+// wireSubagentTool registers spawn_subagent when the concrete registry is available.
+func (m *SessionManager) wireSubagentTool() {
+	if m.agent == nil || m.toolsReg == nil {
+		return
+	}
+	reg, ok := m.toolsReg.(*tools.Registry)
+	if !ok {
+		return
+	}
+	if _, exists := reg.Get("spawn_subagent"); exists {
+		return
+	}
+	tool := tools.NewSpawnSubagentTool()
+	tool.SetSpawner(func(ctx context.Context, task string, maxIterations int, tokenBudget int, fileBudget string) (tools.Result, error) {
+		parentID := tools.SessionIDFromContext(ctx)
+		if parentID == "" {
+			return tools.Result{Content: "ERROR: missing parent session id"}, nil
+		}
+		spec := agent.ChildSpec{
+			Task:          task,
+			MaxIterations: maxIterations,
+			TokenBudget:   tokenBudget,
+			FileBudget:    fileBudget,
+		}
+		child, err := m.agent.SpawnChild(ctx, parentID, spec)
+		if err != nil {
+			return tools.Result{Content: fmt.Sprintf("ERROR: spawn_subagent: %v", err)}, nil
+		}
+		// Summarized result back into parent transcript (role=tool message fencing is added by registry).
+		// Keep concise but actionable: child session id, success flag, summary, and metrics.
+		status := "success"
+		if !child.Success {
+			status = "failed"
+			if child.Error != "" {
+				status += ": " + child.Error
+			}
+		}
+		content := fmt.Sprintf("subagent %s [%s] task=%q\nSUMMARY:\n%s\nMETRICS: iterations=%d tokens=%d tool_calls=%d",
+			child.ChildSessionID, status, child.Task, child.Summary, child.Metrics.IterationCount, child.Metrics.TotalTokens, child.Metrics.ToolCallCount)
+		metadata := map[string]any{
+			"subagent_session_id": child.ChildSessionID,
+			"parent_session_id":   child.ParentSessionID,
+			"success":             child.Success,
+			"task":                child.Task,
+		}
+		// Safety note: child inherits parent's permission floor (same Engine/registry, equal or narrowed — never wider);
+		// tool output is fenced/redacted like any other turn (registry guarantees).
+		return tools.Result{Content: content, Metadata: metadata}, nil
+	})
+	reg.Register(tool)
 }
 
 // CreateSession creates a new session.

@@ -225,8 +225,8 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 			}
 		}
 		req.Workdir, _ = args["workdir"].(string)
-	case "retrieval_search", "compaction_summarize", "anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete":
-		// Internal harness tools (v1 features): they operate only on forge's
+	case "retrieval_search", "compaction_summarize", "anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete", "spawn_subagent":
+		// Internal harness tools (v1 features + subagent spawner): they operate only on forge's
 		// own SQLite store and forge's own LLM client, never on the host OS,
 		// so the request carries just the kind plus the tool name (kept in
 		// Command so the audit trail records a readable identifier). Tool

@@ -342,8 +342,10 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 					args = map[string]any{"_error": "invalid arguments: " + err.Error()}
 				}
 
-				// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction)
-				toolResult, err := a.toolsReg.Execute(ctx, tc.Function.Name, args)
+				// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
+				// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
+				toolCtx := tools.WithSessionID(ctx, sessionID)
+				toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
 				if err != nil {
 					toolResult = tools.Result{
 						Content: "ERROR: " + err.Error(),
