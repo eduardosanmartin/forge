@@ -681,3 +681,139 @@ func TestSessionManagerBranchNotFound(t *testing.T) {
 		t.Fatal("expected error for missing source")
 	}
 }
+
+// blockingProvider is a test provider that sleeps delay before answering and
+// respects ctx cancellation — used to prove RF-1.4 detached turns.
+type blockingProvider struct {
+	delay    time.Duration
+	response llm.ChatResponse
+}
+
+func (m *blockingProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	select {
+	case <-time.After(m.delay):
+		return m.response, nil
+	case <-ctx.Done():
+		return llm.ChatResponse{}, ctx.Err()
+	}
+}
+
+func (m *blockingProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	return nil, nil
+}
+func (m *blockingProvider) ListModels() ([]string, error) { return []string{"test-model"}, nil }
+func (m *blockingProvider) Close() error                  { return nil }
+
+type blockingRegistry struct {
+	provider *blockingProvider
+}
+
+func (r *blockingRegistry) GetProvider(name string) (llm.Provider, bool) {
+	return r.provider, true
+}
+func (r *blockingRegistry) GetDefault() (llm.Provider, string) { return r.provider, "test-model" }
+func (r *blockingRegistry) SetDefault(model string) error      { return nil }
+func (r *blockingRegistry) ListAll() []llm.ModelInfo           { return nil }
+func (r *blockingRegistry) Close() error                       { return nil }
+func (r *blockingRegistry) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	return r.provider.Chat(ctx, req)
+}
+func (r *blockingRegistry) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	return r.provider.ChatStream(ctx, req)
+}
+
+func TestSessionManagerTurnSurvivesParentCancel(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	st := newTestStore()
+	provider := &blockingProvider{
+		delay: 150 * time.Millisecond,
+		response: llm.ChatResponse{
+			ID:    "test-response",
+			Model: "test-model",
+			Choices: []llm.Choice{{
+				Index: 0,
+				Message: llm.Message{Role: "assistant", Content: "survived"},
+				FinishReason: "stop",
+			}},
+			Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		},
+	}
+	llmReg := &blockingRegistry{provider: provider}
+	toolsReg := newTestToolsRegistry()
+	emergency := NewEmergencyState(logger)
+	cfg := config.Defaults()
+	permsEng := newTestPermsEngine()
+	mgr := NewSessionManager(st, llmReg, toolsReg, emergency, logger, cfg, permsEng, st)
+
+	session, _ := mgr.CreateSession(context.Background(), nil)
+
+	parentCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var result []store.Message
+	go func() {
+		var err error
+		result, err = mgr.ExecuteTurn(parentCtx, session.ID, "hello")
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("turn should survive parent cancel, got error: %v", err)
+		}
+		if len(result) < 2 {
+			t.Fatalf("want at least 2 messages after survived turn, got %d", len(result))
+		}
+		// Reattach path: GetMessagesSince must return the finished turn.
+		msgs, _ := mgr.GetMessagesSince(context.Background(), session.ID, 0)
+		if len(msgs) < 2 {
+			t.Fatalf("reattach via GetMessagesSince: got %d want >=2", len(msgs))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("turn did not finish after parent cancel")
+	}
+}
+
+func TestSessionManagerTurnHaltStillCancels(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	st := newTestStore()
+	provider := &blockingProvider{
+		delay: 500 * time.Millisecond,
+		response: llm.ChatResponse{
+			ID:    "test-response",
+			Model: "test-model",
+			Choices: []llm.Choice{{
+				Index: 0,
+				Message: llm.Message{Role: "assistant", Content: "should be halted"},
+				FinishReason: "stop",
+			}},
+		},
+	}
+	llmReg := &blockingRegistry{provider: provider}
+	toolsReg := newTestToolsRegistry()
+	emergency := NewEmergencyState(logger)
+	cfg := config.Defaults()
+	permsEng := newTestPermsEngine()
+	mgr := NewSessionManager(st, llmReg, toolsReg, emergency, logger, cfg, permsEng, st)
+
+	session, _ := mgr.CreateSession(context.Background(), nil)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := mgr.ExecuteTurn(context.Background(), session.ID, "hello")
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	_ = mgr.HaltSession(session.ID, "test halt")
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected halt to cancel turn")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("halted turn did not return")
+	}
+}

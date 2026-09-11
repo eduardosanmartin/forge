@@ -273,8 +273,12 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		_ = m.store.UpdateSessionMetadata(ctx, sessionID, session.Metadata)
 	}
 
-	// Create turn context with cancellation
-	turnCtx, turnCancel := context.WithCancel(ctx)
+	// RF-1.4 full: turns survive client disconnect. The turn context is
+	// detached from the request context (which is tied to the WebSocket
+	// connection lifetime) — it lives until the agent finishes, the
+	// per-turn timeout fires, or an explicit halt cancels it. This lets a
+	// reconnecting client reattach via GetMessagesSince polling.
+	turnCtx, turnCancel := context.WithCancel(context.Background())
 
 	// Register turn context for emergency cancellation
 	m.emergency.SetTurnContext(sessionID, turnCancel)
