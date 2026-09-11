@@ -1,0 +1,502 @@
+package run
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/eduardosanmartin/forge/internal/config"
+)
+
+// Executor executes one task goal and returns consumed tokens and iterations.
+// Implementations may call agent.ExecuteTurn via daemon or a mock in tests.
+type Executor func(ctx context.Context, task Task) (tokens int, iterations int, err error)
+
+// Checkpointer is called when a required checkpoint triggers. Returning true
+// means approved to continue; false means pause and persist state (HITL).
+// Returning an error fails the run. For unattended tests the callback can
+// auto-approve; for interactive CLI it prompts on stdin.
+type Checkpointer func(cp Checkpoint, state *RunState) (bool, error)
+
+// Runner orchestrates the manifest task loop with budgets and HITL pauses.
+type Runner struct {
+	Manifest     *Manifest
+	Config       *config.Config
+	Executor     Executor
+	OnCheckpoint Checkpointer
+	Clock        func() time.Time // nil = time.Now
+	StateDir     string           // dir for .forge/runs/<run_id> persistence; "" = no persistence
+
+	budget BudgetState
+	state  RunState
+}
+
+// RunState is the reanudable audit log (RF-11.8).
+type RunState struct {
+	RunID            string      `json:"run_id"`
+	Mode             string      `json:"mode"`
+	Status           string      `json:"status"` // running | paused | completed | failed | killed
+	StartedAt        time.Time   `json:"started_at"`
+	UpdatedAt        time.Time   `json:"updated_at"`
+	CompletedTasks   []string    `json:"completed_tasks"`
+	CurrentTaskID    string      `json:"current_task_id,omitempty"`
+	Budget           BudgetState `json:"budget"`
+	PausedCheckpoint *Checkpoint `json:"paused_checkpoint,omitempty"`
+	PauseReason      string      `json:"pause_reason,omitempty"`
+	Error            string      `json:"error,omitempty"`
+}
+
+// Report is the final RF-11.10 report.
+type Report struct {
+	RunID              string   `json:"run_id"`
+	Mode               string   `json:"mode"`
+	Status             string   `json:"status"`
+	CompletedTasks     []string `json:"completed_tasks"`
+	TotalTasks         int      `json:"total_tasks"`
+	PausedCheckpoints  []string `json:"paused_checkpoints"`
+	Assumptions        []string `json:"assumptions,omitempty"`
+	Deviations         []string `json:"deviations,omitempty"`
+	BudgetUsed         BudgetState `json:"budget_used"`
+	ValidationState    string   `json:"validation_state"` // all_tasks_passed | partial | failed
+}
+
+const (
+	StatusRunning   = "running"
+	StatusPaused    = "paused"
+	StatusCompleted = "completed"
+	StatusFailed    = "failed"
+	StatusKilled    = "killed" // budget wall hit
+)
+
+func (r *Runner) now() time.Time {
+	if r.Clock != nil {
+		return r.Clock()
+	}
+	return time.Now()
+}
+
+// Run executes the manifest task loop. It is the only entrypoint that enforces
+// all three pillars at once: RF-11 decomposition + checkpoints, RNF-8 hard kills,
+// and RNF-9 ceiling (validated beforehand but re-checked for defense in depth).
+func (r *Runner) Run(ctx context.Context) (*Report, error) {
+	if r.Manifest == nil {
+		return nil, fmt.Errorf("manifest is required")
+	}
+	if r.Config == nil {
+		return nil, fmt.Errorf("config is required")
+	}
+	if r.Executor == nil {
+		return nil, fmt.Errorf("executor is required")
+	}
+	if err := r.Manifest.Validate(); err != nil {
+		return nil, fmt.Errorf("manifest invalid: %w", err)
+	}
+	if err := r.Manifest.ValidateAgainstSensitivity(r.Config); err != nil {
+		return nil, fmt.Errorf("sensitivity ceiling: %w", err)
+	}
+	if r.Manifest.IsolationRequired() && (r.Manifest.Git.Isolation == "" || r.Manifest.Git.Isolation == "none") {
+		return nil, fmt.Errorf("mode %q requires git.isolation worktree or branch (RNF-8.1) — manifest declares %q", r.Manifest.Mode, r.Manifest.Git.Isolation)
+	}
+	// Dry run never writes: validate plan and return without executing.
+	if r.Manifest.Mode == ModeDryRun {
+		return r.dryRunReport(), nil
+	}
+
+	start := r.now()
+	r.budget = NewBudgetState(r.Manifest, start)
+	r.state = RunState{
+		RunID:     r.Manifest.RunID,
+		Mode:      r.Manifest.Mode,
+		Status:    StatusRunning,
+		StartedAt: start,
+		UpdatedAt: start,
+		Budget:    r.budget,
+	}
+	_ = r.persistState()
+
+	// Spec decomposition pause (RF-11 step 1 post-decomposition).
+	if cp := r.findCheckpoint(TriggerAfterDecomposition); cp != nil && cp.Required {
+		approved, err := r.handleCheckpoint(ctx, *cp, "after spec decomposition")
+		if err != nil {
+			return r.failReport(err)
+		}
+		if !approved {
+			return r.pauseReport(*cp, "after_spec_decomposition")
+		}
+	}
+
+	tasks := r.Manifest.EffectiveTasks()
+	var reportPaused []string
+
+	for idx, task := range tasks {
+		select {
+		case <-ctx.Done():
+			return r.failReport(fmt.Errorf("run cancelled: %w", ctx.Err()))
+		default:
+		}
+
+		// Hard budget wall BEFORE starting the task (RNF-8.2).
+		if err := r.budget.Check(r.now()); err != nil {
+			r.state.Status = StatusKilled
+			r.state.Error = err.Error()
+			r.state.UpdatedAt = r.now()
+			_ = r.persistState()
+			return r.killedReport(err)
+		}
+		// Budget threshold HITL (soft pause before kill).
+		if cpID := r.budget.CheckThreshold(r.now(), r.Manifest.HITL.Checkpoints); cpID != "" {
+			// Find the triggering checkpoint; pause only if required.
+			for _, cp := range r.Manifest.HITL.Checkpoints {
+				if cp.ID == cpID && cp.Required {
+					approved, err := r.handleCheckpoint(ctx, cp, "budget_threshold")
+					if err != nil {
+						return r.failReport(err)
+					}
+					if !approved {
+						reportPaused = append(reportPaused, cp.ID)
+						return r.pauseReport(cp, "budget_threshold")
+					}
+					reportPaused = append(reportPaused, cp.ID)
+					break
+				}
+			}
+		}
+
+		// RNF-9 high sensitivity forces a checkpoint before every task.
+		needsHighCheckpoint := isHighSensitivity(r.Config.Project.Sensitivity)
+		var beforeCP *Checkpoint
+		if needsHighCheckpoint {
+			beforeCP = &Checkpoint{ID: "sensitivity-high-before-task", Trigger: TriggerBeforeTask, Required: true}
+		} else {
+			beforeCP = r.findCheckpoint(TriggerBeforeTask)
+		}
+		if beforeCP != nil && beforeCP.Required {
+			// For high sensitivity we always pause regardless of manifest Match; for
+			// normal triggers we check Match filtering only for before_editing (not applicable here).
+			approved, err := r.handleCheckpoint(ctx, *beforeCP, fmt.Sprintf("before task %s (%d/%d)", task.ID, idx+1, len(tasks)))
+			if err != nil {
+				return r.failReport(err)
+			}
+			if !approved {
+				r.state.CurrentTaskID = task.ID
+				return r.pauseReport(*beforeCP, "before_task")
+			}
+			reportPaused = append(reportPaused, beforeCP.ID)
+		}
+
+		r.state.CurrentTaskID = task.ID
+		r.state.UpdatedAt = r.now()
+		_ = r.persistState()
+
+		// Execute with bounded retries (RF-11.4 circuit breaker).
+		maxRetries := r.Manifest.Budget.MaxRetriesPerTask
+		var lastErr error
+		succeeded := false
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			// Wall-clock may have elapsed during previous attempt; re-check before retry.
+			if err := r.budget.Check(r.now()); err != nil {
+				r.state.Status = StatusKilled
+				r.state.Error = err.Error()
+				_ = r.persistState()
+				return r.killedReport(err)
+			}
+			// Wire remaining wall-clock as a hard timeout on the executor context so a hung
+			// LLM call is killed, not left to drift past the budget (RNF-8).
+			execCtx := ctx
+			var cancel context.CancelFunc
+			if r.budget.MaxWallClock > 0 {
+				if rem := r.budget.RemainingWallClock(r.now()); rem > 0 {
+					execCtx, cancel = context.WithTimeout(ctx, rem)
+				} else {
+					execCtx, cancel = context.WithTimeout(ctx, time.Millisecond)
+				}
+			}
+			tTokens, tIters, tErr := r.Executor(execCtx, task)
+			if cancel != nil {
+				cancel()
+			}
+			if execCtx.Err() == context.DeadlineExceeded {
+				tErr = fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
+			}
+			r.budget.AddTurn(tTokens, tIters)
+			r.state.Budget = r.budget
+			r.state.UpdatedAt = r.now()
+			_ = r.persistState()
+			if tErr == nil {
+				succeeded = true
+				lastErr = nil
+				break
+			}
+			lastErr = tErr
+			// Budget may have been exhausted by this attempt.
+			if err := r.budget.Check(r.now()); err != nil {
+				r.state.Status = StatusKilled
+				r.state.Error = err.Error()
+				_ = r.persistState()
+				return r.killedReport(err)
+			}
+			if attempt == maxRetries {
+				break
+			}
+		}
+		if !succeeded {
+			// RF-11.5: retries exhausted is an implicit HITL checkpoint, not a silent skip.
+			implicit := Checkpoint{ID: "implicit-retries-exhausted", Trigger: TriggerAfterTask, Required: true}
+			approved, _ := r.handleCheckpoint(ctx, implicit, fmt.Sprintf("task %s retries exhausted: %v", task.ID, lastErr))
+			if !approved {
+				r.state.Error = fmt.Sprintf("task %s failed after %d retries: %v", task.ID, maxRetries, lastErr)
+				_ = r.persistState()
+				return r.pauseReport(implicit, r.state.Error)
+			}
+			// If implicitly approved (e.g., test auto-approve), mark failed and continue only if dry? No,
+			// per spec we still pause; the above branch already handles. For non-paused path we treat as failed.
+			r.state.Status = StatusFailed
+			r.state.Error = fmt.Sprintf("task %s failed after %d retries: %v", task.ID, maxRetries, lastErr)
+			_ = r.persistState()
+			return r.failReport(fmt.Errorf("%s", r.state.Error))
+		}
+
+		r.state.CompletedTasks = append(r.state.CompletedTasks, task.ID)
+		r.state.UpdatedAt = r.now()
+		r.state.Budget = r.budget
+		_ = r.persistState()
+
+		// Dedicated budget check AFTER task completes — catch exact-boundary exceed that
+		// the pre-task check would miss (T1 case). Hard kill, not a checkpoint.
+		if err := r.budget.Check(r.now()); err != nil {
+			r.state.Status = StatusKilled
+			r.state.Error = err.Error()
+			_ = r.persistState()
+			return r.killedReport(err)
+		}
+
+		// RNF-9 high sensitivity also forces checkpoint after every fs-write/shell task.
+		// Minimal: if high sensitivity, treat every just-completed task as needing after_task pause
+		// when the task goal suggests a write/shell operation.
+		needsAfterHigh := needsHighCheckpoint && taskTouchesFSOrShell(task)
+		var afterCP *Checkpoint
+		if needsAfterHigh {
+			afterCP = &Checkpoint{ID: "sensitivity-high-after-task", Trigger: TriggerAfterTask, Required: true}
+		} else {
+			afterCP = r.findCheckpoint(TriggerAfterTask)
+		}
+		if afterCP != nil && afterCP.Required {
+			approved, err := r.handleCheckpoint(ctx, *afterCP, fmt.Sprintf("after task %s", task.ID))
+			if err != nil {
+				return r.failReport(err)
+			}
+			if !approved {
+				return r.pauseReport(*afterCP, "after_task")
+			}
+			reportPaused = append(reportPaused, afterCP.ID)
+		}
+
+		// Commit per task is logical at this point (git ops would happen here when wired
+		// to a real worktree). Dry_run already returned; otherwise we record the intent.
+		if r.Manifest.Git.CommitPerTask && r.Manifest.Mode != ModeDryRun {
+			// No-op for this slice beyond audit; real git commit is a follow-up via
+			// worktree branch integration (phase-2 store.BranchSession already provides the isolation primitive).
+		}
+	}
+
+	// Pre-merge HITL (RNF-9.2 for regulado and spec 7.1).
+	if cp := r.findCheckpoint(TriggerBeforeMerge); cp != nil && cp.Required {
+		approved, err := r.handleCheckpoint(ctx, *cp, "before merge to base_branch")
+		if err != nil {
+			return r.failReport(err)
+		}
+		if !approved {
+			return r.pauseReport(*cp, "before_merge")
+		}
+		reportPaused = append(reportPaused, cp.ID)
+	} else if cfgSensitivityRequiresPreMerge(r.Config.Project.Sensitivity) {
+		// Defense in depth: regulated without explicit pre-merge should have been rejected at
+		// ValidateAgainstSensitivity, but if we reach here via direct Runner construction, pause.
+		cp := Checkpoint{ID: "required-pre-merge", Trigger: TriggerBeforeMerge, Required: true}
+		approved, err := r.handleCheckpoint(ctx, cp, "before merge (sensitivity ceiling)")
+		if err != nil {
+			return r.failReport(err)
+		}
+		if !approved {
+			return r.pauseReport(cp, "before_merge sensitivity")
+		}
+		reportPaused = append(reportPaused, cp.ID)
+	}
+
+	r.state.Status = StatusCompleted
+	r.state.UpdatedAt = r.now()
+	r.state.CurrentTaskID = ""
+	_ = r.persistState()
+
+	rep := &Report{
+		RunID:             r.Manifest.RunID,
+		Mode:              r.Manifest.Mode,
+		Status:            StatusCompleted,
+		CompletedTasks:    append([]string(nil), r.state.CompletedTasks...),
+		TotalTasks:        len(tasks),
+		PausedCheckpoints: reportPaused,
+		BudgetUsed:        r.budget,
+		ValidationState:   "all_tasks_passed",
+	}
+	if r.StateDir != "" {
+		_ = r.persistReport(rep)
+	}
+	return rep, nil
+}
+
+func (r *Runner) findCheckpoint(trigger string) *Checkpoint {
+	for i := range r.Manifest.HITL.Checkpoints {
+		if r.Manifest.HITL.Checkpoints[i].Trigger == trigger {
+			cp := r.Manifest.HITL.Checkpoints[i]
+			return &cp
+		}
+	}
+	return nil
+}
+
+func (r *Runner) handleCheckpoint(ctx context.Context, cp Checkpoint, reason string) (bool, error) {
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+	}
+	if r.OnCheckpoint == nil {
+		// No handler: required checkpoints default to PAUSE (never auto-approve silently).
+		// This makes autonomy REAL: without an approval callback, HITL actually bites.
+		r.state.PausedCheckpoint = &cp
+		r.state.PauseReason = reason
+		r.state.Status = StatusPaused
+		r.state.UpdatedAt = r.now()
+		_ = r.persistState()
+		return false, nil
+	}
+	approved, err := r.OnCheckpoint(cp, &r.state)
+	if err != nil {
+		return false, err
+	}
+	if !approved {
+		r.state.PausedCheckpoint = &cp
+		r.state.PauseReason = reason
+		r.state.Status = StatusPaused
+		r.state.UpdatedAt = r.now()
+		_ = r.persistState()
+	}
+	return approved, nil
+}
+
+func (r *Runner) pauseReport(cp Checkpoint, reason string) (*Report, error) {
+	r.state.Status = StatusPaused
+	r.state.PausedCheckpoint = &cp
+	r.state.PauseReason = reason
+	r.state.UpdatedAt = r.now()
+	_ = r.persistState()
+	tasks := r.Manifest.EffectiveTasks()
+	rep := &Report{
+		RunID:             r.Manifest.RunID,
+		Mode:              r.Manifest.Mode,
+		Status:            StatusPaused,
+		CompletedTasks:    append([]string(nil), r.state.CompletedTasks...),
+		TotalTasks:        len(tasks),
+		PausedCheckpoints: []string{cp.ID},
+		BudgetUsed:        r.budget,
+		ValidationState:   "paused_for_hitl",
+		Assumptions:       []string{reason},
+	}
+	if r.StateDir != "" {
+		_ = r.persistReport(rep)
+	}
+	return rep, fmt.Errorf("paused at checkpoint %q (%s): %s — awaiting approval", cp.ID, cp.Trigger, reason)
+}
+
+func (r *Runner) failReport(err error) (*Report, error) {
+	r.state.Status = StatusFailed
+	r.state.Error = err.Error()
+	r.state.UpdatedAt = r.now()
+	_ = r.persistState()
+	tasks := r.Manifest.EffectiveTasks()
+	rep := &Report{
+		RunID:           r.Manifest.RunID,
+		Mode:            r.Manifest.Mode,
+		Status:          StatusFailed,
+		CompletedTasks:  append([]string(nil), r.state.CompletedTasks...),
+		TotalTasks:      len(tasks),
+		BudgetUsed:      r.budget,
+		ValidationState: "failed",
+		Deviations:      []string{err.Error()},
+	}
+	if r.StateDir != "" {
+		_ = r.persistReport(rep)
+	}
+	return rep, err
+}
+
+func (r *Runner) killedReport(err error) (*Report, error) {
+	tasks := r.Manifest.EffectiveTasks()
+	rep := &Report{
+		RunID:           r.Manifest.RunID,
+		Mode:            r.Manifest.Mode,
+		Status:          StatusKilled,
+		CompletedTasks:  append([]string(nil), r.state.CompletedTasks...),
+		TotalTasks:      len(tasks),
+		BudgetUsed:      r.budget,
+		ValidationState: "failed",
+		Deviations:      []string{err.Error()},
+	}
+	if r.StateDir != "" {
+		_ = r.persistReport(rep)
+	}
+	return rep, err
+}
+
+func (r *Runner) dryRunReport() *Report {
+	tasks := r.Manifest.EffectiveTasks()
+	return &Report{
+		RunID:           r.Manifest.RunID,
+		Mode:            ModeDryRun,
+		Status:          StatusCompleted,
+		CompletedTasks:  []string{},
+		TotalTasks:      len(tasks),
+		BudgetUsed:      BudgetState{},
+		ValidationState: "dry_run_no_writes",
+		Assumptions:     []string{"dry_run: no tasks executed, no writes performed"},
+	}
+}
+
+func isHighSensitivity(s string) bool {
+	n, ok := configNormalize(s)
+	if !ok {
+		return false
+	}
+	return n == config.SensitivitySensitive
+}
+
+func cfgSensitivityRequiresPreMerge(s string) bool {
+	n, ok := configNormalize(s)
+	if !ok {
+		return false
+	}
+	return n == config.SensitivityRegulated
+}
+
+func configNormalize(s string) (string, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(s))
+	switch trimmed {
+	case "general", "low":
+		return config.SensitivityGeneral, true
+	case "regulado", "regulated", "medium":
+		return config.SensitivityRegulated, true
+	case "datos-sensibles", "datos_sensibles", "datos sensibles", "sensitive", "high", "restricted":
+		return config.SensitivitySensitive, true
+	default:
+		return "", false
+	}
+}
+
+func taskTouchesFSOrShell(t Task) bool {
+	g := strings.ToLower(t.Goal)
+	// Heuristic for the minimal slice: treat any task mentioning fs.write,
+	// shell, or file creation as sensitive-touching. Real enforcement would
+	// inspect tool calls per turn, not goal text.
+	return strings.Contains(g, "fs.") || strings.Contains(g, "write") || strings.Contains(g, "shell") || strings.Contains(g, "file") || strings.Contains(g, "migrate")
+}
