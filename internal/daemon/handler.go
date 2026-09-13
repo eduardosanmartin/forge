@@ -46,6 +46,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleBranchSession(ctx, req)
 	case MethodMergeSession:
 		return h.handleMergeSession(ctx, req)
+	case MethodCompareSessions:
+		return h.handleCompareSessions(ctx, req)
 	case MethodExecuteTurn:
 		return h.handleExecuteTurn(ctx, req)
 	case MethodGetMessages:
@@ -230,6 +232,76 @@ func (h *Handler) handleMergeSession(ctx context.Context, req *JSONRPCRequest) *
 	}
 	if msgs, err := h.mgr.GetMessagesSince(ctx, session.ID, 0); err == nil {
 		result.MessageCount = len(msgs)
+	}
+	return h.resultResponse(req.ID, result)
+}
+
+func (h *Handler) handleCompareSessions(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params CompareSessionsParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SessionA == "" || params.SessionB == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "session_a and session_b are required", nil)
+	}
+	cmp, err := h.mgr.CompareSessions(ctx, params.SessionA, params.SessionB)
+	if err != nil {
+		if errors.Is(err, store.ErrSessionNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "compare sessions failed", err.Error())
+	}
+	result := CompareSessionsResult{
+		SessionA: SessionResult{
+			ID:        cmp.SessionA.ID,
+			CreatedAt: cmp.SessionA.CreatedAt,
+			UpdatedAt: cmp.SessionA.UpdatedAt,
+			Metadata:  cmp.SessionA.Metadata,
+			MessageCount: cmp.CountA,
+		},
+		SessionB: SessionResult{
+			ID:        cmp.SessionB.ID,
+			CreatedAt: cmp.SessionB.CreatedAt,
+			UpdatedAt: cmp.SessionB.UpdatedAt,
+			Metadata:  cmp.SessionB.Metadata,
+			MessageCount: cmp.CountB,
+		},
+		BranchAtSeqA:    cmp.BranchAtSeqA,
+		BranchAtSeqB:    cmp.BranchAtSeqB,
+		BranchParentA:   cmp.BranchParentA,
+		BranchParentB:   cmp.BranchParentB,
+		BranchRootA:     cmp.BranchRootA,
+		BranchRootB:     cmp.BranchRootB,
+		CountA:          cmp.CountA,
+		CountB:          cmp.CountB,
+		DivergentCountA: cmp.DivergentCountA,
+		DivergentCountB: cmp.DivergentCountB,
+		SameSession:     cmp.SameSession,
+	}
+	for _, m := range cmp.DivergentA {
+		result.DivergentA = append(result.DivergentA, h.messageToResult(m))
+	}
+	for _, m := range cmp.DivergentB {
+		result.DivergentB = append(result.DivergentB, h.messageToResult(m))
+	}
+	if len(cmp.DivergentA) > 0 {
+		last := h.messageToResult(cmp.DivergentA[len(cmp.DivergentA)-1])
+		result.LastMessageA = &last
+	} else if cmp.CountA > 0 {
+		// fallback to last of full transcript when no divergent tail (same session)
+		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionA.ID, 0); err == nil && len(msgs) > 0 {
+			last := h.messageToResult(msgs[len(msgs)-1])
+			result.LastMessageA = &last
+		}
+	}
+	if len(cmp.DivergentB) > 0 {
+		last := h.messageToResult(cmp.DivergentB[len(cmp.DivergentB)-1])
+		result.LastMessageB = &last
+	} else if cmp.CountB > 0 {
+		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionB.ID, 0); err == nil && len(msgs) > 0 {
+			last := h.messageToResult(msgs[len(msgs)-1])
+			result.LastMessageB = &last
+		}
 	}
 	return h.resultResponse(req.ID, result)
 }

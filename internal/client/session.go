@@ -83,3 +83,12 @@ func (c *Client) SwitchModel(ctx context.Context, sessionID, model string) error
 	var result map[string]any
 	return c.Call(ctx, daemon.MethodSwitchModel, daemon.SwitchModelParams{SessionID: sessionID, Model: model}, &result)
 }
+
+// CompareSessions compares two sessions side-by-side.
+func (c *Client) CompareSessions(ctx context.Context, aID, bID string) (*daemon.CompareSessionsResult, error) {
+	var result daemon.CompareSessionsResult
+	if err := c.Call(ctx, daemon.MethodCompareSessions, daemon.CompareSessionsParams{SessionA: aID, SessionB: bID}, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}

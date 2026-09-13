@@ -120,6 +120,7 @@ const (
 	MethodStatus           = "daemon.status"
 	MethodSwitchModel      = "session.switch_model"
 	MethodSessionMarkSuccess = "session.mark_success"
+	MethodCompareSessions  = "session.compare"
 	MethodPluginList       = "plugin.list"
 	MethodPluginEnable     = "plugin.enable"
 	MethodPluginDisable    = "plugin.disable"
@@ -208,6 +209,33 @@ type MergeSessionParams struct {
 // SessionMarkSuccessParams for session.mark_success.
 type SessionMarkSuccessParams struct {
 	SessionID string `json:"session_id"`
+}
+
+// CompareSessionsParams for session.compare.
+type CompareSessionsParams struct {
+	SessionA string `json:"session_a"`
+	SessionB string `json:"session_b"`
+}
+
+// CompareSessionsResult for session.compare.
+type CompareSessionsResult struct {
+	SessionA        SessionResult   `json:"session_a"`
+	SessionB        SessionResult   `json:"session_b"`
+	BranchAtSeqA    int             `json:"branch_at_seq_a"`
+	BranchAtSeqB    int             `json:"branch_at_seq_b"`
+	BranchParentA   string          `json:"branch_parent_a,omitempty"`
+	BranchParentB   string          `json:"branch_parent_b,omitempty"`
+	BranchRootA     string          `json:"branch_root_a,omitempty"`
+	BranchRootB     string          `json:"branch_root_b,omitempty"`
+	CountA          int             `json:"count_a"`
+	CountB          int             `json:"count_b"`
+	DivergentCountA int             `json:"divergent_count_a"`
+	DivergentCountB int             `json:"divergent_count_b"`
+	SameSession     bool            `json:"same_session"`
+	DivergentA      []MessageResult `json:"divergent_a,omitempty"`
+	DivergentB      []MessageResult `json:"divergent_b,omitempty"`
+	LastMessageA    *MessageResult  `json:"last_message_a,omitempty"`
+	LastMessageB    *MessageResult  `json:"last_message_b,omitempty"`
 }
 
 // PluginEnableParams for plugin.enable / plugin.disable.

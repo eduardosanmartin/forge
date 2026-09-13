@@ -296,6 +296,97 @@ func branchAtSeq(meta map[string]any) int {
 	}
 }
 
+func branchMetaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	v, ok := meta[key]
+	if !ok {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// CompareSessions returns a side-by-side comparison of two sessions.
+// It surfaces lineage metadata (branch_parent/root/at_seq), total counts, and
+// divergent tails (messages with seq > branch_at_seq). When a == b the
+// result is marked SameSession and divergent tails are empty.
+func (s *Store) CompareSessions(ctx context.Context, aID, bID string) (*SessionCompare, error) {
+	if aID == bID {
+		sess, err := s.GetSession(ctx, aID)
+		if err != nil {
+			return nil, err
+		}
+		msgs, err := s.GetMessagesSince(ctx, aID, 0)
+		if err != nil {
+			return nil, fmt.Errorf("compare: read messages: %w", err)
+		}
+		return &SessionCompare{
+			SessionA:       sess,
+			SessionB:       sess,
+			BranchAtSeqA:   branchAtSeq(sess.Metadata),
+			BranchAtSeqB:   branchAtSeq(sess.Metadata),
+			BranchParentA:  branchMetaString(sess.Metadata, "branch_parent"),
+			BranchParentB:  branchMetaString(sess.Metadata, "branch_parent"),
+			BranchRootA:    branchMetaString(sess.Metadata, "branch_root"),
+			BranchRootB:    branchMetaString(sess.Metadata, "branch_root"),
+			CountA:         len(msgs),
+			CountB:         len(msgs),
+			DivergentA:     nil,
+			DivergentB:     nil,
+			DivergentCountA: 0,
+			DivergentCountB: 0,
+			SameSession:    true,
+		}, nil
+	}
+	aSess, err := s.GetSession(ctx, aID)
+	if err != nil {
+		return nil, err
+	}
+	bSess, err := s.GetSession(ctx, bID)
+	if err != nil {
+		return nil, err
+	}
+	aAt := branchAtSeq(aSess.Metadata)
+	bAt := branchAtSeq(bSess.Metadata)
+	aAll, err := s.GetMessagesSince(ctx, aID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("compare: read A: %w", err)
+	}
+	bAll, err := s.GetMessagesSince(ctx, bID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("compare: read B: %w", err)
+	}
+	aDiv, err := s.GetMessagesSince(ctx, aID, aAt)
+	if err != nil {
+		return nil, fmt.Errorf("compare: read A tail: %w", err)
+	}
+	bDiv, err := s.GetMessagesSince(ctx, bID, bAt)
+	if err != nil {
+		return nil, fmt.Errorf("compare: read B tail: %w", err)
+	}
+	return &SessionCompare{
+		SessionA:       aSess,
+		SessionB:       bSess,
+		BranchAtSeqA:   aAt,
+		BranchAtSeqB:   bAt,
+		BranchParentA:  branchMetaString(aSess.Metadata, "branch_parent"),
+		BranchParentB:  branchMetaString(bSess.Metadata, "branch_parent"),
+		BranchRootA:    branchMetaString(aSess.Metadata, "branch_root"),
+		BranchRootB:    branchMetaString(bSess.Metadata, "branch_root"),
+		CountA:         len(aAll),
+		CountB:         len(bAll),
+		DivergentA:     aDiv,
+		DivergentB:     bDiv,
+		DivergentCountA: len(aDiv),
+		DivergentCountB: len(bDiv),
+		SameSession:    false,
+	}, nil
+}
+
 // GetSession retrieves a session by ID.
 func (s *Store) GetSession(ctx context.Context, id string) (Session, error) {
 	var session Session

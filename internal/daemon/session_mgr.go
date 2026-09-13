@@ -25,6 +25,7 @@ type StoreInterface interface {
 	DeleteSession(ctx context.Context, id string) error
 	BranchSession(ctx context.Context, sourceID string, atSeq int, metadata map[string]any) (store.Session, error)
 	MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error)
+	CompareSessions(ctx context.Context, aID, bID string) (*store.SessionCompare, error)
 	AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error)
 	GetMessages(ctx context.Context, sessionID string, limit, offset int) ([]store.Message, error)
 	GetMessagesSince(ctx context.Context, sessionID string, sinceSeq int) ([]store.Message, error)
@@ -239,6 +240,11 @@ func (m *SessionManager) MergeBranch(ctx context.Context, sourceID, targetID str
 		m.logger.Info("session merged", "source_id", sourceID, "target_id", targetID)
 	}
 	return session, nil
+}
+
+// CompareSessions returns a side-by-side comparison of two sessions.
+func (m *SessionManager) CompareSessions(ctx context.Context, aID, bID string) (*store.SessionCompare, error) {
+	return m.store.CompareSessions(ctx, aID, bID)
 }
 
 // ListSessions returns all sessions.

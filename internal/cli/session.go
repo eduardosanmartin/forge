@@ -28,6 +28,7 @@ func newSessionCommand() *cobra.Command {
 	cmd.AddCommand(newSessionReplayCommand())
 	cmd.AddCommand(newSessionBranchCommand())
 	cmd.AddCommand(newSessionMergeCommand())
+	cmd.AddCommand(newSessionCompareCommand())
 	cmd.AddCommand(newSessionListCommand())
 	cmd.AddCommand(newSessionSwitchCommand())
 	return cmd
@@ -265,6 +266,104 @@ func runSessionMerge(ctx context.Context, out io.Writer, sourceID, targetID stri
 		fmt.Fprintf(os.Stdout, "Appended %d messages from %s (merged_from=%s)\n", mergedCount, sourceID, mergedFrom)
 	}
 	return nil
+}
+
+func newSessionCompareCommand() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:     "compare <session-a> <session-b>",
+		Aliases: []string{"diff"},
+		Short:   "Compare two sessions side-by-side (RF-9 parallel-compare)",
+		Long:    "Shows divergent messages since branch_at_seq for each session, total counts, and last messages side-by-side. When both ids are equal, reports same-session with no divergence.",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionCompare(cmd.Context(), cmd.OutOrStdout(), args[0], args[1], jsonOut)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
+}
+
+func runSessionCompare(ctx context.Context, out io.Writer, aID, bID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session compare", err.Error())
+		}
+		return daemonHint(err)
+	}
+	defer cl.Close()
+	res, err := cl.CompareSessions(ctx, aID, bID)
+	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session compare", err.Error())
+		}
+		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session compare", res)
+	}
+	// Human output: side-by-side summary.
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	trunc := func(s string, n int) string {
+		if len(s) <= n {
+			return s
+		}
+		return s[:n] + "…"
+	}
+
+	fmt.Fprintf(os.Stdout, "Compare %s vs %s\n", short(aID), short(bID))
+	fmt.Fprintf(os.Stdout, "  A %s  count=%d divergent=%d branch_at_seq=%d parent=%s root=%s\n", res.SessionA.ID, res.CountA, res.DivergentCountA, res.BranchAtSeqA, displayMeta(res.BranchParentA), displayMeta(res.BranchRootA))
+	fmt.Fprintf(os.Stdout, "  B %s  count=%d divergent=%d branch_at_seq=%d parent=%s root=%s\n", res.SessionB.ID, res.CountB, res.DivergentCountB, res.BranchAtSeqB, displayMeta(res.BranchParentB), displayMeta(res.BranchRootB))
+	if res.SameSession {
+		fmt.Fprintln(os.Stdout, "Same session — no divergence")
+		if res.LastMessageA != nil {
+			fmt.Fprintf(os.Stdout, "Last: [%d] %s: %s\n", res.LastMessageA.Seq, res.LastMessageA.Role, trunc(res.LastMessageA.Content, 120))
+		}
+		return nil
+	}
+	if res.LastMessageA != nil {
+		fmt.Fprintf(os.Stdout, "Last A: [%d] %s: %s\n", res.LastMessageA.Seq, res.LastMessageA.Role, trunc(res.LastMessageA.Content, 120))
+	}
+	if res.LastMessageB != nil {
+		fmt.Fprintf(os.Stdout, "Last B: [%d] %s: %s\n", res.LastMessageB.Seq, res.LastMessageB.Role, trunc(res.LastMessageB.Content, 120))
+	}
+	// Divergent tails side-by-side
+	fmt.Fprintf(os.Stdout, "\n--- A divergent (%d) ---\n", res.DivergentCountA)
+	if len(res.DivergentA) == 0 {
+		fmt.Fprintln(os.Stdout, "(none)")
+	} else {
+		for _, m := range res.DivergentA {
+			fmt.Fprintf(os.Stdout, "  [%d] %s: %s\n", m.Seq, m.Role, trunc(m.Content, 120))
+		}
+	}
+	fmt.Fprintf(os.Stdout, "\n--- B divergent (%d) ---\n", res.DivergentCountB)
+	if len(res.DivergentB) == 0 {
+		fmt.Fprintln(os.Stdout, "(none)")
+	} else {
+		for _, m := range res.DivergentB {
+			fmt.Fprintf(os.Stdout, "  [%d] %s: %s\n", m.Seq, m.Role, trunc(m.Content, 120))
+		}
+	}
+	return nil
+}
+
+func displayMeta(s string) string {
+	if s == "" {
+		return "-"
+	}
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 func newSessionListCommand() *cobra.Command {

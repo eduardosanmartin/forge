@@ -219,6 +219,103 @@ func (f *fakeStore) MergeBranch(_ context.Context, sourceID, targetID string) (s
 	return tgt, nil
 }
 
+func (f *fakeStore) CompareSessions(_ context.Context, aID, bID string) (*store.SessionCompare, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if aID == bID {
+		s, ok := f.sessions[aID]
+		if !ok {
+			return nil, store.ErrSessionNotFound
+		}
+		msgs := f.msgs[aID]
+		at := 0
+		if v, ok := s.Metadata["branch_at_seq"]; ok {
+			switch n := v.(type) {
+			case int:
+				at = n
+			case int64:
+				at = int(n)
+			case float64:
+				at = int(n)
+			}
+		}
+		parent := ""
+		if v, ok := s.Metadata["branch_parent"]; ok {
+			if str, ok := v.(string); ok {
+				parent = str
+			}
+		}
+		root := ""
+		if v, ok := s.Metadata["branch_root"]; ok {
+			if str, ok := v.(string); ok {
+				root = str
+			}
+		}
+		return &store.SessionCompare{
+			SessionA: s, SessionB: s,
+			BranchAtSeqA: at, BranchAtSeqB: at,
+			BranchParentA: parent, BranchParentB: parent,
+			BranchRootA: root, BranchRootB: root,
+			CountA: len(msgs), CountB: len(msgs),
+			SameSession: true,
+		}, nil
+	}
+	aSess, ok := f.sessions[aID]
+	if !ok {
+		return nil, store.ErrSessionNotFound
+	}
+	bSess, ok := f.sessions[bID]
+	if !ok {
+		return nil, store.ErrSessionNotFound
+	}
+	branchAt := func(m map[string]any) int {
+		if v, ok := m["branch_at_seq"]; ok {
+			switch n := v.(type) {
+			case int:
+				return n
+			case int64:
+				return int(n)
+			case float64:
+				return int(n)
+			}
+		}
+		return 0
+	}
+	branchStr := func(m map[string]any, key string) string {
+		if v, ok := m[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+		return ""
+	}
+	aAt := branchAt(aSess.Metadata)
+	bAt := branchAt(bSess.Metadata)
+	var aDiv, bDiv []store.Message
+	for _, m := range f.msgs[aID] {
+		if m.Seq > aAt {
+			aDiv = append(aDiv, m)
+		}
+	}
+	for _, m := range f.msgs[bID] {
+		if m.Seq > bAt {
+			bDiv = append(bDiv, m)
+		}
+	}
+	return &store.SessionCompare{
+		SessionA: aSess, SessionB: bSess,
+		BranchAtSeqA: aAt, BranchAtSeqB: bAt,
+		BranchParentA: branchStr(aSess.Metadata, "branch_parent"),
+		BranchParentB: branchStr(bSess.Metadata, "branch_parent"),
+		BranchRootA: branchStr(aSess.Metadata, "branch_root"),
+		BranchRootB: branchStr(bSess.Metadata, "branch_root"),
+		CountA: len(f.msgs[aID]), CountB: len(f.msgs[bID]),
+		DivergentA: aDiv, DivergentB: bDiv,
+		DivergentCountA: len(aDiv), DivergentCountB: len(bDiv),
+		SameSession: false,
+	}, nil
+}
+
 func (f *fakeStore) AppendMessage(_ context.Context, msg *store.Message) (int, int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

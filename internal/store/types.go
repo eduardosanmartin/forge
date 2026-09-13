@@ -27,6 +27,25 @@ type Message struct {
 	CreatedAt  int64
 }
 
+// SessionCompare holds a side-by-side comparison of two sessions.
+type SessionCompare struct {
+	SessionA       Session   `json:"session_a"`
+	SessionB       Session   `json:"session_b"`
+	BranchAtSeqA   int       `json:"branch_at_seq_a"`
+	BranchAtSeqB   int       `json:"branch_at_seq_b"`
+	BranchParentA  string    `json:"branch_parent_a"`
+	BranchParentB  string    `json:"branch_parent_b"`
+	BranchRootA    string    `json:"branch_root_a"`
+	BranchRootB    string    `json:"branch_root_b"`
+	CountA         int       `json:"count_a"`
+	CountB         int       `json:"count_b"`
+	DivergentA     []Message `json:"divergent_a"`
+	DivergentB     []Message `json:"divergent_b"`
+	DivergentCountA int      `json:"divergent_count_a"`
+	DivergentCountB int      `json:"divergent_count_b"`
+	SameSession    bool      `json:"same_session"`
+}
+
 // Stats holds database statistics.
 type Stats struct {
 	SessionCount int64
