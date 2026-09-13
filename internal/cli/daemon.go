@@ -167,6 +167,10 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 		Git: perms.GitPermissions{
 			Allow: app.Config.Permissions.Git.Allow,
 		},
+		Custom: perms.CustomPermissions{
+			Deny:  app.Config.Permissions.Custom.Deny,
+			Allow: app.Config.Permissions.Custom.Allow,
+		},
 	}
 	permsEng, err := perms.New(permsPolicy, workspaceRoot, app.Logger)
 	if err != nil {

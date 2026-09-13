@@ -57,6 +57,13 @@ silently. Documents on older schema versions are migrated forward at load.
     operations — force-push, `reset --hard`, `clean`, forced branch deletion —
     stay blocked by forge's non-configurable safety floor (RNF-8.2) no matter
     what this list contains.
+  - `permissions.custom.deny` / `permissions.custom.allow`: forge-internal
+    harness tools by name. Read-only internal tools (`retrieval_search`,
+    `compaction_summarize`, `anchoring_list`, `anchoring_get`,
+    `spawn_subagent`) are allowed by default; the memory-mutating tools
+    (`anchoring_store`, `anchoring_delete`) are DENIED by default
+    (RNF-4.12) and must be listed under `allow` to be enabled. `deny`
+    always wins over `allow` for the same tool.
 
 ## Migration
 

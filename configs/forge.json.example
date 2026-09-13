@@ -33,7 +33,8 @@
   "permissions": {
     "fs": { "read": ["./**"], "write": ["./**"] },
     "shell": { "allow": ["go", "git"], "require_isolation": true },
-    "git": { "allow": ["status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"] }
+    "git": { "allow": ["status", "add", "commit", "log", "diff", "branch", "switch", "stash", "restore", "show", "remote", "fetch"] },
+    "custom": { "deny": [], "allow": [] }
   },
   "tui": {
     "layout": "hybrid",

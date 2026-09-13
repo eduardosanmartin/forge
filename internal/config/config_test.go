@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
 // writeConfigFile writes content to path with restrictive permissions,
@@ -884,5 +886,76 @@ func TestLoadUpgradesV3DocumentInPlace(t *testing.T) {
 	}
 	if want := []string{"qwen2.5-coder:7b"}; !reflect.DeepEqual(p.Models, want) {
 		t.Errorf("models = %v, want %v preserved verbatim", p.Models, want)
+	}
+}
+
+// TestCustomPermissionsChainToEngine proves the full chain for the custom
+// permissions subsection: JSON -> config Load -> conversion into the
+// perms engine policy (the same field-for-field mapping cli/daemon.go
+// performs) -> engine decisions. RNF-4.12: the mutating anchoring tools are
+// denied by the engine's write floor unless permissions.custom.allow
+// restores them.
+func TestCustomPermissionsChainToEngine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	writeConfigFile(t, path, `{
+		"permissions": {
+			"custom": {
+				"allow": ["anchoring_store"],
+				"deny": ["compaction_summarize"]
+			}
+		}
+	}`)
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantCustom := CustomPermissions{
+		Deny:  []string{"compaction_summarize"},
+		Allow: []string{"anchoring_store"},
+	}
+	if !reflect.DeepEqual(got.Permissions.Custom, wantCustom) {
+		t.Fatalf("loaded custom permissions = %+v, want %+v", got.Permissions.Custom, wantCustom)
+	}
+
+	// Conversion into the engine policy, mirroring cli/daemon.go.
+	permsPolicy := perms.PermissionsPolicy{
+		FS: perms.FSPermissions{
+			Read:  got.Permissions.FS.Read,
+			Write: got.Permissions.FS.Write,
+		},
+		Shell: perms.ShellPermissions{
+			Allow: got.Permissions.Shell.Allow,
+		},
+		Git: perms.GitPermissions{
+			Allow: got.Permissions.Git.Allow,
+		},
+		Custom: perms.CustomPermissions{
+			Deny:  got.Permissions.Custom.Deny,
+			Allow: got.Permissions.Custom.Allow,
+		},
+	}
+	eng, err := perms.New(permsPolicy, t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("perms.New: %v", err)
+	}
+
+	cases := []struct {
+		tool      string
+		wantAllow bool
+		wantRule  string
+	}{
+		{tool: "anchoring_store", wantAllow: true, wantRule: "custom:anchoring_store"},
+		{tool: "anchoring_delete", wantAllow: false, wantRule: "custom-write-floor:anchoring_delete"},
+		{tool: "compaction_summarize", wantAllow: false, wantRule: "custom:compaction_summarize"},
+		{tool: "retrieval_search", wantAllow: true, wantRule: "floor:custom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tool, func(t *testing.T) {
+			d := eng.Check(perms.Request{Kind: perms.KindCustom, Command: tc.tool})
+			if d.Allowed != tc.wantAllow || d.Rule != tc.wantRule {
+				t.Errorf("Check(%s) = %+v, want allowed=%v rule=%q", tc.tool, d, tc.wantAllow, tc.wantRule)
+			}
+		})
 	}
 }
