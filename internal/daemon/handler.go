@@ -271,17 +271,17 @@ func (h *Handler) handleCompareSessions(ctx context.Context, req *JSONRPCRequest
 	}
 	result := CompareSessionsResult{
 		SessionA: SessionResult{
-			ID:        cmp.SessionA.ID,
-			CreatedAt: cmp.SessionA.CreatedAt,
-			UpdatedAt: cmp.SessionA.UpdatedAt,
-			Metadata:  cmp.SessionA.Metadata,
+			ID:           cmp.SessionA.ID,
+			CreatedAt:    cmp.SessionA.CreatedAt,
+			UpdatedAt:    cmp.SessionA.UpdatedAt,
+			Metadata:     cmp.SessionA.Metadata,
 			MessageCount: cmp.CountA,
 		},
 		SessionB: SessionResult{
-			ID:        cmp.SessionB.ID,
-			CreatedAt: cmp.SessionB.CreatedAt,
-			UpdatedAt: cmp.SessionB.UpdatedAt,
-			Metadata:  cmp.SessionB.Metadata,
+			ID:           cmp.SessionB.ID,
+			CreatedAt:    cmp.SessionB.CreatedAt,
+			UpdatedAt:    cmp.SessionB.UpdatedAt,
+			Metadata:     cmp.SessionB.Metadata,
 			MessageCount: cmp.CountB,
 		},
 		BranchAtSeqA:    cmp.BranchAtSeqA,
