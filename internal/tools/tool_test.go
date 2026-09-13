@@ -17,6 +17,10 @@ func TestToolInterface(t *testing.T) {
 		newFsListTool(),
 		newShellExecTool(nil),
 		newGitTool(),
+		newGitWorktreeAddTool(),
+		newGitWorktreeListTool(),
+		newGitWorktreeRemoveTool(),
+		newGitBranchTaskTool(),
 	}
 
 	for _, tool := range tools {
@@ -51,6 +55,10 @@ func TestTool_JSONSchemaStructure(t *testing.T) {
 		newFsListTool(),
 		newShellExecTool(nil),
 		newGitTool(),
+		newGitWorktreeAddTool(),
+		newGitWorktreeListTool(),
+		newGitWorktreeRemoveTool(),
+		newGitBranchTaskTool(),
 	}
 
 	for _, tool := range tools {

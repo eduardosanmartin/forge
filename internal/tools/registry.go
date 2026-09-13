@@ -189,7 +189,8 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 }
 
 // defaultRegistryTools returns the base tool set (the original five
-// OS-reaching tools). Every entry is dependency-free.
+// OS-reaching tools plus git worktree/branch-per-task isolation primitives
+// for RF-10.1). Every entry is dependency-free.
 func defaultRegistryTools(logger *slog.Logger) []Tool {
 	return []Tool{
 		newFsReadTool(),
@@ -197,6 +198,10 @@ func defaultRegistryTools(logger *slog.Logger) []Tool {
 		newFsListTool(),
 		newShellExecTool(logger),
 		newGitTool(),
+		newGitWorktreeAddTool(),
+		newGitWorktreeListTool(),
+		newGitWorktreeRemoveTool(),
+		newGitBranchTaskTool(),
 	}
 }
 

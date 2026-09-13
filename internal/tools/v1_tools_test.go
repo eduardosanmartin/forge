@@ -64,18 +64,20 @@ func setupV1Registry(t *testing.T) (*Registry, string, *retrieval.Retriever, *an
 }
 
 // TestRegistryWithDeps_RegistersBaseAndV1Tools verifies the deps
-// constructor registers the base five tools plus the six v1 tools, while
-// NewDefaultRegistry keeps registering only the base five (covered by
+// constructor registers the base tools plus the six v1 tools, while
+// NewDefaultRegistry keeps registering only the base set (covered by
 // TestRegistry_List).
 func TestRegistryWithDeps_RegistersBaseAndV1Tools(t *testing.T) {
 	registry, _, _, _ := setupV1Registry(t)
 
 	list := registry.List()
-	if len(list) != 11 {
-		t.Errorf("expected 11 tools (5 base + 6 v1), got %d", len(list))
+	// Base tools are 5 (fs_read, fs_write, fs_list, shell_exec, git) + 4 git worktree/branch helpers (RF-10.1) = 9
+	if len(list) != 15 {
+		t.Errorf("expected 15 tools (9 base + 6 v1), got %d", len(list))
 	}
 	expected := []string{
 		"fs_read", "fs_write", "fs_list", "shell_exec", "git",
+		"git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task",
 		"retrieval_search", "compaction_summarize",
 		"anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete",
 	}
