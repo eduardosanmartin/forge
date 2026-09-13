@@ -41,3 +41,6 @@ Desktop.ini
 
 # Local harness state (orchestrator skill registry cache)
 .atl/
+
+# Local plugins — never commit (owner decision)
+forge-plugins/
