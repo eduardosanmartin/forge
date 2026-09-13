@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -41,6 +42,31 @@ type Runner struct {
 
 	budget BudgetState
 	state  RunState
+
+	// sensitivity reload cache: avoids re-reading config on every checkpoint
+	// when the project file has not changed (cheap stat vs full parse).
+	sensitivityLastMod  time.Time
+	sensitivityLastSize int64
+}
+
+// budgetCtxKey is the context key for sharing the live BudgetState with
+// cooperative executors so token/iteration limits can be checked mid-task.
+type budgetCtxKey struct{}
+
+// ContextWithBudget returns a child context carrying the live budget state.
+// Cooperative executors may call BudgetFromContext and AddTurn/Check during
+// execution to enforce token/iteration limits mid-task.
+func ContextWithBudget(ctx context.Context, b *BudgetState) context.Context {
+	return context.WithValue(ctx, budgetCtxKey{}, b)
+}
+
+// BudgetFromContext returns the budget stored via ContextWithBudget, if any.
+func BudgetFromContext(ctx context.Context) *BudgetState {
+	v := ctx.Value(budgetCtxKey{})
+	if b, ok := v.(*BudgetState); ok {
+		return b
+	}
+	return nil
 }
 
 // RunState is the reanudable audit log (RF-11.8).
@@ -85,6 +111,116 @@ func (r *Runner) now() time.Time {
 		return r.Clock()
 	}
 	return time.Now()
+}
+
+// reloadSensitivity re-reads project sensitivity from config on disk so a
+// mid-run tightening (e.g., editing .forge/config.json from general to
+// datos-sensibles) is observed without restart. It is safe to call frequently:
+// a stat cache avoids full I/O when the file is unchanged, and failures are
+// fail-safe (keep current value). Runner is single-threaded during Run, so no
+// locking is required; the only concurrent reader is the executor goroutine
+// which never accesses Config.
+func (r *Runner) reloadSensitivity() {
+	if r.Config == nil {
+		return
+	}
+	pp, err := config.ProjectConfigPath()
+	if err != nil {
+		return
+	}
+	fi, err := os.Stat(pp)
+	if err != nil {
+		// No project file — keep current sensitivity (defaults already in Config).
+		return
+	}
+	mod := fi.ModTime()
+	size := fi.Size()
+	if !r.sensitivityLastMod.IsZero() && mod.Equal(r.sensitivityLastMod) && size == r.sensitivityLastSize {
+		return
+	}
+	gp, _ := config.GlobalConfigPath()
+	// Mirror buildApp layering: global then project. Missing files are skipped
+	// by Load; invalid files are ignored mid-run to stay fail-safe.
+	paths := []string{}
+	if gp != "" {
+		paths = append(paths, gp)
+	}
+	paths = append(paths, pp)
+	fresh, err := config.Load(paths...)
+	if err != nil {
+		return
+	}
+	r.Config.Project.Sensitivity = fresh.Project.Sensitivity
+	r.sensitivityLastMod = mod
+	r.sensitivityLastSize = size
+}
+
+func (r *Runner) budgetContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if r.budget.MaxWallClock == 0 {
+		// No wall-clock limit — return a cancellable context that is still
+		// budget-aware via ContextWithBudget for token/iteration mid-task checks.
+		c, cancel := context.WithCancel(parent)
+		return ContextWithBudget(c, &r.budget), cancel
+	}
+	rem := r.budget.RemainingWallClock(r.now())
+	if rem <= 0 {
+		rem = time.Millisecond
+	}
+	c, cancel := context.WithTimeout(parent, rem)
+	return ContextWithBudget(c, &r.budget), cancel
+}
+
+// callExecutor runs the executor with intra-task budget enforcement. The
+// wall-clock budget is enforced via the executor context deadline so a
+// runaway task is cancelled promptly, not at the next task boundary.
+// Token/iteration budgets are checked on the turn loop after each AddTurn,
+// and cooperative executors that use ContextWithBudget/BudgetFromContext
+// can also enforce them mid-task via the shared BudgetState.
+func (r *Runner) callExecutor(ctx context.Context, task Task) (ExecResult, error) {
+	execCtx, cancel := r.budgetContext(ctx)
+	defer cancel()
+
+	type outcome struct {
+		res ExecResult
+		err error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		res, err := r.Executor(execCtx, task)
+		ch <- outcome{res, err}
+	}()
+
+	// Poll for budget threshold while the executor runs so a cooperative
+	// executor that updates the shared budget via BudgetFromContext is
+	// observed mid-task. For non-cooperative executors the deadline still
+	// provides wall-clock enforcement.
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ExecResult{}, ctx.Err()
+		case <-execCtx.Done():
+			select {
+			case o := <-ch:
+				if o.err == nil && execCtx.Err() != nil {
+					o.err = fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
+				}
+				return o.res, o.err
+			default:
+				return ExecResult{}, fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
+			}
+		case o := <-ch:
+			if execCtx.Err() == context.DeadlineExceeded && o.err == nil {
+				o.err = fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
+			}
+			return o.res, o.err
+		case <-ticker.C:
+			if err := r.budget.Check(r.now()); err != nil {
+				cancel()
+			}
+		}
+	}
 }
 
 // Run executes the manifest task loop. It is the only entrypoint that enforces
@@ -175,6 +311,8 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		}
 
 		// RNF-9 high sensitivity forces a checkpoint before every task.
+		// Re-evaluate ceiling after reload so mid-run tightening is observed.
+		r.reloadSensitivity()
 		needsHighCheckpoint := isHighSensitivity(r.Config.Project.Sensitivity)
 		var beforeCP *Checkpoint
 		if needsHighCheckpoint {
@@ -213,24 +351,11 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 				_ = r.persistState()
 				return r.killedReport(err)
 			}
-			// Wire remaining wall-clock as a hard timeout on the executor context so a hung
-			// LLM call is killed, not left to drift past the budget (RNF-8).
-			execCtx := ctx
-			var cancel context.CancelFunc
-			if r.budget.MaxWallClock > 0 {
-				if rem := r.budget.RemainingWallClock(r.now()); rem > 0 {
-					execCtx, cancel = context.WithTimeout(ctx, rem)
-				} else {
-					execCtx, cancel = context.WithTimeout(ctx, time.Millisecond)
-				}
-			}
-			execRes, tErr := r.Executor(execCtx, task)
-			if cancel != nil {
-				cancel()
-			}
-			if execCtx.Err() == context.DeadlineExceeded {
-				tErr = fmt.Errorf("wall-clock budget timeout: %w", execCtx.Err())
-			}
+			// Intra-task budget enforcement: wall-clock via deadline-bound executor
+			// context (cancellation) and token/iteration via turn-loop check after
+			// each AddTurn so a runaway task is killed promptly, not at the next
+			// task boundary.
+			execRes, tErr := r.callExecutor(ctx, task)
 			r.budget.AddTurn(execRes.Tokens, execRes.Iterations)
 			r.state.Budget = r.budget
 			r.state.UpdatedAt = r.now()
@@ -290,6 +415,9 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		// goal-text heuristic when tool records are unavailable (nil ToolCalls).
 		// A turn that executed a write-class tool must trigger the pause
 		// regardless of how the goal text was phrased.
+		r.reloadSensitivity()
+		// Re-evaluate needsHighCheckpoint after reload for after_task as well.
+		needsHighCheckpoint = isHighSensitivity(r.Config.Project.Sensitivity)
 		needsAfterHigh := false
 		if needsHighCheckpoint {
 			if lastExecRes.ToolCalls != nil {
@@ -380,6 +508,11 @@ func (r *Runner) findCheckpoint(trigger string) *Checkpoint {
 }
 
 func (r *Runner) handleCheckpoint(ctx context.Context, cp Checkpoint, reason string) (bool, error) {
+	// Re-read sensitivity before every checkpoint so a mid-run config change
+	// is observed without restart. This is the per-checkpoint variant of
+	// the cheaper per-task-boundary reload (both are applied; this covers
+	// checkpoints that occur outside the task loop as well, e.g. after_spec_decomposition).
+	r.reloadSensitivity()
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
