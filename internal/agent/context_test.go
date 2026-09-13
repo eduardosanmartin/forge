@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/llm"
@@ -176,11 +177,15 @@ func TestContextAssembler_ToolDefs_FixedOrder(t *testing.T) {
 
 // contextMockStore implements minimal store interface for context testing
 type contextMockStore struct {
-	session  *store.Session
-	messages []store.Message
+	session       *store.Session
+	messages      []store.Message
+	getSessionErr error
 }
 
 func (m *contextMockStore) GetSession(ctx context.Context, id string) (store.Session, error) {
+	if m.getSessionErr != nil {
+		return store.Session{}, m.getSessionErr
+	}
 	if m.session != nil {
 		return *m.session, nil
 	}
@@ -229,6 +234,53 @@ func findSubstring(s, substr string) bool {
 func containsToolName(content, toolName string) bool {
 	// content format: "TOOL: fs_read - ..."
 	return findSubstring(content, "TOOL: "+toolName+" -")
+}
+
+func TestContextAssembler_Build_GetSessionNotFoundProceeds(t *testing.T) {
+	ctx := context.Background()
+	toolsReg := tools.New(nil, "", nil)
+	store := &contextMockStore{getSessionErr: store.ErrSessionNotFound}
+	assembler := NewContextAssembler(toolsReg, store, 10)
+
+	messages, err := assembler.Build(ctx, "missing-session", "hello")
+	if err != nil {
+		t.Fatalf("Build with ErrSessionNotFound should not fail, got %v", err)
+	}
+	if len(messages) == 0 {
+		t.Fatal("expected messages even when session not found")
+	}
+	last := messages[len(messages)-1]
+	if last.Role != "user" || last.Content != "hello" {
+		t.Errorf("last message = %+v, want user/hello", last)
+	}
+	for _, m := range messages {
+		if contains(m.Content, "ANCHORED FACTS") {
+			t.Error("anchored facts should not be injected when session not found")
+		}
+	}
+}
+
+func TestContextAssembler_Build_GetSessionWrappedNotFoundProceeds(t *testing.T) {
+	ctx := context.Background()
+	toolsReg := tools.New(nil, "", nil)
+	wrapped := fmt.Errorf("wrapped: %w", store.ErrSessionNotFound)
+	store := &contextMockStore{getSessionErr: wrapped}
+	assembler := NewContextAssembler(toolsReg, store, 10)
+
+	if _, err := assembler.Build(ctx, "missing-session", "hello"); err != nil {
+		t.Fatalf("wrapped ErrSessionNotFound should be treated as not-found, got %v", err)
+	}
+}
+
+func TestContextAssembler_Build_GetSessionOtherErrorFails(t *testing.T) {
+	ctx := context.Background()
+	toolsReg := tools.New(nil, "", nil)
+	store := &contextMockStore{getSessionErr: fmt.Errorf("db unavailable")}
+	assembler := NewContextAssembler(toolsReg, store, 10)
+
+	if _, err := assembler.Build(ctx, "session-1", "hello"); err == nil {
+		t.Fatal("expected error when GetSession returns non-not-found error")
+	}
 }
 
 func generateMessages(count int) []store.Message {

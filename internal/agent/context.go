@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/skill"
+	"github.com/eduardosanmartin/forge/internal/store"
 )
 
 // systemPrompt is the fixed system prompt describing forge capabilities,
@@ -112,10 +114,12 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 	enableSkills := false
 	session, err := c.store.GetSession(ctx, sessionID)
 	if err != nil {
-		// Session not found is not fatal for context building; we'll proceed without anchored facts
-		// but we should still return an error if it's something other than not found
-		// For now, we'll just skip anchored memory if session not found
-		// TODO: handle ErrSessionNotFound specifically when available
+		if errors.Is(err, store.ErrSessionNotFound) {
+			// Session not found is not fatal for context building; proceed
+			// without session-scoped injections (anchored facts, v1 flags).
+		} else {
+			return nil, fmt.Errorf("get session: %w", err)
+		}
 	} else {
 		// v0 anchored facts
 		if anchoredFacts, ok := session.Metadata["anchored_facts"].(string); ok && anchoredFacts != "" {
