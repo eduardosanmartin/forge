@@ -175,9 +175,10 @@ func TestBenchV1PromptTokensBounded(t *testing.T) {
 // TestBenchTinyScenarioMessageCounts asserts the exact message structure of a
 // tiny 3-turn scenario, computed by hand from Build's layout:
 //
-//	system(1) + tool defs(5) + history(2t-1, including the just-persisted
-//	user message) + current user(1), plus one anchored-facts message and one
-//	retrieval message in the v1 arm when active.
+//	system(1) + tool defs(9: five base OS tools + four RF-10.1 git
+//	worktree/branch-per-task tools) + history(2t-1, including the
+//	just-persisted user message) + current user(1), plus one anchored-facts
+//	message and one retrieval message in the v1 arm when active.
 //
 // This pins the token arithmetic against structural expectations instead of
 // trusting the runner to sum something reasonable.
@@ -193,7 +194,7 @@ func TestBenchTinyScenarioMessageCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runArm(naive): %v", err)
 	}
-	wantNaive := []int{8, 10, 12} // 6 fixed + (2t-1) history + 1 current user
+	wantNaive := []int{12, 14, 16} // 10 fixed (1 system + 9 tool defs) + (2t-1) history + 1 current user
 	if !reflect.DeepEqual(naive.perTurnMessages, wantNaive) {
 		t.Errorf("naive per-turn messages = %v, want %v", naive.perTurnMessages, wantNaive)
 	}
@@ -202,7 +203,7 @@ func TestBenchTinyScenarioMessageCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runArm(v1): %v", err)
 	}
-	wantV1 := []int{9, 12, 14} // naive + 1 anchored-facts message; +1 retrieval from turn 2
+	wantV1 := []int{13, 16, 18} // naive + 1 anchored-facts message; +1 retrieval from turn 2
 	if !reflect.DeepEqual(v1.perTurnMessages, wantV1) {
 		t.Errorf("v1 per-turn messages = %v, want %v", v1.perTurnMessages, wantV1)
 	}
