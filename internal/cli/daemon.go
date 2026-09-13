@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 
 	"github.com/coder/websocket"
 	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/anchor"
 	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/compaction"
+	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/embedding"
 	"github.com/eduardosanmartin/forge/internal/isolation"
@@ -137,6 +139,21 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	if err != nil {
 		return fmt.Errorf("resolve workspace root: %w", err)
 	}
+
+	// RNF-1.6: surface the effective inference core budget at daemon startup.
+	// Forge is a CLIENT of inference servers, and the current provider
+	// surface (OpenAI-compatible /v1 chat) has no per-request threading
+	// knob, so this value is advisory: operators apply it to the inference
+	// server's own settings (e.g. Ollama OMP_NUM_THREADS). 0/unset selects
+	// DefaultInferenceCores; an explicit value (even saturating the machine)
+	// is honored without warning, per spec.
+	effectiveCores := app.Config.LLM.Cores
+	coresSource := "config"
+	if effectiveCores <= 0 {
+		effectiveCores = config.DefaultInferenceCores(runtime.NumCPU())
+		coresSource = "default"
+	}
+	app.Logger.Info("inference cores budget (RNF-1.6)", "cores", effectiveCores, "source", coresSource, "note", "advisory: apply to the local inference server settings")
 
 	// Build permission engine - convert config.PermissionsPolicy to perms.PermissionsPolicy
 	permsPolicy := perms.PermissionsPolicy{

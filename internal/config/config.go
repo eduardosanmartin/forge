@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/eduardosanmartin/forge/internal/pathmatch"
@@ -212,6 +213,24 @@ func (s StreamingConfig) IsAuto() bool { return s.Mode == StreamingModeAuto }
 // ErrStreamingNotSupported before first token degrades to Chat.
 type LLMConfig struct {
 	Streaming StreamingConfig `json:"streaming"`
+	// Cores (RNF-1.6, optional): logical cores the local inference engine is
+	// allowed to use. 0/unset means the default: DefaultInferenceCores
+	// (max(1, NumCPU-2) on the machine's logical cores, keeping room for
+	// the OS and the user). An explicit value — including one that saturates the
+	// whole machine — is honored as-is; explicit user intent needs no
+	// warning (spec RNF-1.6: default leaves margin "unless the user
+	// explicitly states otherwise").
+	//
+	// Honest limitation: forge is a CLIENT of inference servers, not their
+	// launcher. The current provider surface (OpenAI-compatible /v1 chat)
+	// carries no per-request threading knob like Ollama's native
+	// /api/chat "options"."num_thread", so forge cannot directly enforce
+	// this budget over the wire today. The effective value is computed at
+	// daemon startup (cli runServe) and surfaced as a structured log so
+	// operators can pass it to the inference server's own settings
+	// (e.g. Ollama OMP_NUM_THREADS) or plan system capacity. Should a
+	// native API provider surface appear, this field is the wiring point.
+	Cores int `json:"cores"`
 }
 
 // TUIConfig holds TUI preferences persisted in .forge/config.json.
@@ -843,6 +862,18 @@ func (c *Config) Validate() error {
 		c.LLM.Streaming.Mode = StreamingModeOff
 	} else {
 		c.LLM.Streaming.Mode = strings.ToLower(strings.TrimSpace(c.LLM.Streaming.Mode))
+	}
+
+	// Validate cores (RNF-1.6): negative values are invalid; a value above
+	// the machine's logical CPU count cannot be honored. Zero means
+	// "default" (see DefaultInferenceCores) and is always valid; an
+	// explicit value equal to NumCPU is allowed on purpose (user override).
+	if c.LLM.Cores < 0 {
+		violations = append(violations, fmt.Errorf(
+			"llm.cores %d is invalid (must be >= 0; 0 selects the default budget)", c.LLM.Cores))
+	} else if c.LLM.Cores > runtime.NumCPU() {
+		violations = append(violations, fmt.Errorf(
+			"llm.cores %d exceeds the machine's logical CPU count (%d)", c.LLM.Cores, runtime.NumCPU()))
 	}
 
 	if _, ok := normalizeSensitivity(c.Project.Sensitivity); !ok && strings.TrimSpace(c.Project.Sensitivity) != "" {
