@@ -88,6 +88,18 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleJobGet(ctx, req)
 	case MethodJobCancel:
 		return h.handleJobCancel(ctx, req)
+	case MethodMemoryList:
+		return h.handleMemoryList(ctx, req)
+	case MethodMemoryGet:
+		return h.handleMemoryGet(ctx, req)
+	case MethodMemoryCreate:
+		return h.handleMemoryCreate(ctx, req)
+	case MethodMemoryUpdate:
+		return h.handleMemoryUpdate(ctx, req)
+	case MethodMemoryDelete:
+		return h.handleMemoryDelete(ctx, req)
+	case MethodFanout:
+		return h.handleFanout(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
