@@ -84,6 +84,13 @@ type Agent struct {
 	logger        *slog.Logger
 	maxIterations int
 	maxTurnSeconds int
+	// maxParallelChildren bounds concurrent child subagent turns (RF-1.2).
+	// Worker pool size 2-4 (default 2) via agent.max_parallel_children.
+	// Limit is documented here and enforced in scheduler.go + loop parallel
+	// dispatch: LLM calls run in parallel on distinct branched sessions;
+	// SQLite writes are serialized via single connection + WAL busy_timeout
+	// (store/Store MaxOpenConns=1). Branched sessions never share a write txn.
+	maxParallelChildren int
 }
 
 // NewAgent creates a new Agent from configuration and dependencies.
@@ -106,16 +113,27 @@ func NewAgent(
 	if cfg != nil && cfg.Agent.MaxTurnSeconds > 0 {
 		maxTurnSeconds = cfg.Agent.MaxTurnSeconds
 	}
+	maxParallelChildren := config.DefaultAgentMaxParallelChildren
+	if cfg != nil && cfg.Agent.MaxParallelChildren > 0 {
+		maxParallelChildren = cfg.Agent.MaxParallelChildren
+	}
+	if maxParallelChildren < config.AgentMaxParallelChildrenMin {
+		maxParallelChildren = config.AgentMaxParallelChildrenMin
+	}
+	if maxParallelChildren > config.AgentMaxParallelChildrenMax {
+		maxParallelChildren = config.AgentMaxParallelChildrenMax
+	}
 	return &Agent{
-		cfg:           cfg,
-		ctxAssembler:  NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
-		llmReg:        llmReg,
-		toolsReg:      toolsReg,
-		permsEngine:   permsEngine,
-		store:         store,
-		logger:        logger,
-		maxIterations: maxIterations,
+		cfg:            cfg,
+		ctxAssembler:   NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
+		llmReg:         llmReg,
+		toolsReg:       toolsReg,
+		permsEngine:    permsEngine,
+		store:          store,
+		logger:         logger,
+		maxIterations:  maxIterations,
 		maxTurnSeconds: maxTurnSeconds,
+		maxParallelChildren: maxParallelChildren,
 	}
 }
 
@@ -331,53 +349,105 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			}
 			result.Messages = append(result.Messages, *assistantMsg)
 
-			// Execute each tool call
+			// Execute each tool call — RF-1.2 parallel path:
+			// When every call in this iteration is spawn_subagent and count >=2,
+			// dispatch them through the bounded worker pool in scheduler.go
+			// (agent.max_parallel_children, 2-4 default 2). Each child branches
+			// to a distinct session so they do not share a SQLite write txn;
+			// LLM calls run in parallel while DB appends serialize via single
+			// SQLite connection + WAL busy_timeout. Parent tool-result appends
+			// are serialized after join to avoid racing MAX(seq) on the parent
+			// session. Mixed or non-spawn batches stay sequential
+			// (file/session safety).
+			allSpawn := len(choice.Message.ToolCalls) >= 2
 			for _, tc := range choice.Message.ToolCalls {
-				// Check for halt during tool execution
-				session, err := a.store.GetSession(ctx, sessionID)
-				if err != nil {
-					result.Error = fmt.Errorf("get session during tool execution: %w", err)
-					result.Halted = true
+				if tc.Function.Name != "spawn_subagent" {
+					allSpawn = false
 					break
 				}
-				if halted, _ := session.Metadata["halted"].(bool); halted {
-					reason, _ := session.Metadata["halt_reason"].(string)
-					result.Error = fmt.Errorf("session halted during tool execution: %s", reason)
+			}
+			if allSpawn {
+				// Single halt check before parallel fan-out.
+				if sess, gErr := a.store.GetSession(ctx, sessionID); gErr == nil {
+					if halted, _ := sess.Metadata["halted"].(bool); halted {
+						reason, _ := sess.Metadata["halt_reason"].(string)
+						result.Error = fmt.Errorf("session halted during tool execution: %s", reason)
+						result.Halted = true
+					}
+				} else {
+					result.Error = fmt.Errorf("get session during tool execution: %w", gErr)
 					result.Halted = true
-					break
 				}
-
-				var args map[string]any
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					args = map[string]any{"_error": "invalid arguments: " + err.Error()}
-				}
-
-				// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
-				// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
-				toolCtx := tools.WithSessionID(ctx, sessionID)
-				toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
-				if err != nil {
-					toolResult = tools.Result{
-						Content: "ERROR: " + err.Error(),
+				if !result.Halted {
+					// Bounded parallel dispatch lives in scheduler.go
+					// (executeToolCallsParallel); tool results are appended
+					// serially here, after the join.
+					for _, out := range a.executeToolCallsParallel(ctx, sessionID, choice.Message.ToolCalls) {
+						totalToolCallCount++
+						toolResultMsg := &store.Message{
+							SessionID:  sessionID,
+							Role:       "tool",
+							Content:    out.result.Content,
+							ToolCallID: out.call.ID,
+							Name:       out.call.Function.Name,
+						}
+						_, _, err = a.store.AppendMessage(ctx, toolResultMsg)
+						if err != nil {
+							result.Error = fmt.Errorf("append tool result: %w", err)
+							result.Halted = true
+							break
+						}
+						result.Messages = append(result.Messages, *toolResultMsg)
 					}
 				}
-				totalToolCallCount++
+			} else {
+				for _, tc := range choice.Message.ToolCalls {
+					// Check for halt during tool execution
+					session, err := a.store.GetSession(ctx, sessionID)
+					if err != nil {
+						result.Error = fmt.Errorf("get session during tool execution: %w", err)
+						result.Halted = true
+						break
+					}
+					if halted, _ := session.Metadata["halted"].(bool); halted {
+						reason, _ := session.Metadata["halt_reason"].(string)
+						result.Error = fmt.Errorf("session halted during tool execution: %s", reason)
+						result.Halted = true
+						break
+					}
 
-				// Append tool result message
-				toolResultMsg := &store.Message{
-					SessionID:  sessionID,
-					Role:       "tool",
-					Content:    toolResult.Content,
-					ToolCallID: tc.ID,
-					Name:       tc.Function.Name,
+					var args map[string]any
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+						args = map[string]any{"_error": "invalid arguments: " + err.Error()}
+					}
+
+					// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
+					// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
+					toolCtx := tools.WithSessionID(ctx, sessionID)
+					toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
+					if err != nil {
+						toolResult = tools.Result{
+							Content: "ERROR: " + err.Error(),
+						}
+					}
+					totalToolCallCount++
+
+					// Append tool result message
+					toolResultMsg := &store.Message{
+						SessionID:  sessionID,
+						Role:       "tool",
+						Content:    toolResult.Content,
+						ToolCallID: tc.ID,
+						Name:       tc.Function.Name,
+					}
+					_, _, err = a.store.AppendMessage(ctx, toolResultMsg)
+					if err != nil {
+						result.Error = fmt.Errorf("append tool result: %w", err)
+						result.Halted = true
+						break
+					}
+					result.Messages = append(result.Messages, *toolResultMsg)
 				}
-				_, _, err = a.store.AppendMessage(ctx, toolResultMsg)
-				if err != nil {
-					result.Error = fmt.Errorf("append tool result: %w", err)
-					result.Halted = true
-					break
-				}
-				result.Messages = append(result.Messages, *toolResultMsg)
 			}
 
 			if result.Halted {

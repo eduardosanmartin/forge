@@ -1,10 +1,13 @@
 // Package agent implements subagent spawning with bounded context and branch isolation.
 //
-// Follow-ups (intentionally out of scope for this slice, per spec):
-//   - Full parallel scheduler: true concurrent child turns with bounded
-//     concurrency and priority queue onto the single LLM provider (RNF-1.5).
-//     Currently sequential (tool calls in one turn execute serially); parallel
-//     is structurally blocked by single SQLite connection and single provider queue.
+// Parallel scheduler (RF-1.2) is implemented in loop.go + scheduler.go:
+// bounded worker pool (agent.max_parallel_children 2-4 default 2) executes
+// concurrent child turns when every tool call in an iteration is
+// spawn_subagent (distinct branched sessions, no shared write txn). LLM calls
+// run in parallel; SQLite writes serialize via single connection + WAL
+// busy_timeout (store.Open). Mixed/non-spawn batches stay sequential.
+//
+// Follow-ups (out of scope):
 //   - Cross-session subagents: children that outlive the parent session.
 //   - Subagent checkpoint UI: visualizing/merging branch transcripts.
 //
@@ -129,15 +132,16 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 
 	// Run child with bounded iteration limit via a shallow agent clone.
 	childAgent := &Agent{
-		cfg:            a.cfg,
-		ctxAssembler:   a.ctxAssembler,
-		llmReg:         a.llmReg,
-		toolsReg:       a.toolsReg,
-		permsEngine:    a.permsEngine,
-		store:          a.store,
-		logger:         a.logger,
-		maxIterations:  childMax,
-		maxTurnSeconds: a.maxTurnSeconds,
+		cfg:                 a.cfg,
+		ctxAssembler:        a.ctxAssembler,
+		llmReg:              a.llmReg,
+		toolsReg:            a.toolsReg,
+		permsEngine:         a.permsEngine,
+		store:               a.store,
+		logger:              a.logger,
+		maxIterations:       childMax,
+		maxTurnSeconds:      a.maxTurnSeconds,
+		maxParallelChildren: a.maxParallelChildren,
 	}
 	// Preserve V1 deps wired on the parent assembler.
 	childResult, execErr := childAgent.ExecuteTurn(ctx, branched.ID, spec.Task)

@@ -243,11 +243,16 @@ const (
 // MaxIterations caps tool-call iterations per turn (default 10).
 // MaxTurnSeconds caps total wall-clock seconds per turn (default 300): a hung
 // provider fails the turn visibly instead of locking the UI forever.
+// MaxParallelChildren caps concurrent child subagent turns (RF-1.2): bounded
+// worker pool size 2-4 (default 2) — parallelizes LLM calls while SQLite writes
+// are serialized via single connection + WAL busy_timeout. Distinct branched
+// sessions avoid sharing the same write txn.
 // Zero or negative values in a config file are invalid and fall back to
 // defaults (handled in mergeInto), matching the LimitsConfig pattern.
 type AgentConfig struct {
-	MaxIterations int `json:"max_iterations"`
-	MaxTurnSeconds int `json:"max_turn_seconds"`
+	MaxIterations       int `json:"max_iterations"`
+	MaxTurnSeconds      int `json:"max_turn_seconds"`
+	MaxParallelChildren int `json:"max_parallel_children"`
 }
 
 // Default agent caps (TUI-6, owner decision; timeout added retest-5).
@@ -256,6 +261,13 @@ const DefaultAgentMaxIterations = 10
 // DefaultAgentMaxTurnSeconds bounds a turn at 5 minutes: well above healthy
 // slow turns on free tiers (~2min observed), far below a real hang.
 const DefaultAgentMaxTurnSeconds = 300
+
+// DefaultAgentMaxParallelChildren bounds concurrent subagent turns (RF-1.2).
+const DefaultAgentMaxParallelChildren = 2
+
+// AgentMaxParallelChildren bounds (RF-1.2 spec: pool 2-4).
+const AgentMaxParallelChildrenMin = 2
+const AgentMaxParallelChildrenMax = 4
 
 // ProjectConfig holds project sensitivity classification (RNF-9).
 // Sensitivity is a ceiling on autonomy (general | regulado | datos-sensibles).
@@ -316,7 +328,7 @@ func Defaults() *Config {
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
 		},
-		Agent:   AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds},
+		Agent:   AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds, MaxParallelChildren: DefaultAgentMaxParallelChildren},
 		Project: ProjectConfig{Sensitivity: SensitivityGeneral},
 	}
 }
@@ -377,8 +389,9 @@ type fileLimits struct {
 // merging can distinguish "field absent" from "field set to zero value".
 // Zero/negative values are treated as invalid and fall back to defaults.
 type fileAgent struct {
-	MaxIterations  *int `json:"max_iterations"`
-	MaxTurnSeconds *int `json:"max_turn_seconds"`
+	MaxIterations       *int `json:"max_iterations"`
+	MaxTurnSeconds      *int `json:"max_turn_seconds"`
+	MaxParallelChildren *int `json:"max_parallel_children"`
 }
 
 // fileConfig mirrors Config with presence-tracking pointers so that merging
@@ -480,6 +493,15 @@ func Load(filePaths ...string) (*Config, error) {
 	if cfg.Agent.MaxTurnSeconds <= 0 {
 		cfg.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
 	}
+	if cfg.Agent.MaxParallelChildren <= 0 {
+		cfg.Agent.MaxParallelChildren = DefaultAgentMaxParallelChildren
+	}
+	if cfg.Agent.MaxParallelChildren < AgentMaxParallelChildrenMin {
+		cfg.Agent.MaxParallelChildren = AgentMaxParallelChildrenMin
+	}
+	if cfg.Agent.MaxParallelChildren > AgentMaxParallelChildrenMax {
+		cfg.Agent.MaxParallelChildren = AgentMaxParallelChildrenMax
+	}
 	// Normalize LLM streaming mode: empty defaults to off, lowercase, validate.
 	if strings.TrimSpace(cfg.LLM.Streaming.Mode) == "" {
 		cfg.LLM.Streaming.Mode = StreamingModeOff
@@ -579,6 +601,18 @@ func mergeInto(dst *Config, fc *fileConfig) {
 				dst.Agent.MaxTurnSeconds = v
 			} else {
 				dst.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
+			}
+		}
+		if fc.Agent.MaxParallelChildren != nil {
+			v := *fc.Agent.MaxParallelChildren
+			if v <= 0 {
+				dst.Agent.MaxParallelChildren = DefaultAgentMaxParallelChildren
+			} else if v < AgentMaxParallelChildrenMin {
+				dst.Agent.MaxParallelChildren = AgentMaxParallelChildrenMin
+			} else if v > AgentMaxParallelChildrenMax {
+				dst.Agent.MaxParallelChildren = AgentMaxParallelChildrenMax
+			} else {
+				dst.Agent.MaxParallelChildren = v
 			}
 		}
 	}
