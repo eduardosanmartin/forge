@@ -538,10 +538,26 @@ func checkSkillFileSizes(srcDir string, maxBytes int64) error {
 // --- skill list ---
 
 func newSkillListCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List skills via daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOut {
+				out := cmd.OutOrStdout()
+				cl, err := client.Connect(cmd.Context(), "")
+				if err != nil {
+					_ = writeJSONErrorEnvelope(out, "skill list", err.Error())
+					return err
+				}
+				defer cl.Close()
+				res, err := cl.SkillList(cmd.Context())
+				if err != nil {
+					_ = writeJSONErrorEnvelope(out, "skill list", err.Error())
+					return err
+				}
+				return writeJSONResultEnvelope(out, "skill list", res)
+			}
 			cl, err := client.Connect(cmd.Context(), "")
 			if err != nil {
 				return fmt.Errorf("daemon not reachable: %w", err)
@@ -566,6 +582,8 @@ func newSkillListCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
 func newSkillEnableCommand() *cobra.Command {

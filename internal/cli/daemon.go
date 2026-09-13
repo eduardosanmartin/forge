@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/anchor"
+	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/embedding"
@@ -101,24 +103,28 @@ func newResumeCommand() *cobra.Command {
 }
 
 func newSessionsCommand() *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "List sessions via daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessions(cmd.Context())
+			return runSessions(cmd.Context(), cmd.OutOrStdout(), jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
 	return cmd
 }
 
 func newStatusCommand() *cobra.Command {
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Check daemon health",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStatus(cmd.Context())
+			return runStatus(cmd.Context(), cmd.OutOrStdout(), jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
 	return cmd
 }
 
@@ -385,7 +391,10 @@ func runResume(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-func runSessions(ctx context.Context) error {
+func runSessions(ctx context.Context, out io.Writer, jsonOut bool) error {
+	if jsonOut {
+		return runSessionsJSON(ctx, out)
+	}
 	addr, err := readDaemonAddr()
 	if err != nil {
 		return fmt.Errorf("daemon not running: %w", err)
@@ -412,7 +421,28 @@ func runSessions(ctx context.Context) error {
 	return nil
 }
 
-func runStatus(ctx context.Context) error {
+func runSessionsJSON(ctx context.Context, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		_ = writeJSONErrorEnvelope(out, "sessions", err.Error())
+		return err
+	}
+	defer cl.Close()
+	res, err := cl.ListSessions(ctx, 50, 0)
+	if err != nil {
+		_ = writeJSONErrorEnvelope(out, "sessions", err.Error())
+		return err
+	}
+	return writeJSONResultEnvelope(out, "sessions", res)
+}
+
+func runStatus(ctx context.Context, out io.Writer, jsonOut bool) error {
+	if jsonOut {
+		return runStatusJSON(ctx, out)
+	}
 	addr, err := readDaemonAddr()
 	if err != nil {
 		fmt.Println("daemon: not running")
@@ -438,6 +468,27 @@ func runStatus(ctx context.Context) error {
 	_, data, _ := conn.Read(ctx)
 	fmt.Println(string(data))
 	return nil
+}
+
+func runStatusJSON(ctx context.Context, out io.Writer) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		// Daemon not running is a valid state for status --json: report it
+		// as a successful envelope with running=false rather than an error,
+		// mirroring the human output "daemon: not running".
+		res := daemon.StatusResult{Running: false}
+		return writeJSONResultEnvelope(out, "status", res)
+	}
+	defer cl.Close()
+	res, err := cl.Status(ctx)
+	if err != nil {
+		_ = writeJSONErrorEnvelope(out, "status", err.Error())
+		return err
+	}
+	return writeJSONResultEnvelope(out, "status", res)
 }
 
 func readDaemonAddr() (string, error) {

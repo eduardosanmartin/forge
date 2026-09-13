@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/eduardosanmartin/forge/internal/client"
@@ -33,55 +34,85 @@ func newSessionCommand() *cobra.Command {
 }
 
 func newSessionSuccessCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "success <session-id>",
 		Short: "Mark a session as human-verified successful (RF-4.4 input gate)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionSuccess(cmd.Context(), args[0])
+			return runSessionSuccess(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
-func runSessionSuccess(ctx context.Context, sessionID string) error {
+func runSessionSuccess(ctx context.Context, out io.Writer, sessionID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session success", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 	if err := cl.MarkSuccess(ctx, sessionID); err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session success", err.Error())
+		}
 		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session success", map[string]any{"session_id": sessionID, "success": true})
 	}
 	fmt.Fprintf(os.Stdout, "Session %s marked as successful\n", sessionID)
 	return nil
 }
 
 func newSessionReplayCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "replay <session-id>",
 		Short: "Replay a session's full transcript grouped by turns (RNF-6.2)",
 		Long: "Renders the session's persisted messages as grouped turns: user prompts, assistant tool calls (redacted), tool results (redacted, truncated), and token usage totals. The message store IS the recording; this command is the replay presentation.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionReplay(cmd.Context(), args[0])
+			return runSessionReplay(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
-func runSessionReplay(ctx context.Context, sessionID string) error {
+func runSessionReplay(ctx context.Context, out io.Writer, sessionID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session replay", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 
 	if _, err := cl.GetSession(ctx, sessionID); err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session replay", err.Error())
+		}
 		return fmt.Errorf("session %s not found: %w", sessionID, err)
 	}
 
 	const fetchLimit = 1000
 	res, err := cl.GetMessages(ctx, sessionID, fetchLimit, 0)
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session replay", err.Error())
+		}
 		return fmt.Errorf("get messages: %w", err)
 	}
 	msgs := daemonMessagesToStore(res.Messages)
@@ -104,6 +135,27 @@ func runSessionReplay(ctx context.Context, sessionID string) error {
 		}
 	}
 
+	if jsonOut {
+		// Emit raw message results as JSON plus a human replay text field, all
+		// inside the standard envelope.
+		type replayResult struct {
+			SessionID string                `json:"session_id"`
+			Messages  []daemon.MessageResult `json:"messages"`
+			Replay    string                `json:"replay"`
+		}
+		rr := replayResult{
+			SessionID: sessionID,
+			Messages:  res.Messages,
+			Replay:    recording.FormatReplay(msgs, logging.Redact),
+		}
+		// Append paginated extras if any
+		if len(msgs) != len(res.Messages) {
+			// res.Messages already contains first page; for JSON we return combined via helper above
+			// Re-collect via pagination already merged into msgs, but daemon raw not needed separately.
+		}
+		return writeJSONResultEnvelope(out, "session replay", rr)
+	}
+
 	output := recording.FormatReplay(msgs, logging.Redact)
 	fmt.Fprint(os.Stdout, output)
 	return nil
@@ -111,28 +163,42 @@ func runSessionReplay(ctx context.Context, sessionID string) error {
 
 func newSessionBranchCommand() *cobra.Command {
 	var atSeq int
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "branch <source-session-id>",
 		Short: "Branch a session (RF-9.1)",
 		Long:  "Creates a new session branched from the source session. When --at is given only messages up to that seq are copied; otherwise the full transcript is copied. Branch lineage is recorded in metadata (branch_parent/root/at_seq).",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionBranch(cmd.Context(), args[0], atSeq)
+			return runSessionBranch(cmd.Context(), cmd.OutOrStdout(), args[0], atSeq, jsonOut)
 		},
 	}
 	cmd.Flags().IntVar(&atSeq, "at", 0, "branch point seq (0 = full copy)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
 	return cmd
 }
 
-func runSessionBranch(ctx context.Context, sourceID string, atSeq int) error {
+func runSessionBranch(ctx context.Context, out io.Writer, sourceID string, atSeq int, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session branch", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 	res, err := cl.BranchSession(ctx, sourceID, atSeq, nil)
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session branch", err.Error())
+		}
 		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session branch", res)
 	}
 	fmt.Fprintf(os.Stdout, "Branched %s -> %s (at_seq=%d, msgs=%d)\n", sourceID, res.ID, atSeq, res.MessageCount)
 	return nil
@@ -140,6 +206,7 @@ func runSessionBranch(ctx context.Context, sourceID string, atSeq int) error {
 
 func newSessionMergeCommand() *cobra.Command {
 	var into string
+	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "merge <source-session-id> --into <target-session-id>",
 		Short: "Merge a branch tail into a target session (append-tail)",
@@ -149,23 +216,36 @@ func newSessionMergeCommand() *cobra.Command {
 			if into == "" {
 				return fmt.Errorf("flag --into is required")
 			}
-			return runSessionMerge(cmd.Context(), args[0], into)
+			return runSessionMerge(cmd.Context(), cmd.OutOrStdout(), args[0], into, jsonOut)
 		},
 	}
 	cmd.Flags().StringVar(&into, "into", "", "target session id to merge into (required)")
 	_ = cmd.MarkFlagRequired("into")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
 	return cmd
 }
 
-func runSessionMerge(ctx context.Context, sourceID, targetID string) error {
+func runSessionMerge(ctx context.Context, out io.Writer, sourceID, targetID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session merge", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 	res, err := cl.MergeSession(ctx, sourceID, targetID)
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session merge", err.Error())
+		}
 		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session merge", res)
 	}
 	mergedFrom, _ := res.Metadata["merged_from"].(string)
 	mergedCount := 0
@@ -188,24 +268,39 @@ func runSessionMerge(ctx context.Context, sourceID, targetID string) error {
 }
 
 func newSessionListCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List sessions with branch info",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionList(cmd.Context())
+			return runSessionList(cmd.Context(), cmd.OutOrStdout(), jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
-func runSessionList(ctx context.Context) error {
+func runSessionList(ctx context.Context, out io.Writer, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session list", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 	res, err := cl.ListSessions(ctx, 50, 0)
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session list", err.Error())
+		}
 		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session list", res)
 	}
 	fmt.Fprintf(os.Stdout, "%-38s %-17s %6s %-12s %s\n", "SESSION", "CREATED", "MSGS", "BRANCH_PARENT", "MODEL")
 	for _, s := range res.Sessions {
@@ -232,24 +327,39 @@ func runSessionList(ctx context.Context) error {
 }
 
 func newSessionSwitchCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "switch <session-id>",
 		Short: "Switch to a session/branch (validates existence)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionSwitch(cmd.Context(), args[0])
+			return runSessionSwitch(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOut)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
-func runSessionSwitch(ctx context.Context, sessionID string) error {
+func runSessionSwitch(ctx context.Context, out io.Writer, sessionID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
 	cl, err := client.Connect(ctx, "")
 	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session switch", err.Error())
+		}
 		return daemonHint(err)
 	}
 	defer cl.Close()
 	if _, err := cl.GetSession(ctx, sessionID); err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session switch", err.Error())
+		}
 		return fmt.Errorf("session %s not found: %w", sessionID, err)
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session switch", map[string]any{"session_id": sessionID})
 	}
 	fmt.Fprintf(os.Stdout, "Switched to session %s (use 'forge chat --session %s' or /attach %s in REPL)\n", sessionID, sessionID, sessionID)
 	return nil

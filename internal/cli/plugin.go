@@ -456,10 +456,26 @@ func copyDir(src, dst string) error {
 // --- plugin list ---
 
 func newPluginListCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOut bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List plugins via daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOut {
+				out := cmd.OutOrStdout()
+				cl, err := client.Connect(cmd.Context(), "")
+				if err != nil {
+					_ = writeJSONErrorEnvelope(out, "plugin list", err.Error())
+					return err
+				}
+				defer cl.Close()
+				res, err := cl.PluginList(cmd.Context())
+				if err != nil {
+					_ = writeJSONErrorEnvelope(out, "plugin list", err.Error())
+					return err
+				}
+				return writeJSONResultEnvelope(out, "plugin list", res)
+			}
 			cl, err := client.Connect(cmd.Context(), "")
 			if err != nil {
 				return fmt.Errorf("daemon not reachable: %w", err)
@@ -480,6 +496,8 @@ func newPluginListCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
 }
 
 // --- plugin enable/disable ---

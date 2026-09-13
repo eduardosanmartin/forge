@@ -3,12 +3,45 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/client"
 )
+
+func decodeEnvelope(data []byte, env *JSONEnvelope) error {
+	// Decode into a raw holder so Result stays as raw JSON for inspection.
+	type rawEnv struct {
+		OK       bool            `json:"ok"`
+		Command  string          `json:"command"`
+		Result   json.RawMessage `json:"result"`
+		Error    *string         `json:"error"`
+		Metadata map[string]any  `json:"metadata"`
+	}
+	var r rawEnv
+	if err := json.Unmarshal(data, &r); err != nil {
+		return err
+	}
+	env.OK = r.OK
+	env.Command = r.Command
+	env.Error = r.Error
+	env.Metadata = r.Metadata
+	if len(r.Result) > 0 {
+		var v any
+		if err := json.Unmarshal(r.Result, &v); err == nil {
+			env.Result = v
+		} else {
+			env.Result = r.Result
+		}
+	}
+	return nil
+}
+
+func marshalResult(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
 
 // execRoot runs the real root command with the given arguments, with the
 // home directory redirected so ~/.forge/daemon.addr cannot leak from the
@@ -132,16 +165,39 @@ func TestWriteJSONResultEmitsOnlyTheDocument(t *testing.T) {
 	}
 
 	got := out.String()
-	if !strings.HasPrefix(got, "{") {
-		t.Errorf("output must be a bare JSON document, got %q", got)
+	if !strings.HasPrefix(strings.TrimSpace(got), "{") {
+		t.Errorf("output must be a JSON document, got %q", got)
 	}
-	for _, key := range []string{`"session_id": "os-1"`, `"model": "model-a"`, `"response": "answer"`, `"duration_ms": 12`} {
-		if !strings.Contains(got, key) {
-			t.Errorf("JSON output missing %s:\n%s", key, got)
+	// New RF-6.3 envelope: ok, command, result, metadata at top-level;
+	// the original OneShotResult fields live inside result.
+	var env JSONEnvelope
+	if err := decodeEnvelope([]byte(got), &env); err != nil {
+		t.Fatalf("decode envelope: %v\n%s", err, got)
+	}
+	if !env.OK {
+		t.Fatalf("envelope ok = false, want true: %s", got)
+	}
+	if env.Command != "run" {
+		t.Errorf("envelope command = %q, want run", env.Command)
+	}
+	if env.Metadata == nil || env.Metadata["command"] != "run" {
+		t.Errorf("envelope metadata missing command=run: %+v", env.Metadata)
+	}
+	if env.Result == nil {
+		t.Fatalf("envelope result missing: %s", got)
+	}
+	resultBytes, _ := marshalResult(env.Result)
+	resultStr := string(resultBytes)
+	for _, key := range []string{`"session_id":"os-1"`, `"model":"model-a"`, `"response":"answer"`, `"duration_ms":12`} {
+		if !strings.Contains(resultStr, key) {
+			t.Errorf("JSON result missing %s:\n%s", key, resultStr)
 		}
 	}
-	if !strings.Contains(got, `"name": "fs_read"`) || !strings.Contains(got, `"ok": true`) {
-		t.Errorf("tool trace not serialized:\n%s", got)
+	if !strings.Contains(resultStr, `"name":"fs_read"`) || !strings.Contains(resultStr, `"ok":true`) {
+		t.Errorf("tool trace not serialized:\n%s", resultStr)
+	}
+	if env.Error != nil {
+		t.Errorf("envelope error should be nil on success, got %v", *env.Error)
 	}
 }
 

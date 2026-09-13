@@ -146,9 +146,7 @@ func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool,
 }
 
 func writeJSONResult(out io.Writer, res *client.OneShotResult) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(res)
+	return writeJSONResultEnvelope(out, "run", res)
 }
 
 func writeHumanResult(stdout, stderr io.Writer, res *client.OneShotResult) {
@@ -261,9 +259,7 @@ func writeManifestReport(rep *run.Report, jsonOut bool) error {
 		return nil
 	}
 	if jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return writeJSONResultEnvelope(os.Stdout, "run", rep)
 	}
 	fmt.Fprintf(os.Stdout, "run %s [%s] %s — %d/%d tasks, budget tokens %d iters %d\n",
 		rep.RunID, rep.Mode, rep.Status, len(rep.CompletedTasks), rep.TotalTasks, rep.BudgetUsed.TokensUsed, rep.BudgetUsed.IterationsUsed)
