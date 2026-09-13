@@ -82,6 +82,12 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleSkillDisable(ctx, req)
 	case MethodSkillReload:
 		return h.handleSkillReload(ctx, req)
+	case MethodJobList:
+		return h.handleJobList(ctx, req)
+	case MethodJobGet:
+		return h.handleJobGet(ctx, req)
+	case MethodJobCancel:
+		return h.handleJobCancel(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -697,6 +703,44 @@ func (h *Handler) handleSkillReload(ctx context.Context, req *JSONRPCRequest) *J
 		out = []LoadResultEntry{}
 	}
 	return h.resultResponse(req.ID, SkillReloadResult{Results: out})
+}
+
+func (h *Handler) handleJobList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	jobs := h.mgr.ListJobs()
+	if jobs == nil {
+		jobs = []JobResult{}
+	}
+	return h.resultResponse(req.ID, JobListResult{Jobs: jobs})
+}
+
+func (h *Handler) handleJobGet(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params JobGetParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.JobID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "job_id is required", nil)
+	}
+	job, ok := h.mgr.GetJob(params.JobID)
+	if !ok {
+		return NewErrorResponse(req.ID, ErrCodeJobNotFound, "job not found", nil)
+	}
+	return h.resultResponse(req.ID, job)
+}
+
+func (h *Handler) handleJobCancel(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params JobCancelParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.JobID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "job_id is required", nil)
+	}
+	job, err := h.mgr.CancelJob(params.JobID)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeJobNotFound, "job not found", nil)
+	}
+	return h.resultResponse(req.ID, JobCancelResult{Canceled: job.Status == JobCanceled, JobID: job.ID, Status: job.Status})
 }
 
 func (h *Handler) messageToResult(msg store.Message) MessageResult {

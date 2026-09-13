@@ -254,6 +254,35 @@ func (m *testStore) GetMessagesSince(ctx context.Context, sessionID string, sinc
 	return result, nil
 }
 
+func (m *testStore) CompareSessions(ctx context.Context, aID, bID string) (*store.SessionCompare, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if aID == bID {
+		s, ok := m.sessions[aID]
+		if !ok {
+			return nil, store.ErrSessionNotFound
+		}
+		msgs := m.messages[aID]
+		return &store.SessionCompare{
+			SessionA: s, SessionB: s, CountA: len(msgs), CountB: len(msgs), SameSession: true,
+		}, nil
+	}
+	aSess, ok := m.sessions[aID]
+	if !ok {
+		return nil, store.ErrSessionNotFound
+	}
+	bSess, ok := m.sessions[bID]
+	if !ok {
+		return nil, store.ErrSessionNotFound
+	}
+	return &store.SessionCompare{
+		SessionA: aSess, SessionB: bSess,
+		CountA: len(m.messages[aID]), CountB: len(m.messages[bID]),
+		DivergentA: m.messages[aID], DivergentB: m.messages[bID],
+		DivergentCountA: len(m.messages[aID]), DivergentCountB: len(m.messages[bID]),
+	}, nil
+}
+
 func (m *testStore) Close() error                                   { return nil }
 func (m *testStore) Vacuum(ctx context.Context) error               { return nil }
 func (m *testStore) Stats(ctx context.Context) (store.Stats, error) { return store.Stats{}, nil }

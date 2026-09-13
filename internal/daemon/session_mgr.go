@@ -59,6 +59,13 @@ type SessionManager struct {
 	v1Deps         agent.V1Deps
 	cfg            *config.Config
 	deltaPublisher func(sessionID string, notif *JSONRPCNotification)
+
+	// RF-1.4 jobs queue: detached turns survive client disconnect and are
+	// tracked as jobs (session+seq) with running/done/failed/canceled states.
+	// In-memory for MVP; list/get/cancel reuses the detached ExecuteTurn context.
+	jobsMu sync.RWMutex
+	jobs   map[string]*Job
+	jobSeq map[string]int // per-session monotonic counter for job IDs
 }
 
 // SessionState holds runtime state for an active session.
@@ -121,6 +128,8 @@ func NewSessionManager(
 		emergency: emergency,
 		logger:    logger,
 		sessions:  make(map[string]*SessionState),
+		jobs:      make(map[string]*Job),
+		jobSeq:    make(map[string]int),
 		cfg:       cfg,
 	}
 
@@ -357,6 +366,14 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	// reconnecting client reattach via GetMessagesSince polling.
 	turnCtx, turnCancel := context.WithCancel(context.Background())
 
+	// RF-1.4 jobs queue: register detached turn as a job (session+seq).
+	// Capture startSeq before the turn so follow can poll since that point.
+	startSeq := 0
+	if msgs, gErr := m.store.GetMessagesSince(ctx, sessionID, 0); gErr == nil {
+		startSeq = len(msgs)
+	}
+	job := m.registerJob(sessionID, startSeq, turnCancel)
+
 	// Register turn context for emergency cancellation
 	m.emergency.SetTurnContext(sessionID, turnCancel)
 
@@ -369,11 +386,15 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	m.sessions[sessionID] = state
 	m.mu.Unlock()
 
+	var turnErr error
 	defer func() {
 		m.mu.Lock()
 		delete(m.sessions, sessionID)
 		m.mu.Unlock()
 		m.emergency.ClearTurnContext(sessionID)
+		// Finalize job status (running -> done/failed/canceled).
+		halted := m.emergency.IsSessionHalted(sessionID)
+		m.finishJob(job, turnErr, halted)
 	}()
 
 	// Delegate to agent with v1 flags and optional streaming delta bridge (WU3).
@@ -408,18 +429,18 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 				}
 			},
 		}
-		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, opts)
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, opts)
 		// Also log TTFT from agent metrics if available (more precise than delta bridge).
 		if result.Metrics.TTFTMs > 0 && m.logger != nil {
 			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
 		}
 	} else if streamingEnabled {
-		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
 	} else {
-		result, err = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
+		result, turnErr = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
 	}
-	if err != nil {
-		return result.Messages, err
+	if turnErr != nil {
+		return result.Messages, turnErr
 	}
 
 	// v1 retrieval indexing (best-effort): now that this turn's messages

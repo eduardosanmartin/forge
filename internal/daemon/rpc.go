@@ -50,6 +50,7 @@ const (
 	ErrCodeNotEnabled      = -32012
 	ErrCodeApprovalRequired = -32013
 	ErrCodeAlreadyExists   = -32014
+	ErrCodeJobNotFound     = -32020
 )
 
 // Method names for daemon -> client notifications.
@@ -131,6 +132,9 @@ const (
 	MethodSkillEnable      = "skill.enable"
 	MethodSkillDisable     = "skill.disable"
 	MethodSkillReload      = "skill.reload"
+	MethodJobList          = "job.list"
+	MethodJobGet           = "job.get"
+	MethodJobCancel        = "job.cancel"
 )
 
 // CreateSessionParams for session.create.
@@ -381,6 +385,40 @@ type StatusResult struct {
 	Sessions int    `json:"sessions"`
 	Addr     string `json:"addr"`
 	Version  string `json:"version"`
+}
+
+// JobResult for job operations.
+type JobResult struct {
+	ID        string `json:"id"`
+	SessionID string `json:"session_id"`
+	Seq       int    `json:"seq"`
+	Status    string `json:"status"`
+	CreatedAt int64  `json:"created_at"`
+	UpdatedAt int64  `json:"updated_at"`
+	Error     string `json:"error,omitempty"`
+	StartSeq  int    `json:"start_seq,omitempty"`
+}
+
+// JobListResult for job.list.
+type JobListResult struct {
+	Jobs []JobResult `json:"jobs"`
+}
+
+// JobGetParams for job.get.
+type JobGetParams struct {
+	JobID string `json:"job_id"`
+}
+
+// JobCancelParams for job.cancel.
+type JobCancelParams struct {
+	JobID string `json:"job_id"`
+}
+
+// JobCancelResult for job.cancel.
+type JobCancelResult struct {
+	Canceled bool   `json:"canceled"`
+	JobID    string `json:"job_id"`
+	Status   string `json:"status,omitempty"`
 }
 
 // NewErrorResponse creates a JSONRPCResponse with an error.
