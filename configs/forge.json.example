@@ -41,7 +41,8 @@
     "sidebar": true
   },
   "llm": {
-    "streaming": {"mode": "off"}
+    "streaming": {"mode": "off"},
+    "cores": 0
   },
   "limits": {
     "plugin_wasm_max_bytes": 2097152,
