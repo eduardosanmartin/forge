@@ -75,14 +75,14 @@ type ChatStreamer interface {
 
 // Agent orchestrates the agent loop: user message -> assistant -> tool calls -> ... -> final answer.
 type Agent struct {
-	cfg           *config.Config
-	ctxAssembler  *ContextAssembler
-	llmReg        LLMRegistryInterface
-	toolsReg      ToolsRegistryInterface
-	permsEngine   PermsEngineInterface
-	store         StoreInterface
-	logger        *slog.Logger
-	maxIterations int
+	cfg            *config.Config
+	ctxAssembler   *ContextAssembler
+	llmReg         LLMRegistryInterface
+	toolsReg       ToolsRegistryInterface
+	permsEngine    PermsEngineInterface
+	store          StoreInterface
+	logger         *slog.Logger
+	maxIterations  int
 	maxTurnSeconds int
 	// maxParallelChildren bounds concurrent child subagent turns (RF-1.2).
 	// Worker pool size 2-4 (default 2) via agent.max_parallel_children.
@@ -91,6 +91,12 @@ type Agent struct {
 	// SQLite writes are serialized via single connection + WAL busy_timeout
 	// (store/Store MaxOpenConns=1). Branched sessions never share a write txn.
 	maxParallelChildren int
+	// overrideProvider/overrideModel implement the RF-9.3 per-child
+	// provider/model pinning (spawn_subagent + session.fanout). Zero values
+	// mean "inherit the canonical default": the child keeps using the
+	// default provider and whatever the routing flag resolves.
+	overrideProvider llm.Provider
+	overrideModel    string
 }
 
 // NewAgent creates a new Agent from configuration and dependencies.
@@ -124,15 +130,15 @@ func NewAgent(
 		maxParallelChildren = config.AgentMaxParallelChildrenMax
 	}
 	return &Agent{
-		cfg:            cfg,
-		ctxAssembler:   NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
-		llmReg:         llmReg,
-		toolsReg:       toolsReg,
-		permsEngine:    permsEngine,
-		store:          store,
-		logger:         logger,
-		maxIterations:  maxIterations,
-		maxTurnSeconds: maxTurnSeconds,
+		cfg:                 cfg,
+		ctxAssembler:        NewContextAssembler(toolsReg, store, 8), // default 8 turns history (RNF-10-tuned, see bench)
+		llmReg:              llmReg,
+		toolsReg:            toolsReg,
+		permsEngine:         permsEngine,
+		store:               store,
+		logger:              logger,
+		maxIterations:       maxIterations,
+		maxTurnSeconds:      maxTurnSeconds,
 		maxParallelChildren: maxParallelChildren,
 	}
 }
@@ -254,23 +260,35 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 		// Call LLM
 		llmStartTime := time.Now()
+		// RF-9.3: explicit per-child overrides win over everything else.
 		provider, model := a.llmReg.GetDefault()
+		// An overrideProvider replaces the default provider for every call
+		// of this turn; an overrideModel replaces the model name. With a
+		// model override the session routing flag does not apply — the
+		// override is user-directed and routes nothing further. Overrides
+		// are applied before the nil-provider check so a child pinned to a
+		// named provider still runs when the registry has no usable default.
+		if a.overrideProvider != nil {
+			provider = a.overrideProvider
+		}
 		if provider == nil {
 			result.Error = errors.New("no LLM provider available")
 			result.Halted = true
 			break
 		}
 
-		// v1 routing: when the session flag is on and the registry can
-		// resolve step models, the main generation call uses the router's
-		// model for the generate step (config providers.<name>.model_roles
-		// -> generation role). In this build routing affects exactly this
-		// existing operation: retrieval embeddings and compaction summaries
-		// are deterministic and make no model calls, so there is nothing
-		// else to route. The provider stays the default one; only the
-		// model name changes, and an unresolvable role falls back to the
-		// default model.
-		if routingEnabled {
+		if a.overrideModel != "" {
+			model = a.overrideModel
+		} else if routingEnabled {
+			// v1 routing: when the session flag is on and the registry can
+			// resolve step models, the main generation call uses the router's
+			// model for the generate step (config providers.<name>.model_roles
+			// -> generation role). In this build routing affects exactly this
+			// existing operation: retrieval embeddings and compaction summaries
+			// are deterministic and make no model calls, so there is nothing
+			// else to route. The provider stays the default one; only the
+			// model name changes, and an unresolvable role falls back to the
+			// default model.
 			if sel, ok := a.llmReg.(ModelForStepSelector); ok {
 				if routed := sel.GetModelForStep(routing.StepGenerate); routed != "" {
 					model = routed

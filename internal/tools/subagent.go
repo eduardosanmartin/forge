@@ -9,6 +9,25 @@ import (
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
+// intArg reads a numeric tool argument that JSON decoding may deliver in
+// any of the expected numeric shapes.
+func intArg(args map[string]any, key string) int {
+	v, ok := args[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
 // contextKey is the private key for session-scoped tool context.
 type contextKey string
 
@@ -28,7 +47,19 @@ func SessionIDFromContext(ctx context.Context) string {
 }
 
 // SpawnFunc is the daemon/agent-provided spawner (injected to avoid import cycles).
-type SpawnFunc func(ctx context.Context, task string, maxIterations int, tokenBudget int, fileBudget string) (Result, error)
+type SpawnFunc func(ctx context.Context, req SpawnRequest) (Result, error)
+
+// SpawnRequest carries the spawn_subagent tool arguments to the injected
+// spawner. Provider/Model are RF-9.3 fanout overrides; empty means the
+// child inherits the canonical default provider/model.
+type SpawnRequest struct {
+	Task          string
+	MaxIterations int
+	TokenBudget   int
+	FileBudget    string
+	Provider      string
+	Model         string
+}
 
 type spawnSubagentTool struct {
 	mu      sync.RWMutex
@@ -77,6 +108,14 @@ func (t *spawnSubagentTool) JSONSchema() map[string]any {
 				"type":        "string",
 				"description": "Optional file scope hint for the child",
 			},
+			"provider": map[string]any{
+				"type":        "string",
+				"description": "Optional named LLM provider override (RF-9.3 fanout); unknown names fail cleanly instead of falling back",
+			},
+			"model": map[string]any{
+				"type":        "string",
+				"description": "Optional model override for the child turn (RF-9.3 fanout); empty = canonical default model",
+			},
 		},
 		"required": []string{"task"},
 	}
@@ -93,34 +132,20 @@ func (t *spawnSubagentTool) Execute(ctx context.Context, req perms.Request) (Res
 	if args == nil {
 		args = map[string]any{}
 	}
-	task, _ := args["task"].(string)
-	if task == "" {
+	sr := SpawnRequest{}
+	sr.Task, _ = args["task"].(string)
+	if sr.Task == "" {
 		return Result{Content: "ERROR: task is required"}, nil
 	}
-	maxIter := 0
-	if v, ok := args["max_iterations"]; ok {
-		if f, ok := v.(float64); ok {
-			maxIter = int(f)
-		} else if i, ok := v.(int); ok {
-			maxIter = i
-		} else if i64, ok := v.(int64); ok {
-			maxIter = int(i64)
-		}
-	}
-	tokenBudget := 0
-	if v, ok := args["token_budget"]; ok {
-		if f, ok := v.(float64); ok {
-			tokenBudget = int(f)
-		} else if i, ok := v.(int); ok {
-			tokenBudget = i
-		} else if i64, ok := v.(int64); ok {
-			tokenBudget = int(i64)
-		}
-	}
-	fileBudget, _ := args["file_budget"].(string)
+	sr.MaxIterations = intArg(args, "max_iterations")
+	sr.TokenBudget = intArg(args, "token_budget")
+	sr.FileBudget, _ = args["file_budget"].(string)
+	sr.Provider, _ = args["provider"].(string)
+	sr.Model, _ = args["model"].(string)
 
-	// Validate via spawner; just forward.
-	result, err := spawner(ctx, task, maxIter, tokenBudget, fileBudget)
+	// Validate via spawner; unknown provider/model names surface there as
+	// ERROR-quoted tool results (never a panic — the spawner contract).
+	result, err := spawner(ctx, sr)
 	if err != nil {
 		return Result{Content: fmt.Sprintf("ERROR: %v", err)}, nil
 	}

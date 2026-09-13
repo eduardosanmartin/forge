@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/agent"
+	"github.com/eduardosanmartin/forge/internal/anchor"
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
@@ -168,16 +169,18 @@ func (m *SessionManager) wireSubagentTool() {
 		return
 	}
 	tool := tools.NewSpawnSubagentTool()
-	tool.SetSpawner(func(ctx context.Context, task string, maxIterations int, tokenBudget int, fileBudget string) (tools.Result, error) {
+	tool.SetSpawner(func(ctx context.Context, req tools.SpawnRequest) (tools.Result, error) {
 		parentID := tools.SessionIDFromContext(ctx)
 		if parentID == "" {
 			return tools.Result{Content: "ERROR: missing parent session id"}, nil
 		}
 		spec := agent.ChildSpec{
-			Task:          task,
-			MaxIterations: maxIterations,
-			TokenBudget:   tokenBudget,
-			FileBudget:    fileBudget,
+			Task:          req.Task,
+			MaxIterations: req.MaxIterations,
+			TokenBudget:   req.TokenBudget,
+			FileBudget:    req.FileBudget,
+			Provider:      req.Provider,
+			Model:         req.Model,
 		}
 		child, err := m.agent.SpawnChild(ctx, parentID, spec)
 		if err != nil {
@@ -205,6 +208,12 @@ func (m *SessionManager) wireSubagentTool() {
 		return tools.Result{Content: content, Metadata: metadata}, nil
 	})
 	reg.Register(tool)
+}
+
+// AnchorStore returns the anchor store wired via WithV1Deps (RF-3.4), or
+// nil when memory dependencies were not provided at construction.
+func (m *SessionManager) AnchorStore() *anchor.AnchorStoreSQL {
+	return m.v1Deps.AnchorStore
 }
 
 // CreateSession creates a new session.

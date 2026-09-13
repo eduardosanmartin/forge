@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/store"
 )
 
@@ -31,6 +32,19 @@ type ChildSpec struct {
 	MaxIterations int // 0 = parent default, clamped to parent max never wider
 	TokenBudget   int // 0 = no explicit cap; recorded in metadata for observability
 	FileBudget    string
+	// Provider/Model implement RF-9.3 multi-model fanout: they pin the
+	// child turn to a named registry provider and/or model. Empty values
+	// inherit the canonical default. JSON tags match spawn_subagent tool
+	// args and the session.fanout RPC payload.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// ProviderResolver matches LLM registries that can resolve a provider by
+// its registration name (llm.Registry implements it). It is the seam used
+// to validate and resolve spec.Provider in SpawnChild.
+type ProviderResolver interface {
+	GetProvider(name string) (llm.Provider, bool)
 }
 
 // ChildResult summarizes one isolated child turn.
@@ -89,6 +103,21 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 		return ChildResult{}, fmt.Errorf("spawn child: store does not support branching")
 	}
 
+	// RF-9.3: resolve the provider override up-front so an unknown provider
+	// name fails before any branching happens (no orphan sessions).
+	var overrideProvider llm.Provider
+	if spec.Provider != "" {
+		resolver, isResolver := a.llmReg.(ProviderResolver)
+		if !isResolver {
+			return ChildResult{}, fmt.Errorf("spawn child: LLM registry does not support named providers")
+		}
+		p, found := resolver.GetProvider(spec.Provider)
+		if !found || p == nil {
+			return ChildResult{}, fmt.Errorf("spawn child: unknown provider %q", spec.Provider)
+		}
+		overrideProvider = p
+	}
+
 	// Clamp child max iterations to parent ceiling (never wider).
 	childMax := a.maxIterations
 	if spec.MaxIterations > 0 {
@@ -112,10 +141,10 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 	childDepth := parentDepth + 1
 
 	meta := map[string]any{
-		"subagent":               true,
-		"subagent_parent":        parentSessionID,
-		"subagent_task":          spec.Task,
-		"subagent_depth":         childDepth,
+		"subagent":                true,
+		"subagent_parent":         parentSessionID,
+		"subagent_task":           spec.Task,
+		"subagent_depth":          childDepth,
 		"subagent_max_iterations": childMax,
 	}
 	if spec.TokenBudget > 0 {
@@ -123,6 +152,12 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 	}
 	if spec.FileBudget != "" {
 		meta["subagent_file_budget"] = spec.FileBudget
+	}
+	if spec.Provider != "" {
+		meta["subagent_provider"] = spec.Provider
+	}
+	if spec.Model != "" {
+		meta["subagent_model"] = spec.Model
 	}
 
 	branched, err := bs.BranchSession(ctx, parentSessionID, 0, meta)
@@ -142,6 +177,8 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 		maxIterations:       childMax,
 		maxTurnSeconds:      a.maxTurnSeconds,
 		maxParallelChildren: a.maxParallelChildren,
+		overrideProvider:    overrideProvider,
+		overrideModel:       spec.Model,
 	}
 	// Preserve V1 deps wired on the parent assembler.
 	childResult, execErr := childAgent.ExecuteTurn(ctx, branched.ID, spec.Task)
