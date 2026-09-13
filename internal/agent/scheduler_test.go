@@ -197,9 +197,9 @@ func TestParallelToolCalls_DispatchViaLoop(t *testing.T) {
 	toolsReg.Register(&stubFsReadTool{})
 	agent := NewAgent(cfg, storeImpl, llmReg, toolsReg, permsEng, newTestLogger())
 	spawnTool := tools.NewSpawnSubagentTool()
-	spawnTool.SetSpawner(func(toolCtx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (tools.Result, error) {
+	spawnTool.SetSpawner(func(toolCtx context.Context, sr tools.SpawnRequest) (tools.Result, error) {
 		parentID := tools.SessionIDFromContext(toolCtx)
-		child, err := agent.SpawnChild(toolCtx, parentID, ChildSpec{Task: task})
+		child, err := agent.SpawnChild(toolCtx, parentID, ChildSpec{Task: sr.Task})
 		if err != nil {
 			return tools.Result{Content: "ERROR: " + err.Error()}, nil
 		}

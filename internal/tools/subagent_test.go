@@ -44,19 +44,19 @@ func TestSpawnSubagentTool_MissingSpawner(t *testing.T) {
 
 func TestSpawnSubagentTool_WithSpawner(t *testing.T) {
 	called := false
-	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (Result, error) {
+	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, sr SpawnRequest) (Result, error) {
 		called = true
-		if task != "child task" {
-			t.Fatalf("task %q", task)
+		if sr.Task != "child task" {
+			t.Fatalf("task %q", sr.Task)
 		}
-		if maxIter != 3 {
-			t.Fatalf("maxIter %d", maxIter)
+		if sr.MaxIterations != 3 {
+			t.Fatalf("maxIter %d", sr.MaxIterations)
 		}
-		if tokenBudget != 100 {
-			t.Fatalf("tokenBudget %d", tokenBudget)
+		if sr.TokenBudget != 100 {
+			t.Fatalf("tokenBudget %d", sr.TokenBudget)
 		}
-		if fileBudget != "foo.go" {
-			t.Fatalf("fileBudget %q", fileBudget)
+		if sr.FileBudget != "foo.go" {
+			t.Fatalf("fileBudget %q", sr.FileBudget)
 		}
 		if SessionIDFromContext(ctx) != "parent-1" {
 			t.Fatalf("session id not propagated got %q", SessionIDFromContext(ctx))
@@ -78,7 +78,7 @@ func TestSpawnSubagentTool_WithSpawner(t *testing.T) {
 }
 
 func TestSpawnSubagentTool_EmptyTask(t *testing.T) {
-	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (Result, error) {
+	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, sr SpawnRequest) (Result, error) {
 		t.Fatal("should not be called for empty task")
 		return Result{}, nil
 	})
@@ -93,7 +93,7 @@ func TestSpawnSubagentTool_RegistryIntegration(t *testing.T) {
 	// Registry with custom floor (allow) must allow spawn_subagent without policy change.
 	tmp := t.TempDir()
 	policy := perms.PermissionsPolicy{
-		FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
+		FS:    perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
 		Shell: perms.ShellPermissions{Allow: []string{}},
 		Git:   perms.GitPermissions{Allow: []string{}},
 	}
@@ -105,7 +105,7 @@ func TestSpawnSubagentTool_RegistryIntegration(t *testing.T) {
 	for _, tl := range defaultRegistryTools(nil) {
 		reg.Register(tl)
 	}
-	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (Result, error) {
+	tool := NewSpawnSubagentToolWithSpawner(func(ctx context.Context, sr SpawnRequest) (Result, error) {
 		return Result{Content: "via-registry ok"}, nil
 	})
 	reg.Register(tool)

@@ -37,28 +37,28 @@ type JSONRPCNotification struct {
 
 // Standard JSON-RPC 2.0 error codes.
 const (
-	ErrCodeParseError      = -32700
-	ErrCodeInvalidRequest  = -32600
-	ErrCodeMethodNotFound  = -32601
-	ErrCodeInvalidParams   = -32602
-	ErrCodeInternalError   = -32603
-	ErrCodeSessionNotFound = -32001
-	ErrCodeSessionHalted   = -32002
-	ErrCodeToolError       = -32003
-	ErrCodeNotLoaded       = -32010
-	ErrCodeAlreadyEnabled  = -32011
-	ErrCodeNotEnabled      = -32012
+	ErrCodeParseError       = -32700
+	ErrCodeInvalidRequest   = -32600
+	ErrCodeMethodNotFound   = -32601
+	ErrCodeInvalidParams    = -32602
+	ErrCodeInternalError    = -32603
+	ErrCodeSessionNotFound  = -32001
+	ErrCodeSessionHalted    = -32002
+	ErrCodeToolError        = -32003
+	ErrCodeNotLoaded        = -32010
+	ErrCodeAlreadyEnabled   = -32011
+	ErrCodeNotEnabled       = -32012
 	ErrCodeApprovalRequired = -32013
-	ErrCodeAlreadyExists   = -32014
-	ErrCodeJobNotFound     = -32020
+	ErrCodeAlreadyExists    = -32014
+	ErrCodeJobNotFound      = -32020
 )
 
 // Method names for daemon -> client notifications.
 const (
-	MethodSessionEvent  = "session.event"    // session created/updated/deleted
-	MethodMessageEvent  = "message.event"    // new message appended
-	MethodToolCallEvent = "tool.call.event"  // tool call started/finished
-	MethodEmergencyHalt = "emergency.halt"   // emergency stop broadcast
+	MethodSessionEvent  = "session.event"       // session created/updated/deleted
+	MethodMessageEvent  = "message.event"       // new message appended
+	MethodToolCallEvent = "tool.call.event"     // tool call started/finished
+	MethodEmergencyHalt = "emergency.halt"      // emergency stop broadcast
 	MethodMessageDelta  = "message.delta.event" // WU3: live text delta during streaming (additive)
 )
 
@@ -108,33 +108,41 @@ type EmergencyHaltPayload struct {
 
 // RPC method names (client -> daemon requests).
 const (
-	MethodCreateSession    = "session.create"
-	MethodGetSession       = "session.get"
-	MethodListSessions     = "session.list"
-	MethodDeleteSession    = "session.delete"
-	MethodBranchSession    = "session.branch"
-	MethodMergeSession     = "session.merge"
-	MethodExecuteTurn      = "session.execute_turn"
-	MethodGetMessages      = "session.get_messages"
-	MethodGetMessagesSince = "session.get_messages_since"
-	MethodHaltSession      = "session.halt"
-	MethodResumeSession    = "session.resume"
-	MethodHaltAll          = "emergency.halt_all"
-	MethodStatus           = "daemon.status"
-	MethodSwitchModel      = "session.switch_model"
+	MethodCreateSession      = "session.create"
+	MethodGetSession         = "session.get"
+	MethodListSessions       = "session.list"
+	MethodDeleteSession      = "session.delete"
+	MethodBranchSession      = "session.branch"
+	MethodMergeSession       = "session.merge"
+	MethodExecuteTurn        = "session.execute_turn"
+	MethodGetMessages        = "session.get_messages"
+	MethodGetMessagesSince   = "session.get_messages_since"
+	MethodHaltSession        = "session.halt"
+	MethodResumeSession      = "session.resume"
+	MethodHaltAll            = "emergency.halt_all"
+	MethodStatus             = "daemon.status"
+	MethodSwitchModel        = "session.switch_model"
 	MethodSessionMarkSuccess = "session.mark_success"
-	MethodCompareSessions  = "session.compare"
-	MethodPluginList       = "plugin.list"
-	MethodPluginEnable     = "plugin.enable"
-	MethodPluginDisable    = "plugin.disable"
-	MethodPluginReload     = "plugin.reload"
-	MethodSkillList        = "skill.list"
-	MethodSkillEnable      = "skill.enable"
-	MethodSkillDisable     = "skill.disable"
-	MethodSkillReload      = "skill.reload"
-	MethodJobList          = "job.list"
-	MethodJobGet           = "job.get"
-	MethodJobCancel        = "job.cancel"
+	MethodCompareSessions    = "session.compare"
+	MethodPluginList         = "plugin.list"
+	MethodPluginEnable       = "plugin.enable"
+	MethodPluginDisable      = "plugin.disable"
+	MethodPluginReload       = "plugin.reload"
+	MethodSkillList          = "skill.list"
+	MethodSkillEnable        = "skill.enable"
+	MethodSkillDisable       = "skill.disable"
+	MethodSkillReload        = "skill.reload"
+	MethodJobList            = "job.list"
+	MethodJobGet             = "job.get"
+	MethodJobCancel          = "job.cancel"
+	// RF-3.4: manual inspect/edit of anchored facts (user-initiated).
+	MethodMemoryList   = "memory.list"
+	MethodMemoryGet    = "memory.get"
+	MethodMemoryCreate = "memory.create"
+	MethodMemoryUpdate = "memory.update"
+	MethodMemoryDelete = "memory.delete"
+	// RF-9.3: multi-model fanout.
+	MethodFanout = "session.fanout"
 )
 
 // CreateSessionParams for session.create.
@@ -419,6 +427,96 @@ type JobCancelResult struct {
 	Canceled bool   `json:"canceled"`
 	JobID    string `json:"job_id"`
 	Status   string `json:"status,omitempty"`
+}
+
+// AnchorResult is the wire form of a persisted anchor (RF-3.4).
+type AnchorResult struct {
+	ID        int64    `json:"id"`
+	SessionID string   `json:"session_id"`
+	Content   string   `json:"content"`
+	Source    string   `json:"source"`
+	Tags      []string `json:"tags,omitempty"`
+	CreatedAt int64    `json:"created_at"`
+	UpdatedAt int64    `json:"updated_at"`
+}
+
+// MemoryListParams for memory.list. An empty SessionID lists every anchor.
+type MemoryListParams struct {
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// MemoryListResult for memory.list.
+type MemoryListResult struct {
+	Anchors []AnchorResult `json:"anchors"`
+}
+
+// MemoryGetParams for memory.get.
+type MemoryGetParams struct {
+	ID int64 `json:"id"`
+}
+
+// MemoryCreateParams for memory.create. Content is required. SessionID
+// defaults to "global" when omitted (see handler_memory.go).
+type MemoryCreateParams struct {
+	Content   string   `json:"content"`
+	SessionID string   `json:"session_id,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Tags      []string `json:"tags,omitempty"`
+}
+
+// MemoryUpdateParams for memory.update. Pointer fields distinguish "clear"
+// from "leave untouched": nil means no change, a set value replaces it
+// (nil Content/Source pointers keep the existing value; a non-nil
+// Tags pointer including an empty slice clears the tags).
+type MemoryUpdateParams struct {
+	ID      int64     `json:"id"`
+	Content *string   `json:"content,omitempty"`
+	Source  *string   `json:"source,omitempty"`
+	Tags    *[]string `json:"tags,omitempty"`
+}
+
+// MemoryResult for memory.create/update — the affected anchor.
+type MemoryResult struct {
+	Anchor AnchorResult `json:"anchor"`
+}
+
+// MemoryDeleteParams for memory.delete.
+type MemoryDeleteParams struct {
+	ID int64 `json:"id"`
+}
+
+// FanoutParams for session.fanout (RF-9.3).
+//   - Task: the same user task executed on every child.
+//   - Models: one entry per child, "provider/model" or bare "model" (bare
+//     model entries use the daemon's default provider).
+//   - SessionID: parent session; when empty a fresh labeled parent is created.
+//   - MaxIterations/TokenBudget: optional passthrough to every ChildSpec.
+type FanoutParams struct {
+	Task          string   `json:"task"`
+	Models        []string `json:"models"`
+	SessionID     string   `json:"session_id,omitempty"`
+	MaxIterations int      `json:"max_iter,omitempty"`
+	TokenBudget   int      `json:"token_budget,omitempty"`
+}
+
+// FanoutChildResult summarizes one fanout child.
+type FanoutChildResult struct {
+	ChildSessionID string `json:"child_session_id"`
+	Provider       string `json:"provider,omitempty"` // empty = default provider
+	Model          string `json:"model"`              // resolved model name used for the child
+	Success        bool   `json:"success"`
+	Summary        string `json:"summary,omitempty"`
+	Error          string `json:"error,omitempty"`
+	// Lineage metadata for follow-up inspection via session.compare.
+	BranchParent string `json:"branch_parent,omitempty"`
+	BranchRoot   string `json:"branch_root,omitempty"`
+	BranchAtSeq  int    `json:"branch_at_seq,omitempty"`
+}
+
+// FanoutResult for session.fanout.
+type FanoutResult struct {
+	ParentSessionID string              `json:"parent_session_id"`
+	Children        []FanoutChildResult `json:"children"`
 }
 
 // NewErrorResponse creates a JSONRPCResponse with an error.

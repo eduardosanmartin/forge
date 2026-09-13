@@ -36,7 +36,7 @@ func TestSpawnViaTool_ParentReceivesChildSummary(t *testing.T) {
 		if strings.Contains(lastUser, "child work") {
 			return llm.ChatResponse{
 				Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "child final answer for child work"}}},
-				Usage: &llm.Usage{PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10},
+				Usage:   &llm.Usage{PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10},
 			}, nil
 		}
 		if callNum == 1 {
@@ -59,7 +59,7 @@ func TestSpawnViaTool_ParentReceivesChildSummary(t *testing.T) {
 		// Parent final after tool result.
 		return llm.ChatResponse{
 			Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "parent final after child"}}},
-			Usage: &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+			Usage:   &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 		}, nil
 	})
 	llmReg := &mockLLMRegistry{provider: provider}
@@ -75,9 +75,16 @@ func TestSpawnViaTool_ParentReceivesChildSummary(t *testing.T) {
 	// Need agent instance to call SpawnChild; create agent first with this registry.
 	agent := NewAgent(cfg, storeImpl, llmReg, toolsReg, permsEng, newTestLogger())
 	var capturedChildID string
-	spawnTool.SetSpawner(func(toolCtx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (tools.Result, error) {
+	spawnTool.SetSpawner(func(toolCtx context.Context, sr tools.SpawnRequest) (tools.Result, error) {
 		parentID := tools.SessionIDFromContext(toolCtx)
-		spec := ChildSpec{Task: task, MaxIterations: maxIter, TokenBudget: tokenBudget, FileBudget: fileBudget}
+		spec := ChildSpec{
+			Task:          sr.Task,
+			MaxIterations: sr.MaxIterations,
+			TokenBudget:   sr.TokenBudget,
+			FileBudget:    sr.FileBudget,
+			Provider:      sr.Provider,
+			Model:         sr.Model,
+		}
 		child, err := agent.SpawnChild(toolCtx, parentID, spec)
 		if err != nil {
 			return tools.Result{Content: "ERROR: " + err.Error()}, nil
@@ -188,9 +195,9 @@ func TestSpawnViaTool_SequentialMultiChildInOneTurn(t *testing.T) {
 	toolsReg2.Register(&stubFsReadTool{})
 	agent2 := NewAgent(cfg, storeImpl, llmReg, toolsReg2, permsEng2, newTestLogger())
 	spawnTool2 := tools.NewSpawnSubagentTool()
-	spawnTool2.SetSpawner(func(toolCtx context.Context, task string, maxIter int, tokenBudget int, fileBudget string) (tools.Result, error) {
+	spawnTool2.SetSpawner(func(toolCtx context.Context, sr tools.SpawnRequest) (tools.Result, error) {
 		parentID := tools.SessionIDFromContext(toolCtx)
-		child, err := agent2.SpawnChild(toolCtx, parentID, ChildSpec{Task: task})
+		child, err := agent2.SpawnChild(toolCtx, parentID, ChildSpec{Task: sr.Task})
 		if err != nil {
 			return tools.Result{Content: "ERROR: " + err.Error()}, nil
 		}
@@ -227,7 +234,7 @@ func TestSpawnViaTool_SequentialMultiChildInOneTurn(t *testing.T) {
 
 type stubFsReadTool struct{}
 
-func (t *stubFsReadTool) Name() string { return "fs_read" }
+func (t *stubFsReadTool) Name() string        { return "fs_read" }
 func (t *stubFsReadTool) Description() string { return "stub" }
 func (t *stubFsReadTool) JSONSchema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}, "required": []string{"path"}}
