@@ -22,6 +22,7 @@ type TurnMetrics struct {
 	EndTime           time.Time
 	HarnessOverheadMs int64 // time spent in agent loop NOT waiting for LLM
 	LLMTimeMs         int64 // time waiting for LLM response(s)
+	TTFTMs            int64 // time-to-first-token (ms) for streaming; 0 when not streaming or no token
 	TotalTokens       int   // prompt + completion
 	PromptTokens      int
 	CompletionTokens  int

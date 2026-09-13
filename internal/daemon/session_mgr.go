@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/eduardosanmartin/forge/internal/agent"
 	"github.com/eduardosanmartin/forge/internal/config"
@@ -381,13 +382,21 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	// receive live updates. Tool calls still execute as before; Chat remains canonical
 	// when streaming is disabled or provider lacks support.
 	var result agent.TurnResult
-	streamingEnabled := m.cfg != nil && m.cfg.LLM.Streaming
+	streamingEnabled := m.cfg != nil && m.cfg.LLM.Streaming.IsEnabled()
 	if streamingEnabled && m.deltaPublisher != nil {
+		turnStart := time.Now()
+		var firstSent bool
 		opts := agent.TurnOptions{
 			StreamingEnabled: true,
 			OnDelta: func(delta string) {
 				// Publish per-delta notification (additive, best-effort, non-blocking).
+				// TTFT is emitted on first delta for observability.
 				payload := MessageDeltaPayload{SessionID: sessionID, Delta: delta}
+				if !firstSent {
+					ttft := time.Since(turnStart).Milliseconds()
+					payload.TTFTMs = &ttft
+					firstSent = true
+				}
 				if notif, nErr := NewNotification(MethodMessageDelta, payload); nErr == nil {
 					// Capture publisher under lock snapshot to avoid race if SetDeltaPublisher races.
 					m.mu.RLock()
@@ -400,6 +409,10 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 			},
 		}
 		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, opts)
+		// Also log TTFT from agent metrics if available (more precise than delta bridge).
+		if result.Metrics.TTFTMs > 0 && m.logger != nil {
+			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
+		}
 	} else if streamingEnabled {
 		result, err = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
 	} else {

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -141,9 +142,9 @@ func (r *streamingMockRegistry) Close() error { return r.provider.Close() }
 func TestAgent_StreamingParity_NoTool(t *testing.T) {
 	ctx := context.Background()
 	cfgStreaming := config.Defaults()
-	cfgStreaming.LLM.Streaming = true
+	cfgStreaming.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 	cfgNon := config.Defaults()
-	cfgNon.LLM.Streaming = false
+	cfgNon.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOff}
 
 	usage := &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15}
 	prov := &streamingMockProvider{content: "Hello streaming world", usage: usage, finish: "stop", fragmented: true}
@@ -191,9 +192,9 @@ func TestAgent_StreamingParity_NoTool(t *testing.T) {
 func TestAgent_StreamingParity_WithToolCall(t *testing.T) {
 	ctx := context.Background()
 	cfgStreaming := config.Defaults()
-	cfgStreaming.LLM.Streaming = true
+	cfgStreaming.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 	cfgNon := config.Defaults()
-	cfgNon.LLM.Streaming = false
+	cfgNon.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOff}
 
 	toolCalls := []llm.ToolCall{
 		{ID: "call_1", Type: "function", Function: llm.ToolCallFunction{Name: "fs_read", Arguments: `{"path":"main.go"}`}},
@@ -272,7 +273,7 @@ func TestAgent_StreamingParity_WithToolCall(t *testing.T) {
 func TestAgent_StreamingMidStreamErrorFailsTurn(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Defaults()
-	cfg.LLM.Streaming = true
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 	prov := &streamingMockProvider{streamError: "mid error"}
 	store := newMockStore()
 	engine := newTestPermsEngine(t)
@@ -293,7 +294,7 @@ func TestAgent_StreamingMidStreamErrorFailsTurn(t *testing.T) {
 func TestAgent_StreamingFallbackOnNotSupported(t *testing.T) {
 	ctx := context.Background()
 	cfg := config.Defaults()
-	cfg.LLM.Streaming = true
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 	prov := &streamingMockProvider{content: "fallback ok", finish: "stop", notSupported: true}
 	store := newMockStore()
 	engine := newTestPermsEngine(t)
@@ -350,7 +351,7 @@ func TestConsumeStream_MergesToolCallFragments(t *testing.T) {
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tail}}}}}
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
 	}()
-	_, calls, _, finish, err := consumeStream(ctx, ch, nil)
+	_, calls, _, finish, _, err := consumeStream(ctx, ch, nil, time.Now())
 	if err != nil {
 		t.Fatalf("consumeStream: %v", err)
 	}
@@ -388,7 +389,7 @@ func TestConsumeStream_KeepsDistinctCallsSeparate(t *testing.T) {
 		fr := "tool_calls"
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
 	}()
-	_, calls, _, _, err := consumeStream(ctx, ch, nil)
+	_, calls, _, _, _, err := consumeStream(ctx, ch, nil, time.Now())
 	if err != nil {
 		t.Fatalf("consumeStream: %v", err)
 	}
@@ -396,3 +397,178 @@ func TestConsumeStream_KeepsDistinctCallsSeparate(t *testing.T) {
 		t.Fatalf("distinct calls must stay separate, got %d: %+v", len(calls), calls)
 	}
 }
+
+func TestAgent_StreamingTTFTMeasured(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Defaults()
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
+	prov := &streamingMockProvider{content: "hello ttft", finish: "stop"}
+	store := newMockStore()
+	engine := newTestPermsEngine(t)
+	toolsReg := tools.NewDefaultRegistry(engine, "", nil)
+	ag := NewAgent(cfg, store, &streamingMockRegistry{provider: prov}, toolsReg, engine, newTestLogger())
+	res, err := ag.ExecuteTurn(ctx, "session-1", "hi")
+	if err != nil {
+		t.Fatalf("streaming turn: %v", err)
+	}
+	if res.Metrics.TTFTMs <= 0 {
+		t.Fatalf("TTFTMs should be >0 for streaming, got %d", res.Metrics.TTFTMs)
+	}
+	if res.Metrics.LLMTimeMs != 0 && res.Metrics.TTFTMs > res.Metrics.LLMTimeMs {
+		t.Fatalf("TTFT %d should be <= LLMTime %d", res.Metrics.TTFTMs, res.Metrics.LLMTimeMs)
+	}
+	// RecordTTFT should reflect same value
+	if LastTTFTMs() != res.Metrics.TTFTMs {
+		t.Fatalf("LastTTFTMs %d != metrics %d", LastTTFTMs(), res.Metrics.TTFTMs)
+	}
+}
+
+func TestAgent_StreamingTTFTZeroWhenNotStreaming(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Defaults()
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOff}
+	prov := &streamingMockProvider{content: "no ttft", finish: "stop"}
+	store := newMockStore()
+	engine := newTestPermsEngine(t)
+	toolsReg := tools.NewDefaultRegistry(engine, "", nil)
+	ag := NewAgent(cfg, store, &streamingMockRegistry{provider: prov}, toolsReg, engine, newTestLogger())
+	res, err := ag.ExecuteTurn(ctx, "session-1", "hi")
+	if err != nil {
+		t.Fatalf("non-streaming turn: %v", err)
+	}
+	if res.Metrics.TTFTMs != 0 {
+		t.Fatalf("TTFTMs should be 0 for non-streaming, got %d", res.Metrics.TTFTMs)
+	}
+}
+
+func TestAgent_StreamingTTFTFallbackOnNotSupportedIsZero(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Defaults()
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeAuto}
+	prov := &streamingMockProvider{content: "fallback", finish: "stop", notSupported: true}
+	store := newMockStore()
+	engine := newTestPermsEngine(t)
+	toolsReg := tools.NewDefaultRegistry(engine, "", nil)
+	ag := NewAgent(cfg, store, &streamingMockRegistry{provider: prov}, toolsReg, engine, newTestLogger())
+	res, err := ag.ExecuteTurn(ctx, "session-1", "hi")
+	if err != nil {
+		t.Fatalf("auto fallback should succeed, got %v", err)
+	}
+	if res.Metrics.TTFTMs != 0 {
+		t.Fatalf("TTFTMs should be 0 after fallback to non-streaming, got %d", res.Metrics.TTFTMs)
+	}
+	if res.Messages[len(res.Messages)-1].Content != "fallback" {
+		t.Fatalf("fallback content mismatch %q", res.Messages[len(res.Messages)-1].Content)
+	}
+}
+
+func TestAgent_StreamingMidStreamFailureStillFailsWithTTFT(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Defaults()
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
+	// provider that emits one token then error
+	prov := &streamingTTFTErrorProvider{firstToken: "hi", midError: "boom"}
+	store := newMockStore()
+	engine := newTestPermsEngine(t)
+	toolsReg := tools.NewDefaultRegistry(engine, "", nil)
+	ag := NewAgent(cfg, store, &streamingMockRegistry{provider: prov}, toolsReg, engine, newTestLogger())
+	res, err := ag.ExecuteTurn(ctx, "session-1", "hi")
+	if err == nil {
+		t.Fatalf("expected mid-stream error")
+	}
+	if !res.Halted {
+		t.Fatalf("expected halted on mid-stream error")
+	}
+	// TTFT should be set even though turn failed (first token arrived before error)
+	if res.Metrics.TTFTMs <= 0 {
+		t.Fatalf("TTFTMs should be >0 even on mid-stream failure, got %d", res.Metrics.TTFTMs)
+	}
+}
+
+type streamingTTFTErrorProvider struct {
+	firstToken string
+	midError   string
+}
+
+func (m *streamingTTFTErrorProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+	return llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "fallback"}}}, Usage: &llm.Usage{}}, nil
+}
+func (m *streamingTTFTErrorProvider) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
+	ch := make(chan llm.StreamChunk, 2)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", Content: m.firstToken}}}}
+		ch <- llm.StreamChunk{Error: m.midError}
+	}()
+	return ch, nil
+}
+func (m *streamingTTFTErrorProvider) ListModels() ([]string, error) { return []string{"test-model"}, nil }
+func (m *streamingTTFTErrorProvider) Close() error                  { return nil }
+
+func TestConfig_StreamingMode_Parsing(t *testing.T) {
+	cases := []struct {
+		name    string
+		json    string
+		want    string
+		wantErr bool
+	}{
+		{name: "bool false", json: `{"streaming": false}`, want: config.StreamingModeOff},
+		{name: "bool true", json: `{"streaming": true}`, want: config.StreamingModeOn},
+		{name: "object off", json: `{"streaming": {"mode": "off"}}`, want: config.StreamingModeOff},
+		{name: "object auto", json: `{"streaming": {"mode": "auto"}}`, want: config.StreamingModeAuto},
+		{name: "object on", json: `{"streaming": {"mode": "on"}}`, want: config.StreamingModeOn},
+		{name: "invalid mode", json: `{"streaming": {"mode": "fast"}}`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg config.LLMConfig
+			// Wrap in minimal config JSON via LLM field
+			err := cfg.Streaming.UnmarshalJSON([]byte(extractStreamingJSON(tc.json)))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if cfg.Streaming.Mode != tc.want {
+				t.Fatalf("mode = %q, want %q", cfg.Streaming.Mode, tc.want)
+			}
+		})
+	}
+}
+
+func extractStreamingJSON(wrapped string) string {
+	idx := -1
+	for i, c := range wrapped {
+		if c == ':' {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return "null"
+	}
+	trimmed := wrapped[idx+1:]
+	trimmed = trimSpace(trimmed)
+	if len(trimmed) > 0 && trimmed[len(trimmed)-1] == '}' {
+		trimmed = trimSpace(trimmed[:len(trimmed)-1])
+	}
+	return trimmed
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\n' || s[start] == '\t' || s[start] == '\r') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\n' || s[end-1] == '\t' || s[end-1] == '\r') {
+		end--
+	}
+	return s[start:end]
+}
+
+var _ = json.RawMessage{}

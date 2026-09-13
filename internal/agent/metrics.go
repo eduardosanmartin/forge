@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"sync/atomic"
 	"time"
 )
 
@@ -13,3 +14,13 @@ var coldStartTime = time.Now()
 func ColdStartMs() int64 {
 	return time.Since(coldStartTime).Milliseconds()
 }
+
+// TTFT holds last observed time-to-first-token for streaming turns.
+// It is set atomically when the first delta token arrives; 0 means not yet observed.
+var lastTTFTMs atomic.Int64
+
+// RecordTTFT stores the TTFT for the current streaming turn.
+func RecordTTFT(ms int64) { lastTTFTMs.Store(ms) }
+
+// LastTTFTMs returns the last recorded TTFT in milliseconds (0 if none).
+func LastTTFTMs() int64 { return lastTTFTMs.Load() }

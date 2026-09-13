@@ -54,11 +54,11 @@ func TestContextAssembler_Build_ToolDefinitionsInFixedOrder(t *testing.T) {
 		}
 	}
 
-	if len(toolMsgs) != 5 {
-		t.Errorf("expected 5 tool definitions, got %d", len(toolMsgs))
+	if len(toolMsgs) != 9 {
+		t.Errorf("expected 9 tool definitions, got %d", len(toolMsgs))
 	}
 
-	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git"}
+	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git", "git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task"}
 	for i, expected := range expectedOrder {
 		if i >= len(toolMsgs) {
 			t.Errorf("missing tool at index %d: %s", i, expected)
@@ -159,11 +159,11 @@ func TestContextAssembler_ToolDefs_FixedOrder(t *testing.T) {
 	assembler := NewContextAssembler(toolsReg, store, 10)
 
 	toolDefs := assembler.ToolDefs()
-	if len(toolDefs) != 5 {
-		t.Errorf("expected 5 tool defs, got %d", len(toolDefs))
+	if len(toolDefs) != 9 {
+		t.Errorf("expected 9 tool defs, got %d", len(toolDefs))
 	}
 
-	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git"}
+	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git", "git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task"}
 	for i, expected := range expectedOrder {
 		if i >= len(toolDefs) {
 			t.Errorf("missing tool def at index %d: %s", i, expected)

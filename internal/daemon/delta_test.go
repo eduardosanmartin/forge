@@ -65,7 +65,7 @@ func TestSessionManager_DeltaBridge_PublishesDeltas(t *testing.T) {
 	// Verify that when streaming is enabled and a publisher is wired,
 	// the SessionManager publishes message.delta.event notifications per text delta.
 	cfg := config.Defaults()
-	cfg.LLM.Streaming = true
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 
 	store := newTestStore()
 	prov := &streamingBridgeProvider{

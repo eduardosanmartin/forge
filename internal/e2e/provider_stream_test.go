@@ -146,7 +146,7 @@ func TestProviderStreaming_AgentTurn(t *testing.T) {
 	}
 
 	cfg := config.Defaults()
-	cfg.LLM.Streaming = true
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
 	logger := slog.Default()
 	ag := agent.NewAgent(cfg, st, registry, toolsReg, permEngine, logger)
 

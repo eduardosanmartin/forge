@@ -91,10 +91,12 @@ type ToolCallEventPayload struct {
 
 // MessageDeltaPayload carries live streaming deltas (WU3).
 // It is additive and does not alter existing message.event shapes consumed by TUI-2.
+// TTFTMs is time-to-first-token in milliseconds, emitted only on the first delta of a streaming turn.
 type MessageDeltaPayload struct {
 	SessionID string `json:"session_id"`
 	Delta     string `json:"delta"`
 	Seq       *int   `json:"seq,omitempty"`
+	TTFTMs    *int64 `json:"ttft_ms,omitempty"`
 }
 
 // EmergencyHaltPayload carries emergency halt notifications.

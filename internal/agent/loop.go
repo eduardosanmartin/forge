@@ -136,9 +136,10 @@ func (a *Agent) timeoutError(ctx context.Context, timeout time.Duration) error {
 }
 
 // ExecuteTurn runs one complete turn: user message -> assistant -> tool calls -> ... -> final answer.
-// It honors config llm.streaming (default OFF) for backward compatibility.
+// It honors config llm.streaming.mode (default "off") for backward compatibility.
+// Legacy bool `llm.streaming: true` maps to "on".
 func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage string) (TurnResult, error) {
-	enabled := a.cfg != nil && a.cfg.LLM.Streaming
+	enabled := a.cfg != nil && a.cfg.LLM.Streaming.IsEnabled()
 	return a.ExecuteTurnWithOptions(ctx, sessionID, userMessage, TurnOptions{StreamingEnabled: enabled})
 }
 
@@ -203,6 +204,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 	iterationCount := 0
 	var totalLLMTimeMs int64
+	var firstTTFTMs int64
 	var totalPromptTokens, totalCompletionTokens, totalTokens int
 	var totalToolCallCount int
 
@@ -267,10 +269,18 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 		var resp llm.ChatResponse
 		if opts.StreamingEnabled {
-			resp, err = a.callLLMStream(ctx, provider, req, opts.OnDelta)
+			var ttftMs int64
+			resp, ttftMs, err = a.callLLMStream(ctx, provider, req, opts.OnDelta, llmStartTime)
 			if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
 				// Provider does not support streaming: exact Chat fallback (WU3).
+				// Only this sentinel may fallback; mid-stream failures (stream error) must fail the turn.
 				resp, err = provider.Chat(ctx, req)
+				ttftMs = 0
+			} else if ttftMs > 0 && firstTTFTMs == 0 {
+				firstTTFTMs = ttftMs
+				RecordTTFT(ttftMs)
+				// Log TTFT for observability (best-effort).
+				a.logger.Debug("stream ttft", "session_id", sessionID, "ttft_ms", ttftMs, "iteration", iterationCount)
 			}
 		} else {
 			resp, err = provider.Chat(ctx, req)
@@ -399,6 +409,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		// Success - populate metrics
 		result.Metrics.EndTime = time.Now()
 		result.Metrics.LLMTimeMs = totalLLMTimeMs
+		result.Metrics.TTFTMs = firstTTFTMs
 		result.Metrics.HarnessOverheadMs = result.Metrics.DurationMs() - totalLLMTimeMs
 		result.Metrics.TotalTokens = totalTokens
 		result.Metrics.PromptTokens = totalPromptTokens
@@ -412,6 +423,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	// Error case - ensure metrics are populated
 	result.Metrics.EndTime = time.Now()
 	result.Metrics.LLMTimeMs = totalLLMTimeMs
+	result.Metrics.TTFTMs = firstTTFTMs
 	result.Metrics.HarnessOverheadMs = result.Metrics.DurationMs() - totalLLMTimeMs
 	result.Metrics.TotalTokens = totalTokens
 	result.Metrics.PromptTokens = totalPromptTokens
@@ -425,23 +437,25 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 // callLLMStream attempts streaming and assembles a ChatResponse.
 // On any mid-stream failure it returns an error and the caller must fail the turn
 // (documented contract: no fallback within the same turn; the next turn may be non-streaming).
-func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req llm.ChatRequest, onDelta func(string)) (llm.ChatResponse, error) {
+// Only ErrStreamingNotSupported before first token may fallback to Chat.
+// It returns TTFT (time-to-first-token) in milliseconds, 0 if no token was emitted.
+func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
 	streamer, ok := provider.(ChatStreamer)
 	if !ok {
-		return llm.ChatResponse{}, fmt.Errorf("%w: provider does not implement ChatStream", llm.ErrStreamingNotSupported)
+		return llm.ChatResponse{}, 0, fmt.Errorf("%w: provider does not implement ChatStream", llm.ErrStreamingNotSupported)
 	}
 	// Ensure request signals streaming for providers that inspect it.
 	req.Stream = true
 	ch, err := streamer.ChatStream(ctx, req)
 	if err != nil {
-		return llm.ChatResponse{}, err
+		return llm.ChatResponse{}, 0, err
 	}
 	if ch == nil {
-		return llm.ChatResponse{}, errors.New("nil stream channel")
+		return llm.ChatResponse{}, 0, errors.New("nil stream channel")
 	}
-	content, toolCalls, usage, finishReason, cErr := consumeStream(ctx, ch, onDelta)
+	content, toolCalls, usage, finishReason, ttftMs, cErr := consumeStream(ctx, ch, onDelta, startTime)
 	if cErr != nil {
-		return llm.ChatResponse{}, cErr
+		return llm.ChatResponse{}, ttftMs, cErr
 	}
 	// Map to ChatResponse so the existing tool-execution loop is reused verbatim.
 	return llm.ChatResponse{
@@ -457,7 +471,7 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 			FinishReason: finishReason,
 		}},
 		Usage: usage,
-	}, nil
+	}, ttftMs, nil
 }
 
 // consumeStream assembles text and tool calls from a StreamChunk channel.
@@ -491,19 +505,22 @@ func mergeToolCallDelta(calls []llm.ToolCall, frag llm.ToolCall) []llm.ToolCall 
 
 // consumeStream assembles text and tool calls from a StreamChunk channel.
 // It forwards each text delta to onDelta when non-nil.
-// A chunk with Error != "" is treated as terminal mid-stream failure.
+// A chunk with Error != "" is treated as terminal mid-stream failure (fails turn).
+// TTFT is measured as time from startTime to first non-empty text delta; 0 if none.
 // Context cancellation is respected and produces a context error.
-func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string)) (string, []llm.ToolCall, *llm.Usage, string, error) {
+func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string), startTime time.Time) (string, []llm.ToolCall, *llm.Usage, string, int64, error) {
 	var (
 		contentBuilder strings.Builder
 		toolCalls      []llm.ToolCall
 		usage          *llm.Usage
 		finishReason   string
+		ttftMs         int64
+		ttftSet        bool
 	)
 	for {
 		select {
 		case <-ctx.Done():
-			return "", nil, nil, "", ctx.Err()
+			return "", nil, nil, "", ttftMs, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: final assembly.
@@ -514,16 +531,24 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 						finishReason = "stop"
 					}
 				}
-				return contentBuilder.String(), toolCalls, usage, finishReason, nil
+				return contentBuilder.String(), toolCalls, usage, finishReason, ttftMs, nil
 			}
 			if chunk.Error != "" {
-				return "", nil, nil, "", fmt.Errorf("stream error: %s", chunk.Error)
+				return "", nil, nil, "", ttftMs, fmt.Errorf("stream error: %s", chunk.Error)
 			}
 			if chunk.Usage != nil {
 				usage = chunk.Usage
 			}
 			for _, choice := range chunk.Choices {
 				if choice.Delta.Content != "" {
+					if !ttftSet {
+						elapsed := time.Since(startTime)
+						ttftMs = elapsed.Milliseconds()
+						if ttftMs == 0 {
+							ttftMs = 1
+						}
+						ttftSet = true
+					}
 					contentBuilder.WriteString(choice.Delta.Content)
 					if onDelta != nil {
 						onDelta(choice.Delta.Content)

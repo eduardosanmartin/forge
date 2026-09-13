@@ -122,13 +122,96 @@ func defaultPermissionsPolicy() PermissionsPolicy {
 	}
 }
 
+// Streaming mode constants govern llm.streaming.mode (auto|on|off).
+// Default is "off" for backward compatibility (v2 behavior). Safe transition:
+// legacy `llm.streaming: true/false` is still accepted (true => "on", false => "off").
+// New configs should use `llm.streaming: {"mode":"auto"}`.
+//   - "off": never stream, always use Chat.
+//   - "on": always attempt ChatStream; ErrStreamingNotSupported fallback to Chat before first token, mid-stream failure fails turn.
+//   - "auto": try streaming, fallback to Chat only when ErrStreamingNotSupported before first token; mid-stream failure still fails turn.
+const (
+	StreamingModeOff  = "off"
+	StreamingModeOn   = "on"
+	StreamingModeAuto = "auto"
+)
+
+// StreamingConfig holds streaming mode; JSON path is llm.streaming (object with mode) or legacy bool.
+type StreamingConfig struct {
+	Mode string `json:"mode"`
+}
+
+// UnmarshalJSON accepts bool (legacy), string, or object {mode: ...} for backward compatibility.
+func (s *StreamingConfig) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		s.Mode = StreamingModeOff
+		return nil
+	}
+	// Try bool first (legacy).
+	var b bool
+	if err := json.Unmarshal(trimmed, &b); err == nil {
+		if b {
+			s.Mode = StreamingModeOn
+		} else {
+			s.Mode = StreamingModeOff
+		}
+		return nil
+	}
+	// Try string ("auto"/"on"/"off").
+	var str string
+	if err := json.Unmarshal(trimmed, &str); err == nil {
+		m := strings.ToLower(strings.TrimSpace(str))
+		switch m {
+		case StreamingModeOff, StreamingModeOn, StreamingModeAuto:
+			s.Mode = m
+			return nil
+		default:
+			return fmt.Errorf("streaming.mode must be one of auto|on|off, got %q", str)
+		}
+	}
+	// Try object {mode: ...}
+	var obj struct {
+		Mode *string `json:"mode"`
+	}
+	if err := json.Unmarshal(trimmed, &obj); err == nil {
+		if obj.Mode == nil || strings.TrimSpace(*obj.Mode) == "" {
+			s.Mode = StreamingModeOff
+			return nil
+		}
+		m := strings.ToLower(strings.TrimSpace(*obj.Mode))
+		switch m {
+		case StreamingModeOff, StreamingModeOn, StreamingModeAuto:
+			s.Mode = m
+			return nil
+		default:
+			return fmt.Errorf("streaming.mode must be one of auto|on|off, got %q", *obj.Mode)
+		}
+	}
+	return fmt.Errorf("invalid streaming config: %s", string(trimmed))
+}
+
+// MarshalJSON always emits object form {"mode": "..."} for forward compatibility.
+func (s StreamingConfig) MarshalJSON() ([]byte, error) {
+	mode := s.Mode
+	if mode == "" {
+		mode = StreamingModeOff
+	}
+	return json.Marshal(map[string]string{"mode": mode})
+}
+
+// IsEnabled reports whether streaming should be attempted (mode != off).
+func (s StreamingConfig) IsEnabled() bool { return s.Mode != "" && s.Mode != StreamingModeOff }
+
+// IsAuto reports whether mode is auto (try streaming, fallback only on ErrStreamingNotSupported).
+func (s StreamingConfig) IsAuto() bool { return s.Mode == StreamingModeAuto }
+
 // LLMConfig holds LLM-related global toggles.
-// Streaming (WU3): optional, default OFF (false) for backward compatibility.
-// When true, the daemon/agent may use ChatStream and publish message.delta.event
-// notifications for live TUI updates. The next turn can fallback to non-streaming
-// if this flag is disabled or the provider returns ErrStreamingNotSupported.
+// Streaming (WU3): optional, default OFF (Mode="off") for backward compatibility.
+// When enabled, the daemon/agent may use ChatStream and publish message.delta.event
+// notifications for live TUI updates. Mid-stream failure fails the turn; only
+// ErrStreamingNotSupported before first token degrades to Chat.
 type LLMConfig struct {
-	Streaming bool `json:"streaming"`
+	Streaming StreamingConfig `json:"streaming"`
 }
 
 // TUIConfig holds TUI preferences persisted in .forge/config.json.
@@ -228,7 +311,7 @@ func Defaults() *Config {
 		Logging:     LoggingConfig{Level: "info", File: ""},
 		Permissions: defaultPermissionsPolicy(),
 		TUI:         TUIConfig{Layout: "hybrid", Palette: "ember", Sidebar: true},
-		LLM:         LLMConfig{Streaming: false},
+		LLM:         LLMConfig{Streaming: StreamingConfig{Mode: StreamingModeOff}},
 		Limits: LimitsConfig{
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
@@ -396,6 +479,19 @@ func Load(filePaths ...string) (*Config, error) {
 	}
 	if cfg.Agent.MaxTurnSeconds <= 0 {
 		cfg.Agent.MaxTurnSeconds = DefaultAgentMaxTurnSeconds
+	}
+	// Normalize LLM streaming mode: empty defaults to off, lowercase, validate.
+	if strings.TrimSpace(cfg.LLM.Streaming.Mode) == "" {
+		cfg.LLM.Streaming.Mode = StreamingModeOff
+	} else {
+		m := strings.ToLower(strings.TrimSpace(cfg.LLM.Streaming.Mode))
+		switch m {
+		case StreamingModeOff, StreamingModeOn, StreamingModeAuto:
+			cfg.LLM.Streaming.Mode = m
+		default:
+			// Leave invalid for Validate to report; don't silently correct.
+			cfg.LLM.Streaming.Mode = m
+		}
 	}
 	// Normalize sensitivity alias to canonical form and default empty to general.
 	if normalized, ok := normalizeSensitivity(cfg.Project.Sensitivity); ok {
@@ -700,6 +796,20 @@ func (c *Config) Validate() error {
 	}
 
 	violations = append(violations, validatePermissions(c.Permissions)...)
+
+	// Validate streaming mode: must be off|on|auto (default off is valid).
+	switch strings.ToLower(strings.TrimSpace(c.LLM.Streaming.Mode)) {
+	case "", StreamingModeOff, StreamingModeOn, StreamingModeAuto:
+	default:
+		violations = append(violations, fmt.Errorf(
+			"llm.streaming.mode %q is invalid (allowed: %q, %q, %q)", c.LLM.Streaming.Mode, StreamingModeOff, StreamingModeOn, StreamingModeAuto))
+	}
+	// Normalize empty to off for callers that bypass Load.
+	if strings.TrimSpace(c.LLM.Streaming.Mode) == "" {
+		c.LLM.Streaming.Mode = StreamingModeOff
+	} else {
+		c.LLM.Streaming.Mode = strings.ToLower(strings.TrimSpace(c.LLM.Streaming.Mode))
+	}
 
 	if _, ok := normalizeSensitivity(c.Project.Sensitivity); !ok && strings.TrimSpace(c.Project.Sensitivity) != "" {
 		violations = append(violations, fmt.Errorf(
