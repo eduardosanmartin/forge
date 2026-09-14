@@ -40,6 +40,37 @@ forge status                                                      # daemon healt
 `response`, per-call `tool_calls`, `usage` (tokens), and `duration_ms`. Reuse a
 session across runs with `--session <id>` for multi-turn conversations.
 
+### Web GUI (RF-7.2/7.3)
+
+`forge serve` also serves a small session browser on the same address as the
+daemon's WebSocket API — open `http://<daemon-addr>/` (printed by `forge
+status`, or in the `forge serve` startup log) in a browser. It lists
+sessions, shows a session's message/tool-call timeline live, and can compare
+two sessions to see how a branch diverged. It is static HTML/CSS/JS embedded
+in the binary (`internal/webui`), talks only to the existing JSON-RPC API —
+no separate server, no new auth, no change to the daemon's default
+loopback-only bind address.
+
+### Remote access (RF-7.4 / RNF-4.11)
+
+`forge serve --addr` binding beyond loopback (127.0.0.1) is refused unless
+BOTH an auth token and TLS are configured — there is no insecure remote mode:
+
+```
+forge daemon set-password              # prompts on stdin; prefer piping it in
+  printf '%s' 'my password' | forge daemon set-password
+forge serve --addr 0.0.0.0:8443 --tls-self-signed   # or --tls-cert/--tls-key with a real pair
+```
+
+`--tls-self-signed` generates (and reuses across restarts) an ephemeral
+certificate under `~/.forge` — genuinely encrypted, but not verifiable
+against a public CA, so browsers will warn; fine for a private network (VPN,
+SSH tunnel), use a real certificate for public exposure. The GUI shows a
+password prompt automatically when a remote/authenticated daemon requires
+one; the CLI reads the same password from `FORGE_DAEMON_TOKEN` (and
+`FORGE_DAEMON_TLS=1` to dial `wss://` instead of `ws://`) when connecting to
+one. `forge daemon set-password --clear` removes the token again.
+
 ## Configuration
 
 Loaded in precedence order (later overrides earlier): built-in defaults →
@@ -128,6 +159,7 @@ Layout:
 | `internal/cli` | cobra commands: serve, chat, run, attach, halt, resume, sessions, status |
 | `internal/client` | reconnecting JSON-RPC-over-WebSocket client, REPL, one-shot mode |
 | `internal/daemon` | transport, RPC handler, session manager, emergency halt |
+| `internal/webui` | embedded static session GUI, served by the daemon transport (RF-7.2/7.3) |
 | `internal/agent` | turn loop, context assembler, metrics |
 | `internal/tools` | native tools (fs, shell, git), schema validation, fencing |
 | `internal/perms` | deny-by-default engine + git safety floor + audit log |

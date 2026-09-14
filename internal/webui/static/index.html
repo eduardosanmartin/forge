@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>forge</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="login-overlay" hidden>
+    <form id="login-form">
+      <h1>forge</h1>
+      <p>This daemon requires a password to connect.</p>
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" autofocus>
+      <button type="submit">Log in</button>
+      <div id="login-error" class="login-error" hidden></div>
+    </form>
+  </div>
+  <div id="app">
+    <header>
+      <span class="brand">forge</span>
+      <span id="status" class="status disconnected">connecting…</span>
+    </header>
+    <nav id="sidebar">
+      <div id="sidebar-toolbar">
+        <button id="new-session-btn" type="button">+ New session</button>
+      </div>
+      <div id="session-list">
+        <div class="empty">Loading sessions…</div>
+      </div>
+    </nav>
+    <main id="main">
+      <div class="empty-state">Select a session on the left.</div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

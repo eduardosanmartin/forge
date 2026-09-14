@@ -98,14 +98,14 @@ func ResolveDaemonAddr(explicit string) (string, error) {
 // budget), then proceeds over the fresh connection. In-flight requests are
 // failed with errConnectionLost rather than replayed.
 type Client struct {
-	url      string
-	addr     string
+	url  string
+	addr string
 	// explicitAddr is the raw addr argument from Connect (""
 	// means it was resolved from ~/.forge/daemon.addr).
 	explicitAddr string
-	logger   *slog.Logger
-	lifeCtx  context.Context
-	lifeStop context.CancelFunc
+	logger       *slog.Logger
+	lifeCtx      context.Context
+	lifeStop     context.CancelFunc
 
 	writeMu sync.Mutex
 
@@ -145,21 +145,21 @@ func Connect(ctx context.Context, addr string) (*Client, error) {
 	lifeCtx, lifeStop := context.WithCancel(context.Background())
 	c := &Client{
 		addr:         resolved,
-		url:          "ws://" + resolved + "/ws",
+		url:          WSURL(resolved),
 		explicitAddr: strings.TrimSpace(addr),
 		logger:       logger,
-		lifeCtx:  lifeCtx,
-		lifeStop: lifeStop,
-		connWait: make(chan struct{}),
-		pending:  make(map[string]chan *daemon.JSONRPCResponse),
-		subs:     make(map[chan daemon.JSONRPCNotification]struct{}),
-		done:     make(chan struct{}),
-		runDone:  make(chan struct{}),
+		lifeCtx:      lifeCtx,
+		lifeStop:     lifeStop,
+		connWait:     make(chan struct{}),
+		pending:      make(map[string]chan *daemon.JSONRPCResponse),
+		subs:         make(map[chan daemon.JSONRPCNotification]struct{}),
+		done:         make(chan struct{}),
+		runDone:      make(chan struct{}),
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	conn, _, err := websocket.Dial(dialCtx, c.url, nil)
+	conn, _, err := websocket.Dial(dialCtx, c.url, DialOptions())
 	if err != nil {
 		lifeStop()
 		return nil, fmt.Errorf("%w: dial %s: %v", ErrDaemonNotRunning, c.url, err)
@@ -273,13 +273,13 @@ func (c *Client) reconnect() *websocket.Conn {
 		if c.explicitAddr == "" {
 			if resolved, rerr := ResolveDaemonAddr(""); rerr == nil && resolved != "" && resolved != c.addr {
 				c.addr = resolved
-				c.url = "ws://" + resolved + "/ws"
+				c.url = WSURL(resolved)
 				c.logger.Info("daemon addr changed, following restart", "addr", c.addr)
 			}
 		}
 
 		dialCtx, cancel := context.WithTimeout(context.Background(), dialTimeout)
-		conn, _, err := websocket.Dial(dialCtx, c.url, nil)
+		conn, _, err := websocket.Dial(dialCtx, c.url, DialOptions())
 		cancel()
 		if err == nil {
 			c.setConn(conn)

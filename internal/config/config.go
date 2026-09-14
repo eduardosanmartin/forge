@@ -71,6 +71,24 @@ type LoggingConfig struct {
 	File  string `json:"file"`
 }
 
+// DaemonConfig configures the daemon transport's remote-access safety floor
+// (RF-7.4/RNF-4.11). A loopback --addr needs neither field: today's default
+// (unauthenticated, plain HTTP on 127.0.0.1) is unchanged. Binding to a
+// non-loopback address is refused unless BOTH are set — see the bind-address
+// check in internal/daemon.
+type DaemonConfig struct {
+	// AuthTokenHash is SHA-256(token) as lowercase hex. The raw token is
+	// never persisted — `forge daemon set-password` writes only this hash.
+	// Empty means auth is disabled (only valid for a loopback bind).
+	AuthTokenHash string `json:"auth_token_hash,omitempty"`
+	// TLSCertFile/TLSKeyFile is a PEM certificate+key pair the transport
+	// serves over. Both empty means plain HTTP (only valid for a loopback
+	// bind). `forge serve --tls-self-signed` populates these at runtime
+	// without persisting them to the config file.
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+}
+
 // FSPermissions bounds filesystem access with glob patterns. Relative
 // patterns match workspace-relative paths; absolute patterns (POSIX-rooted
 // or drive-letter form, forward-slashed) are the documented escape hatch for
@@ -337,6 +355,7 @@ type Config struct {
 	Limits          LimitsConfig        `json:"limits"`
 	Agent           AgentConfig         `json:"agent"`
 	Project         ProjectConfig       `json:"project"`
+	Daemon          DaemonConfig        `json:"daemon"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -449,6 +468,7 @@ type fileConfig struct {
 	Limits          *fileLimits         `json:"limits"`
 	Agent           *fileAgent          `json:"agent"`
 	Project         *ProjectConfig      `json:"project"`
+	Daemon          *DaemonConfig       `json:"daemon"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -662,6 +682,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.Project != nil {
 		dst.Project = *fc.Project
+	}
+	if fc.Daemon != nil {
+		dst.Daemon = *fc.Daemon
 	}
 }
 

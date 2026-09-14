@@ -3,16 +3,21 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/eduardosanmartin/forge/internal/webui"
 )
 
 // Transport handles WebSocket connections and JSON-RPC message dispatch.
@@ -27,6 +32,51 @@ type Transport struct {
 	broadcast chan *JSONRPCNotification
 	stopping  atomic.Bool
 	wg        sync.WaitGroup
+
+	// RF-7.4/RNF-4.11: remote-access auth + TLS. Empty/empty means both are
+	// disabled, which is only permitted for a loopback bind — see Start.
+	authTokenHash string
+	sessions      *sessionStore
+	tlsCertFile   string
+	tlsKeyFile    string
+}
+
+// SetAuth configures the shared token (as SHA-256 hex, see HashToken) every
+// non-loopback request must present. Call before Start. An empty hash
+// disables auth, which Start only allows for a loopback bind.
+func (t *Transport) SetAuth(tokenHash string) {
+	t.authTokenHash = tokenHash
+}
+
+// SetTLS configures a PEM certificate+key pair Start serves over instead of
+// plain HTTP. Call before Start. Empty paths mean plain HTTP, which Start
+// only allows for a loopback bind.
+func (t *Transport) SetTLS(certFile, keyFile string) {
+	t.tlsCertFile = certFile
+	t.tlsKeyFile = keyFile
+}
+
+// isLoopbackAddr reports whether addr's host resolves to loopback-only —
+// the safety floor's dividing line between "needs nothing extra" (today's
+// default) and "needs auth + TLS" (RF-7.4/RNF-4.11). An empty host (":8080")
+// and wildcards (0.0.0.0, ::, ::0) mean "all interfaces", which is NOT
+// loopback even though it's easy to mistake for a safe default.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // addr with no port (e.g. bare host) — best effort
+	}
+	if host == "" {
+		return false // wildcard bind
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false // unresolved hostname: do not assume it's safe
+	}
+	return ip.IsLoopback()
 }
 
 // ClientConn represents a connected client with its session subscriptions.
@@ -58,17 +108,64 @@ func NewTransport(addr string, handler *Handler, logger *slog.Logger) *Transport
 
 // Start starts the WebSocket server.
 func (t *Transport) Start(ctx context.Context) error {
-	var err error
-	t.listener, err = net.Listen("tcp", t.addr)
+	// RF-7.4/RNF-4.11 safety floor: binding beyond loopback with no auth
+	// and/or no TLS would expose the full JSON-RPC API (fs/shell/git tools
+	// included) to the network in the clear. Refuse outright rather than
+	// start insecurely — there is no --insecure-remote escape hatch by
+	// design, matching this project's deny-by-default posture elsewhere
+	// (internal/perms).
+	if !isLoopbackAddr(t.addr) {
+		var missing []string
+		if t.authTokenHash == "" {
+			missing = append(missing, "auth token (forge daemon set-password)")
+		}
+		if t.tlsCertFile == "" || t.tlsKeyFile == "" {
+			missing = append(missing, "TLS certificate (--tls-cert/--tls-key or --tls-self-signed)")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("refusing to bind %q (not loopback) without: %s", t.addr, strings.Join(missing, ", "))
+		}
+	}
+
+	rawListener, err := net.Listen("tcp", t.addr)
 	if err != nil {
 		return err
 	}
+	t.listener = rawListener
 
-	t.addr = t.listener.Addr().String()
+	if t.tlsCertFile != "" && t.tlsKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(t.tlsCertFile, t.tlsKeyFile)
+		if err != nil {
+			_ = rawListener.Close()
+			return fmt.Errorf("load TLS certificate: %w", err)
+		}
+		t.listener = tls.NewListener(rawListener, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		})
+	}
+
+	t.addr = rawListener.Addr().String()
+	t.sessions = newSessionStore()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", t.handleWebSocket)
+	mux.Handle("/ws", t.requireAuth(http.HandlerFunc(t.handleWebSocket)))
 	mux.HandleFunc("/health", t.handleHealth)
+	mux.HandleFunc("/auth/status", t.handleAuthStatus)
+	mux.HandleFunc("/auth/login", t.handleAuthLogin)
+	mux.HandleFunc("/auth/logout", t.handleAuthLogout)
+	// RF-7.2: serve the embedded session GUI on every other path. It is
+	// static assets only, deliberately left unauthenticated — the GUI shell
+	// itself carries nothing sensitive, and it is what renders the login
+	// form in the first place. Every route that actually touches session
+	// data (/ws) is gated above. A handler failure here must not stop the
+	// daemon from serving /ws and /health, so it degrades to a 404 instead
+	// of an error.
+	if guiHandler, err := webui.Handler(); err == nil {
+		mux.Handle("/", guiHandler)
+	} else if t.logger != nil {
+		t.logger.Warn("webui: embedded assets unavailable, GUI route disabled", "error", err)
+	}
 
 	t.server = &http.Server{
 		Handler:           mux,
