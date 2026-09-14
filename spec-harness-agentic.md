@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-09-13 — **83/96 cubiertos**.
+> Última actualización: 2026-09-14 — **89/96 cubiertos**.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -56,11 +56,10 @@
 - [x] RF-6.3 Salida JSON con envelope estable
 
 **RF-7. GUI web (opcional, desacoplada)**
-- [ ] RF-7.1 Modo servidor exponiendo API para GUI web
-- [ ] RF-7.2 GUI como cliente de la misma API que el CLI
-- [ ] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes
-- [ ] RF-7.4 Acceso remoto protegible con autenticación
-  (pendiente por decisión de alcance; prerrequisito crítico: autenticación del transport — ver RNF-4.11)
+- [x] RF-7.1 Modo servidor exponiendo API para GUI web (`forge serve`, JSON-RPC 2.0 sobre WebSocket, `internal/daemon`)
+- [x] RF-7.2 GUI como cliente de la misma API que el CLI (`internal/webui`, sin lógica propia — consume `session.*` como el CLI/TUI)
+- [x] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
+- [x] RF-7.4 Acceso remoto protegible con autenticación (token compartido: header Bearer para el CLI, cookie de sesión vía `POST /auth/login` para la GUI — `forge daemon set-password`)
 
 **RF-8. Desarrollo guiado por especificación**
 - [x] RF-8.1 Spec como artefacto de primera clase (`forge spec`)
@@ -86,7 +85,7 @@
 - [x] RF-11.5 Agotar reintentos = checkpoint HITL implícito
 - [x] RF-11.6 Continuar solo con criterio de "hecho" cumplido
 - [x] RF-11.7 Checkpoint HITL: detener, resumir, esperar input humano
-- [ ] RF-11.8 Log/auditoría reanudable (parcial: `RunState` persiste en `.forge/runs/`; falta la ruta de resume tras crash)
+- [x] RF-11.8 Log/auditoría reanudable (`RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
 - [x] RF-11.9 Niveles de autonomía configurables
 - [x] RF-11.10 Reporte final de corrida
 
@@ -121,7 +120,7 @@
 - [x] RNF-4.8 Parada de emergencia desde cualquier cliente
 - [x] RNF-4.9 Allowlist de red explícita por defecto en adaptadores
 - [ ] RNF-4.10 Log/auditoría a prueba de manipulación (hash-chain; exigible con sensibilidad `regulado`/`datos-sensibles`)
-- [ ] RNF-4.11 Transporte cifrado para GUI remota (ligado a RF-7)
+- [x] RNF-4.11 Transporte cifrado para GUI remota (TLS obligatorio para bind no-loopback — `--tls-cert/--tls-key` o `--tls-self-signed`; safety floor en `internal/daemon` rechaza bindear fuera de loopback sin auth+TLS)
 - [x] RNF-4.12 Anclaje derivado de contenido no confiable nunca automático (custom write floor; pendiente como item propio: checkpoint de aprobación para el opt-in)
 
 **RNF-5. Portabilidad**
