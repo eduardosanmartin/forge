@@ -1,7 +1,9 @@
-// Package perf hosts the RNF-1.1–1.3 performance benchmarks for forge's
+// Package perf hosts the RNF-1.1–1.4 performance benchmarks for forge's
 // daemon/core: cold start time (RNF-1.1, target < 200ms), per-turn harness
-// overhead (RNF-1.2, target < 50ms excluding LLM inference), and idle core
-// memory (RNF-1.3, target < 100MB).
+// overhead (RNF-1.2, target < 50ms excluding LLM inference), idle core
+// memory (RNF-1.3, target < 100MB), and long-session degradation (RNF-1.4:
+// a 200-turn session's late overhead/heap usage must not have grown
+// unboundedly relative to its early turns).
 //
 // The numbers are REPORTED through t.Logf for trend visibility, and each
 // assertion carries a documented safety margin above the spec target so the
