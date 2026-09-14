@@ -3,6 +3,8 @@ package run
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -586,4 +588,119 @@ func TestRunnerHighSensitivityFallbackWhenToolRecordsUnavailable(t *testing.T) {
 			t.Fatalf("status %q want completed", rep.Status)
 		}
 	})
+}
+
+func TestRunnerWritesVerifiableAuditLogUnderRegulatedSensitivity(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Project.Sensitivity = config.SensitivityRegulated
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+		StateDir:     dir,
+	}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Status != StatusCompleted {
+		t.Fatalf("status %q want completed", rep.Status)
+	}
+
+	auditPath := filepath.Join(dir, ".forge", "runs", m.RunID, "audit.jsonl")
+	if _, err := os.Stat(auditPath); err != nil {
+		t.Fatalf("expected an audit log at %s under regulado sensitivity: %v", auditPath, err)
+	}
+	res, err := VerifyAuditLog(auditPath)
+	if err != nil {
+		t.Fatalf("VerifyAuditLog: %v", err)
+	}
+	if !res.Valid || res.Records == 0 {
+		t.Fatalf("expected a valid, non-empty chain, got %+v", res)
+	}
+}
+
+func TestRunnerNoAuditLogUnderGeneralSensitivity(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	dir := t.TempDir()
+	cfg := config.Defaults() // SensitivityGeneral by default
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+		StateDir:     dir,
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	auditPath := filepath.Join(dir, ".forge", "runs", m.RunID, "audit.jsonl")
+	if _, err := os.Stat(auditPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no audit log under general sensitivity, got err=%v", err)
+	}
+	// state.json should still exist — RF-11.8 resume support is unaffected.
+	if _, err := os.Stat(filepath.Join(dir, ".forge", "runs", m.RunID, "state.json")); err != nil {
+		t.Fatalf("expected state.json to still be written: %v", err)
+	}
+}
+
+func TestRunnerAuditLogSurvivesResume(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Project.Sensitivity = config.SensitivityRegulated
+
+	// Simulate a crash after t1, as in the resume tests above, but this time
+	// starting from a real audited Run so the audit chain already has
+	// content to resume.
+	prior := &Runner{Manifest: m, Config: cfg, Executor: okExecutor(1, 1), StateDir: dir}
+	start := time.Now().Add(-time.Minute)
+	prior.budget = NewBudgetState(m, start)
+	prior.state = RunState{
+		RunID: m.RunID, Mode: m.Mode, Status: StatusRunning,
+		StartedAt: start, UpdatedAt: start,
+		CompletedTasks: []string{"t1"}, Budget: prior.budget,
+	}
+	al, err := OpenAuditLog(dir, m.RunID)
+	if err != nil {
+		t.Fatalf("OpenAuditLog: %v", err)
+	}
+	prior.auditLog = al
+	if err := prior.persistState(); err != nil { // appends one audit record + writes state.json
+		t.Fatalf("persistState: %v", err)
+	}
+	if err := al.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+		StateDir:     dir,
+	}
+	rep, err := r.Resume(context.Background())
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if rep.Status != StatusCompleted {
+		t.Fatalf("status %q want completed", rep.Status)
+	}
+
+	auditPath := filepath.Join(dir, ".forge", "runs", m.RunID, "audit.jsonl")
+	res, err := VerifyAuditLog(auditPath)
+	if err != nil {
+		t.Fatalf("VerifyAuditLog: %v", err)
+	}
+	if !res.Valid {
+		t.Fatalf("expected the chain to remain valid across the resume, got %+v", res)
+	}
+	if res.Records < 2 {
+		t.Fatalf("expected records from both before and after the resume, got %d", res.Records)
+	}
 }

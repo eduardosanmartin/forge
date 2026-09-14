@@ -47,6 +47,10 @@ type Runner struct {
 
 	budget BudgetState
 	state  RunState
+	// auditLog is non-nil only when sensitivity requires a tamper-evident
+	// trail (RNF-4.10); persistState appends to it when set. Opened and
+	// closed within execute, so it never outlives one Run/Resume call.
+	auditLog *AuditLog
 
 	// sensitivity reload cache: avoids re-reading config on every checkpoint
 	// when the project file has not changed (cheap stat vs full parse).
@@ -338,6 +342,22 @@ func (r *Runner) validateForExecution() error {
 // approved in the original run — and any task whose ID is already in
 // r.state.CompletedTasks is skipped rather than reprocessed (RF-11.8).
 func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
+	// RNF-4.10: a regulado/datos-sensibles project gets a tamper-evident
+	// hash-chained audit trail alongside the plain state.json snapshot.
+	// OpenAuditLog replays any existing chain, so a Resume continues it
+	// rather than starting a fresh one.
+	if r.StateDir != "" && requiresTamperEvidentAudit(r.Config.Project.Sensitivity) {
+		al, err := OpenAuditLog(r.StateDir, r.Manifest.RunID)
+		if err != nil {
+			return r.failReport(fmt.Errorf("open tamper-evident audit log (required for sensitivity %q, RNF-4.10): %w", r.Config.Project.Sensitivity, err))
+		}
+		r.auditLog = al
+		defer func() {
+			_ = r.auditLog.Close()
+			r.auditLog = nil
+		}()
+	}
+
 	// Spec decomposition pause (RF-11 step 1 post-decomposition). Only on a
 	// cold start: a resume already passed this gate once.
 	if !resuming {

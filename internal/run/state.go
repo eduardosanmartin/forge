@@ -9,9 +9,19 @@ import (
 
 // persistState writes the current RunState to StateDir/.forge/runs/<run_id>/state.json
 // for reanudability (RF-11.8). When StateDir is empty, persistence is a no-op.
+// When r.auditLog is set (sensitivity regulado/datos-sensibles, RNF-4.10),
+// every persisted transition is ALSO appended to the tamper-evident hash
+// chain — state.json stays a plain, overwritable current snapshot (that's
+// what Resume reads), while audit.jsonl is the append-only historical
+// record compliance evidence actually depends on.
 func (r *Runner) persistState() error {
 	if r.StateDir == "" {
 		return nil
+	}
+	if r.auditLog != nil {
+		if err := r.auditLog.Append("state_change", auditDetailFromState(r.state)); err != nil {
+			return fmt.Errorf("append audit record: %w", err)
+		}
 	}
 	dir := filepath.Join(r.StateDir, ".forge", "runs", r.Manifest.RunID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

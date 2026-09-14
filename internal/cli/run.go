@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/eduardosanmartin/forge/internal/client"
@@ -54,6 +55,7 @@ func newRunCommand() *cobra.Command {
 		autoYes          bool
 		stateDir         string
 		resume           bool
+		verifyAudit      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills] <prompt>",
@@ -80,7 +82,10 @@ func newRunCommand() *cobra.Command {
 			"                     manifest's run_id from --state-dir, skips tasks already completed, and\n" +
 			"                     reuses the original run's session so context isn't lost. Requires\n" +
 			"                     --manifest to point at the SAME manifest file (same run_id) as the\n" +
-			"                     interrupted run; refuses to resume a completed/failed/killed run.",
+			"                     interrupted run; refuses to resume a completed/failed/killed run.\n" +
+			"  --verify-audit     Verify the tamper-evident audit log (RNF-4.10, written only under\n" +
+			"                     regulado/datos-sensibles sensitivity) instead of running anything —\n" +
+			"                     recomputes the hash chain and reports whether it's intact.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
 				if len(args) != 0 {
@@ -89,10 +94,16 @@ func newRunCommand() *cobra.Command {
 				if strings.TrimSpace(manifestPath) == "" {
 					return usageErrorf("--manifest path must not be empty")
 				}
+				if resume && verifyAudit {
+					return usageErrorf("--resume and --verify-audit are mutually exclusive")
+				}
 				return nil
 			}
 			if resume {
 				return usageErrorf("--resume requires --manifest")
+			}
+			if verifyAudit {
+				return usageErrorf("--verify-audit requires --manifest")
 			}
 			if len(args) != 1 {
 				return usageErrorf("run accepts exactly 1 prompt argument, got %d", len(args))
@@ -104,6 +115,9 @@ func newRunCommand() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
+				if verifyAudit {
+					return runVerifyAudit(cmd.OutOrStdout(), manifestPath, stateDir, jsonOut)
+				}
 				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir, resume)
 			}
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
@@ -121,7 +135,46 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&autoYes, "yes", false, "auto-approve HITL checkpoints in manifest mode")
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "directory for run state/report persistence (default: current directory)")
 	cmd.Flags().BoolVar(&resume, "resume", false, "resume a manifest run interrupted by a crash, disconnect, or HITL pause (RF-11.8) instead of starting over")
+	cmd.Flags().BoolVar(&verifyAudit, "verify-audit", false, "verify the tamper-evident audit log (RNF-4.10) instead of running anything")
 	return cmd
+}
+
+// runVerifyAudit checks the hash chain of the audit log for the manifest at
+// manifestPath's run_id, without running anything (RNF-4.10). It exists
+// independently of a live daemon or Runner — verification only needs to
+// read a file.
+func runVerifyAudit(out io.Writer, manifestPath, stateDir string, jsonOut bool) error {
+	mani, err := loadManifest(manifestPath)
+	if err != nil {
+		return err
+	}
+	if stateDir == "" {
+		stateDir = "."
+	}
+	path := filepath.Join(stateDir, ".forge", "runs", mani.RunID, "audit.jsonl")
+
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		result := run.VerifyResult{Path: path, Valid: false, Reason: "no audit log found — this run's sensitivity may not have required one (RNF-4.10 applies only under regulado/datos-sensibles), or --state-dir doesn't match the original run"}
+		if jsonOut {
+			return writeJSONResultEnvelope(out, "run", result)
+		}
+		fmt.Fprintf(out, "no audit log at %s\n%s\n", path, result.Reason)
+		return fmt.Errorf("audit log not found at %s", path)
+	}
+
+	res, err := run.VerifyAuditLog(path)
+	if err != nil {
+		return fmt.Errorf("verify audit log: %w", err)
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "run", res)
+	}
+	if res.Valid {
+		fmt.Fprintf(out, "OK: %s — %d records, chain intact\n", res.Path, res.Records)
+		return nil
+	}
+	fmt.Fprintf(out, "TAMPERED: %s — %d records read, chain broken at record %d\n  %s\n", res.Path, res.Records, res.BrokenAt, res.Reason)
+	return fmt.Errorf("audit log %s failed verification at record %d", path, res.BrokenAt)
 }
 
 func runRun(ctx context.Context, prompt, sessionID string, jsonOut bool,
