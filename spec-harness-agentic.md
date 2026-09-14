@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-09-14 — **89/96 cubiertos**.
+> Última actualización: 2026-09-14 — **93/96 cubiertos**.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -75,7 +75,7 @@
 **RF-10. Integración con control de versiones y entorno**
 - [x] RF-10.1 Integración git (diffs, commits, branches por tarea, worktrees)
 - [x] RF-10.2 Shell dentro del workspace con visibilidad completa (perm-gated)
-- [ ] RF-10.3 Issues/PRs GitHub (diferido por diseño: "Deseable, no v1")
+- [x] RF-10.3 Issues/PRs GitHub — solo lectura (tool `github`, envuelve el `gh` CLI del usuario, permission-gated como `git`)
 
 **RF-11. Ejecución autónoma de principio a fin**
 - [x] RF-11.1 Run manifest como único punto de entrada
@@ -93,7 +93,7 @@
 - [x] RNF-1.1 Cold start < 200ms (bench: ~19-21ms mediana)
 - [x] RNF-1.2 Overhead < 50ms por turno (bench: p50 1ms)
 - [x] RNF-1.3 Memoria en reposo < 100MB (bench: ~3.3MB heap+stack)
-- [ ] RNF-1.4 Sesiones de larga duración sin degradación (sin medición dedicada)
+- [x] RNF-1.4 Sesiones de larga duración sin degradación (`internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
 - [x] RNF-1.5 Concurrencia realista Perfil A (scheduler asumiendo cero paralelismo físico)
 - [x] RNF-1.6 Reserva de núcleos (`llm.cores`, default NumCPU-2)
 
@@ -119,7 +119,7 @@
 - [x] RNF-4.7 Aislamiento de SO para shell del core (seccomp/Landlock en Linux; matiz macOS aceptado por spec)
 - [x] RNF-4.8 Parada de emergencia desde cualquier cliente
 - [x] RNF-4.9 Allowlist de red explícita por defecto en adaptadores
-- [ ] RNF-4.10 Log/auditoría a prueba de manipulación (hash-chain; exigible con sensibilidad `regulado`/`datos-sensibles`)
+- [x] RNF-4.10 Log/auditoría a prueba de manipulación (hash-chain append-only en `.forge/runs/<run_id>/audit.jsonl`, activo con sensibilidad `regulado`/`datos-sensibles`; `forge run --manifest ... --verify-audit` verifica la cadena)
 - [x] RNF-4.11 Transporte cifrado para GUI remota (TLS obligatorio para bind no-loopback — `--tls-cert/--tls-key` o `--tls-self-signed`; safety floor en `internal/daemon` rechaza bindear fuera de loopback sin auth+TLS)
 - [x] RNF-4.12 Anclaje derivado de contenido no confiable nunca automático (custom write floor; pendiente como item propio: checkpoint de aprobación para el opt-in)
 
@@ -130,7 +130,7 @@
 **RNF-6. Observabilidad**
 - [x] RNF-6.1 Logging estructurado JSON con niveles configurables
 - [x] RNF-6.2 Grabación y replay de sesiones completas
-- [ ] RNF-6.3 Métricas de costo estimado por sesión/proveedor (tokens por turno existen; falta agregación de costo)
+- [x] RNF-6.3 Métricas de costo estimado por sesión/proveedor (`forge session cost <id>` / `forge cost summary`; atribuido al proveedor default del daemon — ver limitación documentada en `internal/cost`, forge no registra qué proveedor produjo cada mensaje)
 
 **RNF-7. Usabilidad / adaptabilidad**
 - [x] RNF-7.1 Cambio de dirección a mitad de tarea sin perder estado
