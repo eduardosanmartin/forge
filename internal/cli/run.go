@@ -53,6 +53,7 @@ func newRunCommand() *cobra.Command {
 		manifestPath     string
 		autoYes          bool
 		stateDir         string
+		resume           bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills] <prompt>",
@@ -73,7 +74,13 @@ func newRunCommand() *cobra.Command {
 			"                     subagents, HITL checkpoints, and hard budget walls (RNF-8).\n" +
 			"                     Sensitivity ceiling from .forge/config.json caps autonomy (RNF-9).\n" +
 			"  --yes              Auto-approve HITL checkpoints (for CI/tests; otherwise pauses).\n" +
-			"  --state-dir <dir>  Directory for run state/report persistence (default: current dir).",
+			"  --state-dir <dir>  Directory for run state/report persistence (default: current dir).\n" +
+			"  --resume           Continue a run interrupted by a crash, client disconnect, or HITL\n" +
+			"                     pause (RF-11.8) instead of starting over: reloads state.json for this\n" +
+			"                     manifest's run_id from --state-dir, skips tasks already completed, and\n" +
+			"                     reuses the original run's session so context isn't lost. Requires\n" +
+			"                     --manifest to point at the SAME manifest file (same run_id) as the\n" +
+			"                     interrupted run; refuses to resume a completed/failed/killed run.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
 				if len(args) != 0 {
@@ -83,6 +90,9 @@ func newRunCommand() *cobra.Command {
 					return usageErrorf("--manifest path must not be empty")
 				}
 				return nil
+			}
+			if resume {
+				return usageErrorf("--resume requires --manifest")
 			}
 			if len(args) != 1 {
 				return usageErrorf("run accepts exactly 1 prompt argument, got %d", len(args))
@@ -94,7 +104,7 @@ func newRunCommand() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
-				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir)
+				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir, resume)
 			}
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
 				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
@@ -110,6 +120,7 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().StringVar(&manifestPath, "manifest", "", "execute a run manifest file (RF-11) instead of a single prompt")
 	cmd.Flags().BoolVar(&autoYes, "yes", false, "auto-approve HITL checkpoints in manifest mode")
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "directory for run state/report persistence (default: current directory)")
+	cmd.Flags().BoolVar(&resume, "resume", false, "resume a manifest run interrupted by a crash, disconnect, or HITL pause (RF-11.8) instead of starting over")
 	return cmd
 }
 
@@ -165,7 +176,7 @@ func previewToolArgs(args json.RawMessage) string {
 	return client.FormatToolArgs(args)
 }
 
-func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool, stateDir string) error {
+func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool, stateDir string, resume bool) error {
 	app, _ := AppFromContext(ctx)
 	if app == nil || app.Config == nil {
 		return fmt.Errorf("configuration not loaded (internal error)")
@@ -183,10 +194,32 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 	if stateDir == "" {
 		stateDir = "."
 	}
+	if resume && mani.Mode == "dry_run" {
+		return &UsageError{Err: fmt.Errorf("--resume is not valid with mode dry_run: dry runs execute nothing and persist no state to resume from")}
+	}
+
+	var sessID string
+	if resume {
+		// RF-11.8: reuse the interrupted run's own session so the resumed
+		// tasks see the same conversational context the earlier ones built
+		// up, instead of starting the model cold. Resolved before connecting
+		// to the daemon so an unresumable run (or missing state) fails fast
+		// without requiring one to be running. Runner.Resume separately
+		// validates the run itself is actually resumable (not completed/
+		// failed/killed) and loads which tasks are already done.
+		prev, lErr := run.LoadState(stateDir, mani.RunID)
+		if lErr != nil {
+			return fmt.Errorf("--resume: load previous state for run %q: %w", mani.RunID, lErr)
+		}
+		if prev.SessionID == "" {
+			return fmt.Errorf("--resume: run %q has no session recorded in its persisted state, cannot continue its conversation", mani.RunID)
+		}
+		sessID = prev.SessionID
+	}
 
 	// Dry-run needs no daemon and no LLM.
 	if mani.Mode == "dry_run" {
-		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir)
+		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "")
 		rep, _ := r.Run(ctx)
 		return writeManifestReport(rep, jsonOut)
 	}
@@ -197,14 +230,22 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 	}
 	defer cl.Close()
 
-	// Create isolated session for the run (RNF-8.1 branch isolation primitive).
-	sessID, err := createRunSession(ctx, cl, mani)
-	if err != nil {
-		return fmt.Errorf("create run session: %w", err)
+	if !resume {
+		// Create isolated session for the run (RNF-8.1 branch isolation primitive).
+		sessID, err = createRunSession(ctx, cl, mani)
+		if err != nil {
+			return fmt.Errorf("create run session: %w", err)
+		}
 	}
 
-	r := newManifestRunner(mani, cfg, client.ManifestExecutor(ctx, cl, sessID), autoYes, stateDir)
-	rep, runErr := r.Run(ctx)
+	r := newManifestRunner(mani, cfg, client.ManifestExecutor(ctx, cl, sessID), autoYes, stateDir, sessID)
+	var rep *run.Report
+	var runErr error
+	if resume {
+		rep, runErr = r.Resume(ctx)
+	} else {
+		rep, runErr = r.Run(ctx)
+	}
 	// Always report, even when paused/killed.
 	if rep != nil {
 		if wErr := writeManifestReport(rep, jsonOut); wErr != nil {
@@ -233,12 +274,13 @@ func createRunSession(ctx context.Context, cl *client.Client, mani *run.Manifest
 	return res.ID, nil
 }
 
-func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor, autoYes bool, stateDir string) *run.Runner {
+func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor, autoYes bool, stateDir, sessionID string) *run.Runner {
 	r := &run.Runner{
-		Manifest: mani,
-		Config:   cfg,
-		Executor: exec,
-		StateDir: stateDir,
+		Manifest:  mani,
+		Config:    cfg,
+		Executor:  exec,
+		StateDir:  stateDir,
+		SessionID: sessionID,
 	}
 	if autoYes {
 		r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {

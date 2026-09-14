@@ -16,9 +16,9 @@ import (
 // nil as "unavailable" and fall back to heuristics, while an empty slice
 // means "no tools executed".
 type ExecResult struct {
-	Tokens    int
+	Tokens     int
 	Iterations int
-	ToolCalls []string
+	ToolCalls  []string
 }
 
 // Executor executes one task goal and returns its result.
@@ -39,6 +39,11 @@ type Runner struct {
 	OnCheckpoint Checkpointer
 	Clock        func() time.Time // nil = time.Now
 	StateDir     string           // dir for .forge/runs/<run_id> persistence; "" = no persistence
+	// SessionID is the daemon session backing Executor's turns (see
+	// client.ManifestExecutor). Run persists it into RunState so a later
+	// Resume can hand the same session back to the executor and keep the
+	// conversational context tasks built up, instead of starting cold.
+	SessionID string
 
 	budget BudgetState
 	state  RunState
@@ -76,6 +81,7 @@ type RunState struct {
 	Status           string      `json:"status"` // running | paused | completed | failed | killed
 	StartedAt        time.Time   `json:"started_at"`
 	UpdatedAt        time.Time   `json:"updated_at"`
+	SessionID        string      `json:"session_id,omitempty"`
 	CompletedTasks   []string    `json:"completed_tasks"`
 	CurrentTaskID    string      `json:"current_task_id,omitempty"`
 	Budget           BudgetState `json:"budget"`
@@ -86,16 +92,17 @@ type RunState struct {
 
 // Report is the final RF-11.10 report.
 type Report struct {
-	RunID              string   `json:"run_id"`
-	Mode               string   `json:"mode"`
-	Status             string   `json:"status"`
-	CompletedTasks     []string `json:"completed_tasks"`
-	TotalTasks         int      `json:"total_tasks"`
-	PausedCheckpoints  []string `json:"paused_checkpoints"`
-	Assumptions        []string `json:"assumptions,omitempty"`
-	Deviations         []string `json:"deviations,omitempty"`
-	BudgetUsed         BudgetState `json:"budget_used"`
-	ValidationState    string   `json:"validation_state"` // all_tasks_passed | partial | failed
+	RunID             string      `json:"run_id"`
+	Mode              string      `json:"mode"`
+	Status            string      `json:"status"`
+	SessionID         string      `json:"session_id,omitempty"`
+	CompletedTasks    []string    `json:"completed_tasks"`
+	TotalTasks        int         `json:"total_tasks"`
+	PausedCheckpoints []string    `json:"paused_checkpoints"`
+	Assumptions       []string    `json:"assumptions,omitempty"`
+	Deviations        []string    `json:"deviations,omitempty"`
+	BudgetUsed        BudgetState `json:"budget_used"`
+	ValidationState   string      `json:"validation_state"` // all_tasks_passed | partial | failed
 }
 
 const (
@@ -223,27 +230,14 @@ func (r *Runner) callExecutor(ctx context.Context, task Task) (ExecResult, error
 	}
 }
 
-// Run executes the manifest task loop. It is the only entrypoint that enforces
-// all three pillars at once: RF-11 decomposition + checkpoints, RNF-8 hard kills,
-// and RNF-9 ceiling (validated beforehand but re-checked for defense in depth).
+// Run executes the manifest task loop from a cold start. It is the entrypoint
+// that enforces all three pillars at once: RF-11 decomposition + checkpoints,
+// RNF-8 hard kills, and RNF-9 ceiling (validated beforehand but re-checked
+// for defense in depth). To continue a run interrupted by a crash, client
+// disconnect, or HITL pause, use Resume instead (RF-11.8).
 func (r *Runner) Run(ctx context.Context) (*Report, error) {
-	if r.Manifest == nil {
-		return nil, fmt.Errorf("manifest is required")
-	}
-	if r.Config == nil {
-		return nil, fmt.Errorf("config is required")
-	}
-	if r.Executor == nil {
-		return nil, fmt.Errorf("executor is required")
-	}
-	if err := r.Manifest.Validate(); err != nil {
-		return nil, fmt.Errorf("manifest invalid: %w", err)
-	}
-	if err := r.Manifest.ValidateAgainstSensitivity(r.Config); err != nil {
-		return nil, fmt.Errorf("sensitivity ceiling: %w", err)
-	}
-	if r.Manifest.IsolationRequired() && (r.Manifest.Git.Isolation == "" || r.Manifest.Git.Isolation == "none") {
-		return nil, fmt.Errorf("mode %q requires git.isolation worktree or branch (RNF-8.1) — manifest declares %q", r.Manifest.Mode, r.Manifest.Git.Isolation)
+	if err := r.validateForExecution(); err != nil {
+		return nil, err
 	}
 	// Dry run never writes: validate plan and return without executing.
 	if r.Manifest.Mode == ModeDryRun {
@@ -258,25 +252,117 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		Status:    StatusRunning,
 		StartedAt: start,
 		UpdatedAt: start,
+		SessionID: r.SessionID,
 		Budget:    r.budget,
 	}
 	_ = r.persistState()
 
-	// Spec decomposition pause (RF-11 step 1 post-decomposition).
-	if cp := r.findCheckpoint(TriggerAfterDecomposition); cp != nil && cp.Required {
-		approved, err := r.handleCheckpoint(ctx, *cp, "after spec decomposition")
-		if err != nil {
-			return r.failReport(err)
-		}
-		if !approved {
-			return r.pauseReport(*cp, "after_spec_decomposition")
+	return r.execute(ctx, false)
+}
+
+// Resume continues a previously interrupted run (RF-11.8): it reloads the
+// RunState persisted under StateDir for this manifest's run_id, skips every
+// task already recorded in CompletedTasks, and carries on from there instead
+// of reprocessing the whole manifest. It refuses to resume a run that
+// already reached a terminal state (completed, failed, or killed by a hard
+// budget wall) — those aren't "interrupted", they're finished, and silently
+// re-running them would contradict RNF-8's hard-wall guarantee.
+func (r *Runner) Resume(ctx context.Context) (*Report, error) {
+	if err := r.validateForExecution(); err != nil {
+		return nil, err
+	}
+	if r.Manifest.Mode == ModeDryRun {
+		return nil, fmt.Errorf("cannot resume a dry_run — dry runs execute nothing and persist no state")
+	}
+	if r.StateDir == "" {
+		return nil, fmt.Errorf("resume requires StateDir pointing at the interrupted run's persisted state")
+	}
+
+	prev, err := LoadState(r.StateDir, r.Manifest.RunID)
+	if err != nil {
+		return nil, fmt.Errorf("resume: load previous state for run %q: %w", r.Manifest.RunID, err)
+	}
+	switch prev.Status {
+	case StatusCompleted:
+		return nil, fmt.Errorf("run %q already completed — nothing to resume", prev.RunID)
+	case StatusFailed:
+		return nil, fmt.Errorf("run %q failed — resume is not supported for a failed run; fix the underlying issue and start a new run", prev.RunID)
+	case StatusKilled:
+		return nil, fmt.Errorf("run %q was killed by a hard budget wall (RNF-8) — resume is not supported; raise the budget and start a new run instead", prev.RunID)
+	}
+	// prev.Status is "running" (crash mid-task) or "paused" (HITL) — both
+	// are legitimately interrupted, not finished, so both resume.
+
+	r.state = *prev
+	r.state.Status = StatusRunning
+	r.state.PausedCheckpoint = nil
+	r.state.PauseReason = ""
+	r.state.Error = ""
+	r.state.UpdatedAt = r.now()
+	if r.SessionID != "" {
+		r.state.SessionID = r.SessionID
+	}
+	r.budget = prev.Budget
+	_ = r.persistState()
+
+	return r.execute(ctx, true)
+}
+
+// validateForExecution runs the checks shared by Run and Resume before any
+// task executes.
+func (r *Runner) validateForExecution() error {
+	if r.Manifest == nil {
+		return fmt.Errorf("manifest is required")
+	}
+	if r.Config == nil {
+		return fmt.Errorf("config is required")
+	}
+	if r.Executor == nil {
+		return fmt.Errorf("executor is required")
+	}
+	if err := r.Manifest.Validate(); err != nil {
+		return fmt.Errorf("manifest invalid: %w", err)
+	}
+	if err := r.Manifest.ValidateAgainstSensitivity(r.Config); err != nil {
+		return fmt.Errorf("sensitivity ceiling: %w", err)
+	}
+	if r.Manifest.IsolationRequired() && (r.Manifest.Git.Isolation == "" || r.Manifest.Git.Isolation == "none") {
+		return fmt.Errorf("mode %q requires git.isolation worktree or branch (RNF-8.1) — manifest declares %q", r.Manifest.Mode, r.Manifest.Git.Isolation)
+	}
+	return nil
+}
+
+// execute runs the task loop against the already-initialized r.state/r.budget
+// (set up by Run for a cold start or by Resume from persisted state). When
+// resuming, the post-decomposition checkpoint is skipped — it was already
+// approved in the original run — and any task whose ID is already in
+// r.state.CompletedTasks is skipped rather than reprocessed (RF-11.8).
+func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
+	// Spec decomposition pause (RF-11 step 1 post-decomposition). Only on a
+	// cold start: a resume already passed this gate once.
+	if !resuming {
+		if cp := r.findCheckpoint(TriggerAfterDecomposition); cp != nil && cp.Required {
+			approved, err := r.handleCheckpoint(ctx, *cp, "after spec decomposition")
+			if err != nil {
+				return r.failReport(err)
+			}
+			if !approved {
+				return r.pauseReport(*cp, "after_spec_decomposition")
+			}
 		}
 	}
 
 	tasks := r.Manifest.EffectiveTasks()
+	alreadyDone := make(map[string]bool, len(r.state.CompletedTasks))
+	for _, id := range r.state.CompletedTasks {
+		alreadyDone[id] = true
+	}
 	var reportPaused []string
 
 	for idx, task := range tasks {
+		if alreadyDone[task.ID] {
+			continue // RF-11.8: completed before the interruption — do not reprocess.
+		}
 		select {
 		case <-ctx.Done():
 			return r.failReport(fmt.Errorf("run cancelled: %w", ctx.Err()))
@@ -485,6 +571,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 		RunID:             r.Manifest.RunID,
 		Mode:              r.Manifest.Mode,
 		Status:            StatusCompleted,
+		SessionID:         r.state.SessionID,
 		CompletedTasks:    append([]string(nil), r.state.CompletedTasks...),
 		TotalTasks:        len(tasks),
 		PausedCheckpoints: reportPaused,
@@ -553,6 +640,7 @@ func (r *Runner) pauseReport(cp Checkpoint, reason string) (*Report, error) {
 		RunID:             r.Manifest.RunID,
 		Mode:              r.Manifest.Mode,
 		Status:            StatusPaused,
+		SessionID:         r.state.SessionID,
 		CompletedTasks:    append([]string(nil), r.state.CompletedTasks...),
 		TotalTasks:        len(tasks),
 		PausedCheckpoints: []string{cp.ID},
@@ -576,6 +664,7 @@ func (r *Runner) failReport(err error) (*Report, error) {
 		RunID:           r.Manifest.RunID,
 		Mode:            r.Manifest.Mode,
 		Status:          StatusFailed,
+		SessionID:       r.state.SessionID,
 		CompletedTasks:  append([]string(nil), r.state.CompletedTasks...),
 		TotalTasks:      len(tasks),
 		BudgetUsed:      r.budget,
@@ -594,6 +683,7 @@ func (r *Runner) killedReport(err error) (*Report, error) {
 		RunID:           r.Manifest.RunID,
 		Mode:            r.Manifest.Mode,
 		Status:          StatusKilled,
+		SessionID:       r.state.SessionID,
 		CompletedTasks:  append([]string(nil), r.state.CompletedTasks...),
 		TotalTasks:      len(tasks),
 		BudgetUsed:      r.budget,
