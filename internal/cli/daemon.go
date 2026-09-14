@@ -196,6 +196,9 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 		Git: perms.GitPermissions{
 			Allow: app.Config.Permissions.Git.Allow,
 		},
+		GitHub: perms.GitHubPermissions{
+			Allow: app.Config.Permissions.GitHub.Allow,
+		},
 		Custom: perms.CustomPermissions{
 			Deny:  app.Config.Permissions.Custom.Deny,
 			Allow: app.Config.Permissions.Custom.Allow,

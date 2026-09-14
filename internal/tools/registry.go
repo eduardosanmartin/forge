@@ -202,6 +202,7 @@ func defaultRegistryTools(logger *slog.Logger) []Tool {
 		newGitWorktreeListTool(),
 		newGitWorktreeRemoveTool(),
 		newGitBranchTaskTool(),
+		newGitHubTool(),
 	}
 }
 

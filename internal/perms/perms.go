@@ -39,6 +39,11 @@ const (
 	KindShell Kind = "shell.exec"
 	// KindGit is a git invocation request.
 	KindGit Kind = "git"
+	// KindGitHub is a GitHub read (issues/PRs) request via the `gh` CLI
+	// (RF-10.3). Unlike KindCustom, this reaches the network and an
+	// external binary, so it is deny-by-default like fs/shell/git — never
+	// treated as "inside the trust boundary".
+	KindGitHub Kind = "github"
 	// KindCustom is a forge-internal harness tool request (the v1 tools:
 	// retrieval_search, compaction_summarize, anchoring_*). These tools
 	// only touch forge's own SQLite database and forge's own LLM client,
@@ -115,6 +120,15 @@ type GitPermissions struct {
 	Allow []string `json:"allow"`
 }
 
+// GitHubPermissions allows the fixed read-only github tool subcommands
+// (RF-10.3): "issue-list", "issue-view", "pr-list", "pr-view". There is no
+// write path to gate — the tool itself only ever shells out to read-only
+// `gh ... --json ...` invocations, so this list's only job is the usual
+// deny-by-default opt-in, not blocking a destructive subset.
+type GitHubPermissions struct {
+	Allow []string `json:"allow"`
+}
+
 // CustomPermissions arbitrates forge-internal harness tools (kind "custom")
 // by tool name, case-sensitively (the tools.BuildPermsRequest names are
 // fixed lowercase-underscore strings). Unlike the OS-reaching kinds, the
@@ -168,6 +182,7 @@ type PermissionsPolicy struct {
 	FS     FSPermissions     `json:"fs"`
 	Shell  ShellPermissions  `json:"shell"`
 	Git    GitPermissions    `json:"git"`
+	GitHub GitHubPermissions `json:"github"`
 	Custom CustomPermissions `json:"custom"`
 }
 
@@ -200,6 +215,7 @@ type Engine struct {
 
 	shellAllow  []string
 	gitAllow    []string
+	githubAllow []string
 	customDeny  []string
 	customAllow []string
 
@@ -228,6 +244,9 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	if err := validateAllowList("permissions.git.allow", policy.Git.Allow); err != nil {
 		return nil, err
 	}
+	if err := validateGitHubAllowList("permissions.github.allow", policy.GitHub.Allow); err != nil {
+		return nil, err
+	}
 	if err := validateAllowList("permissions.custom.deny", policy.Custom.Deny); err != nil {
 		return nil, err
 	}
@@ -239,6 +258,7 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 		fsWrite:       splitPatterns(policy.FS.Write),
 		shellAllow:    policy.Shell.Allow,
 		gitAllow:      policy.Git.Allow,
+		githubAllow:   policy.GitHub.Allow,
 		customDeny:    policy.Custom.Deny,
 		customAllow:   policy.Custom.Allow,
 		workspaceRoot: filepath.Clean(workspaceRoot),
@@ -263,6 +283,26 @@ func validateAllowList(section string, entries []string) error {
 	for i, e := range entries {
 		if strings.TrimSpace(e) == "" {
 			return fmt.Errorf("%s[%d]: entries must be non-empty", section, i)
+		}
+	}
+	return nil
+}
+
+// githubSubcommands is the fixed, exhaustive set of subcommands the github
+// tool recognizes (RF-10.3) — see internal/tools/github.go. Config entries
+// outside this set are rejected eagerly here rather than silently never
+// matching at Check time.
+var githubSubcommands = map[string]struct{}{
+	"issue-list": {}, "issue-view": {}, "pr-list": {}, "pr-view": {},
+}
+
+// validateGitHubAllowList validates permissions.github.allow entries against
+// the fixed subcommand set (there is no destructive subset to leave open —
+// every recognized subcommand is read-only by construction).
+func validateGitHubAllowList(section string, entries []string) error {
+	for i, e := range entries {
+		if _, ok := githubSubcommands[e]; !ok {
+			return fmt.Errorf("%s[%d] %q: not a recognized github subcommand (issue-list, issue-view, pr-list, pr-view)", section, i, e)
 		}
 	}
 	return nil
@@ -374,6 +414,12 @@ func (e *Engine) evaluate(req Request) Decision {
 				return Decision{Allowed: true, Rule: string(KindGit) + ":" + allowed}
 			}
 		}
+	case KindGitHub:
+		for _, allowed := range e.githubAllow {
+			if req.Subcommand == allowed {
+				return Decision{Allowed: true, Rule: string(KindGitHub) + ":" + allowed}
+			}
+		}
 	case KindCustom:
 		// Custom floor (the allow-side mirror of the git floor's
 		// "floor decides" idea): explicit deny rules take precedence;
@@ -418,6 +464,8 @@ func malformedRequest(req Request) bool {
 	case KindShell:
 		return req.Command == ""
 	case KindGit:
+		return req.Subcommand == ""
+	case KindGitHub:
 		return req.Subcommand == ""
 	case KindCustom:
 		return req.Command == ""

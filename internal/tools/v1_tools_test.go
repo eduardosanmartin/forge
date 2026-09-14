@@ -79,13 +79,13 @@ func TestRegistryWithDeps_RegistersBaseAndV1Tools(t *testing.T) {
 	registry, _, _, _ := setupV1Registry(t)
 
 	list := registry.List()
-	// Base tools are 5 (fs_read, fs_write, fs_list, shell_exec, git) + 4 git worktree/branch helpers (RF-10.1) = 9
-	if len(list) != 15 {
-		t.Errorf("expected 15 tools (9 base + 6 v1), got %d", len(list))
+	// Base tools are 5 (fs_read, fs_write, fs_list, shell_exec, git) + 4 git worktree/branch helpers (RF-10.1) + github (RF-10.3) = 10
+	if len(list) != 16 {
+		t.Errorf("expected 16 tools (10 base + 6 v1), got %d", len(list))
 	}
 	expected := []string{
 		"fs_read", "fs_write", "fs_list", "shell_exec", "git",
-		"git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task",
+		"git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task", "github",
 		"retrieval_search", "compaction_summarize",
 		"anchoring_store", "anchoring_list", "anchoring_get", "anchoring_delete",
 	}

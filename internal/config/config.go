@@ -123,6 +123,14 @@ type GitPermissions struct {
 	Allow []string `json:"allow"`
 }
 
+// GitHubPermissions allows the fixed read-only github tool subcommands
+// (RF-10.3): "issue-list", "issue-view", "pr-list", "pr-view". Empty by
+// default — deny-by-default like git/shell, not floor-allowed like the
+// custom kind, since this tool reaches the network via the `gh` CLI.
+type GitHubPermissions struct {
+	Allow []string `json:"allow"`
+}
+
 // CustomPermissions arbitrates forge-internal harness tools (kind "custom")
 // by tool name (case-sensitive). It mirrors perms.CustomPermissions:
 //
@@ -146,6 +154,7 @@ type PermissionsPolicy struct {
 	FS     FSPermissions     `json:"fs"`
 	Shell  ShellPermissions  `json:"shell"`
 	Git    GitPermissions    `json:"git"`
+	GitHub GitHubPermissions `json:"github"`
 	Custom CustomPermissions `json:"custom"`
 }
 
@@ -440,6 +449,7 @@ type filePermissions struct {
 	FS     *FSPermissions     `json:"fs"`
 	Shell  *ShellPermissions  `json:"shell"`
 	Git    *GitPermissions    `json:"git"`
+	GitHub *GitHubPermissions `json:"github"`
 	Custom *CustomPermissions `json:"custom"`
 }
 
@@ -625,6 +635,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		}
 		if fp.Git != nil {
 			dst.Permissions.Git = *fp.Git
+		}
+		if fp.GitHub != nil {
+			dst.Permissions.GitHub = *fp.GitHub
 		}
 		if fp.Custom != nil {
 			dst.Permissions.Custom = *fp.Custom
