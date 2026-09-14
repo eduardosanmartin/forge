@@ -98,13 +98,30 @@ type GitPermissions struct {
 	Allow []string `json:"allow"`
 }
 
+// CustomPermissions arbitrates forge-internal harness tools (kind "custom")
+// by tool name (case-sensitive). It mirrors perms.CustomPermissions:
+//
+//   - deny turns any custom tool off, mutating or not;
+//   - allow restores one of the persistent-memory-mutating tools
+//     (anchoring_store, anchoring_delete) that the engine's custom write
+//     floor denies by default (RNF-4.12: a model-proposed anchor must never
+//     be anchored automatically);
+//   - an allow entry on a non-mutating (read) tool is a no-op — those tools
+//     are already floor-allowed;
+//   - a tool present in both lists resolves to DENY (fail-closed).
+type CustomPermissions struct {
+	Deny  []string `json:"deny"`
+	Allow []string `json:"allow"`
+}
+
 // PermissionsPolicy mirrors the "permissions" section of the config
 // document. It is deny-by-default: anything not explicitly allowed is
 // refused by the permission engine (RNF-4.1).
 type PermissionsPolicy struct {
-	FS    FSPermissions    `json:"fs"`
-	Shell ShellPermissions `json:"shell"`
-	Git   GitPermissions   `json:"git"`
+	FS     FSPermissions     `json:"fs"`
+	Shell  ShellPermissions  `json:"shell"`
+	Git    GitPermissions    `json:"git"`
+	Custom CustomPermissions `json:"custom"`
 }
 
 // defaultPermissionsPolicy returns the built-in baseline policy:
@@ -388,12 +405,13 @@ func ProjectConfigPath() (string, error) {
 }
 
 // filePermissions mirrors PermissionsPolicy with presence-tracking pointers
-// so merging can replace each subsection (fs/shell/git) wholesale only when
-// that subsection is present in an overriding document.
+// so merging can replace each subsection (fs/shell/git/custom) wholesale only
+// when that subsection is present in an overriding document.
 type filePermissions struct {
-	FS    *FSPermissions    `json:"fs"`
-	Shell *ShellPermissions `json:"shell"`
-	Git   *GitPermissions   `json:"git"`
+	FS     *FSPermissions     `json:"fs"`
+	Shell  *ShellPermissions  `json:"shell"`
+	Git    *GitPermissions    `json:"git"`
+	Custom *CustomPermissions `json:"custom"`
 }
 
 // fileLimits mirrors LimitsConfig with presence-tracking pointers so that
@@ -433,8 +451,8 @@ type fileConfig struct {
 // Load builds a Config from defaults overlaid with the given files in order:
 // later files override earlier values field-group-wise (provider entries are
 // replaced wholesale per named provider; scalar sections are replaced whole
-// whenever present; permissions subsections fs/shell/git each replace whole
-// when present). Missing files are skipped silently; present but invalid
+// whenever present; permissions subsections fs/shell/git/custom each replace
+// whole when present). Missing files are skipped silently; present but invalid
 // files produce an error that names the offending path. Documents older than
 // the current schema version are migrated forward before decoding; the
 // returned Config always describes current-schema semantics.
@@ -564,9 +582,10 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		dst.Logging = *fc.Logging
 	}
 	if fc.Permissions != nil {
-		// Group-wise merge: each present subsection (fs/shell/git) replaces
-		// the corresponding policy group wholesale, mirroring how scalar
-		// sections behave. Lists inside a present subsection are taken as-is.
+		// Group-wise merge: each present subsection (fs/shell/git/custom)
+		// replaces the corresponding policy group wholesale, mirroring how
+		// scalar sections behave. Lists inside a present subsection are
+		// taken as-is.
 		fp := fc.Permissions
 		if fp.FS != nil {
 			dst.Permissions.FS = *fp.FS
@@ -576,6 +595,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		}
 		if fp.Git != nil {
 			dst.Permissions.Git = *fp.Git
+		}
+		if fp.Custom != nil {
+			dst.Permissions.Custom = *fp.Custom
 		}
 	}
 	if fc.TUI != nil {
@@ -1004,6 +1026,18 @@ func validatePermissions(p PermissionsPolicy) []error {
 		if strings.TrimSpace(entry) == "" {
 			errs = append(errs, fmt.Errorf(
 				"permissions.git.allow[%d]: entries must be non-empty subcommands", i))
+		}
+	}
+	for i, entry := range p.Custom.Deny {
+		if strings.TrimSpace(entry) == "" {
+			errs = append(errs, fmt.Errorf(
+				"permissions.custom.deny[%d]: entries must be non-empty tool names", i))
+		}
+	}
+	for i, entry := range p.Custom.Allow {
+		if strings.TrimSpace(entry) == "" {
+			errs = append(errs, fmt.Errorf(
+				"permissions.custom.allow[%d]: entries must be non-empty tool names", i))
 		}
 	}
 	return errs

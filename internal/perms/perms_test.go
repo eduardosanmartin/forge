@@ -100,6 +100,14 @@ func TestNewRejectsInvalidConstruction(t *testing.T) {
 			},
 			wantErrs: []string{"permissions.custom.deny[1]"},
 		},
+		{
+			name:   "empty custom allow entry",
+			useTmp: true,
+			mutate: func(p *PermissionsPolicy) {
+				p.Custom.Allow = []string{"anchoring_store", " "}
+			},
+			wantErrs: []string{"permissions.custom.allow[1]"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -604,6 +612,108 @@ func TestCustomFloor(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCustomWriteFloor covers the custom write floor (RNF-4.5/4.12): the
+// persistent-memory-mutating tools (anchoring_store, anchoring_delete) lose
+// the allow-by-default floor and flip to deny unless explicitly restored via
+// Custom.Allow, while read tools keep the unchanged floor behavior.
+func TestCustomWriteFloor(t *testing.T) {
+	cases := []struct {
+		name      string
+		deny      []string
+		allow     []string
+		tool      string
+		wantAllow bool
+		wantRule  string
+	}{
+		{
+			name:      "anchoring_store denied by default",
+			tool:      "anchoring_store",
+			wantAllow: false,
+			wantRule:  "custom-write-floor:anchoring_store",
+		},
+		{
+			name:      "anchoring_delete denied by default",
+			tool:      "anchoring_delete",
+			wantAllow: false,
+			wantRule:  "custom-write-floor:anchoring_delete",
+		},
+		{
+			name:      "anchoring_list allowed by unchanged floor",
+			tool:      "anchoring_list",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "anchoring_get allowed by unchanged floor",
+			tool:      "anchoring_get",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "retrieval_search allowed by unchanged floor",
+			tool:      "retrieval_search",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "compaction_summarize allowed by unchanged floor",
+			tool:      "compaction_summarize",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "spawn_subagent allowed by unchanged floor",
+			tool:      "spawn_subagent",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+		{
+			name:      "explicit allow restores anchoring_store",
+			allow:     []string{"anchoring_store"},
+			tool:      "anchoring_store",
+			wantAllow: true,
+			wantRule:  "custom:anchoring_store",
+		},
+		{
+			name:      "allow plus deny conflict fails closed",
+			allow:     []string{"anchoring_store"},
+			deny:      []string{"anchoring_store"},
+			tool:      "anchoring_store",
+			wantAllow: false,
+			wantRule:  "custom:anchoring_store",
+		},
+		{
+			name:      "explicit deny still denies a read tool",
+			deny:      []string{"anchoring_list"},
+			tool:      "anchoring_list",
+			wantAllow: false,
+			wantRule:  "custom:anchoring_list",
+		},
+		{
+			name:      "allow entry on a read tool is a no-op",
+			allow:     []string{"anchoring_get"},
+			tool:      "anchoring_get",
+			wantAllow: true,
+			wantRule:  "floor:custom",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eng, _ := newTestEngine(t, func(p *PermissionsPolicy) {
+				p.Custom.Deny = tc.deny
+				p.Custom.Allow = tc.allow
+			})
+			d := eng.Check(Request{Kind: KindCustom, Command: tc.tool})
+			if d.Allowed != tc.wantAllow {
+				t.Errorf("Check(%s) allowed = %v; want %v", tc.tool, d.Allowed, tc.wantAllow)
+			}
+			if d.Rule != tc.wantRule {
+				t.Errorf("Rule = %q, want %q", d.Rule, tc.wantRule)
+			}
+		})
+	}
 }
 
 func TestEngineConcurrentChecksAreStable(t *testing.T) {

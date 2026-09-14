@@ -36,6 +36,14 @@ func setupV1Registry(t *testing.T) (*Registry, string, *retrieval.Retriever, *an
 		FS:    perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
 		Shell: perms.ShellPermissions{Allow: []string{"echo"}},
 		Git:   perms.GitPermissions{Allow: []string{"status"}},
+		// RNF-4.12: anchoring_store/anchoring_delete are denied by the
+		// engine's custom write floor by default; these tests exercise the
+		// tools' persistence behavior through Registry.Execute, so they
+		// explicitly restore the mutating tools instead of asserting the
+		// posture (the posture itself is pinned in internal/perms tests).
+		Custom: perms.CustomPermissions{
+			Allow: []string{"anchoring_store", "anchoring_delete"},
+		},
 	}
 	engine, err := perms.New(policy, tmpDir, slog.Default())
 	if err != nil {
@@ -263,9 +271,9 @@ func TestRegistry_Execute_CustomToolsCleanErrorsOnBadInput(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Execute(%s): %v", tc.tool, err)
 			}
-		if !contains(res.Content, tc.wantText) {
-			t.Errorf("Execute(%s) = %q, want substring %q", tc.tool, res.Content, tc.wantText)
-		}
+			if !contains(res.Content, tc.wantText) {
+				t.Errorf("Execute(%s) = %q, want substring %q", tc.tool, res.Content, tc.wantText)
+			}
 		})
 	}
 

@@ -5,7 +5,11 @@
 // any allowlist is consulted (RNF-8.2 spirit). Forge's internal harness
 // tools (kind "custom") invert the default — an explicit floor ALLOWS them
 // because they never reach the host OS — while explicit deny rules still
-// take precedence over that floor.
+// take precedence over that floor. The exception is the mutating subset of
+// custom tools (anchoring_store, anchoring_delete): their effect is a
+// persistent-memory write that reaches the context of every future turn,
+// so for them the default flips back to DENY unless explicitly allowed
+// (custom write floor, RNF-4.5/4.12).
 //
 // The engine is immutable after construction, so a single *Engine is safe
 // for concurrent Check calls. All matching runs over forward-slash-normalized
@@ -40,7 +44,8 @@ const (
 	// only touch forge's own SQLite database and forge's own LLM client,
 	// never the host OS, so they sit inside the trust boundary the engine
 	// guards; see the custom floor in evaluate for why they are allowed
-	// by default.
+	// by default. The mutating subset (anchoring_store, anchoring_delete)
+	// is the exception: it is denied by default by the custom write floor.
 	KindCustom Kind = "custom"
 )
 
@@ -78,9 +83,9 @@ type Request struct {
 type Decision struct {
 	Allowed bool
 	// Rule names what decided: "malformed-request", "git-floor",
-	// "floor:custom", "default-deny:<kind>", or an allowing rule
-	// "<kind>:<pattern>" (fs), "<kind>:<basename>" (shell),
-	// "<kind>:<subcommand>" (git); a denying custom rule is
+	// "floor:custom", "custom-write-floor:<tool>", "default-deny:<kind>",
+	// or an allowing rule "<kind>:<pattern>" (fs), "<kind>:<basename>"
+	// (shell), "<kind>:<subcommand>" (git); a denying custom rule is
 	// "custom:<tool>".
 	Rule string
 }
@@ -112,17 +117,53 @@ type GitPermissions struct {
 
 // CustomPermissions arbitrates forge-internal harness tools (kind "custom")
 // by tool name, case-sensitively (the tools.BuildPermsRequest names are
-// fixed lowercase-underscore strings). Unlike the OS-reaching kinds, the default
-// for these tools is ALLOW — the custom floor — because they never reach
-// the host OS; an explicit deny entry is the way to turn one off.
+// fixed lowercase-underscore strings). Unlike the OS-reaching kinds, the
+// default for non-mutating tools is ALLOW — the custom floor — because they
+// never reach the host OS; an explicit deny entry is the way to turn one off.
+//
+// The mutating subset (anchoring_store, anchoring_delete — see
+// customMutatingTools) inverts that default: the custom write floor DENIES
+// it unless the tool is named in Allow. Semantics of the two lists:
+//
+//   - Deny turns any custom tool off, mutating or not.
+//   - Allow restores one mutating tool explicitly; on a non-mutating (read)
+//     tool an allow entry is a NO-OP — reads are already floor-allowed and
+//     their decision rule stays "floor:custom".
+//   - When a tool appears in both lists, DENY wins (fail-closed): deny rules
+//     are evaluated before the allow list, mirroring how the git floor
+//     precedes the git allowlist.
 type CustomPermissions struct {
-	Deny []string `json:"deny"`
+	Deny  []string `json:"deny"`
+	Allow []string `json:"allow"`
+}
+
+// customMutatingTools is the set of custom tool names whose effect is a
+// persistent-memory mutation: they write or destroy content that reaches
+// the context of every future turn. The custom floor's original rationale —
+// "these tools never reach the host OS" — does not cover them: the
+// persistence boundary they cross is the model-facing one (RNF-4.5), and a
+// model-proposed anchor must never be anchored automatically (RNF-4.12).
+// Membership is the authority for the write floor in evaluate; adding a
+// future mutating tool means adding it here AND shipping an explicit allow
+// path for the owner.
+var customMutatingTools = map[string]struct{}{
+	"anchoring_store":  {},
+	"anchoring_delete": {},
+}
+
+// isCustomMutatingTool reports whether name is a persistent-memory-mutating
+// custom tool (see customMutatingTools).
+func isCustomMutatingTool(name string) bool {
+	_, ok := customMutatingTools[name]
+	return ok
 }
 
 // PermissionsPolicy mirrors the config document's "permissions" section.
 // It is deny-by-default: anything not explicitly allowed is refused by the
-// permission engine (RNF-4.1). The one exception is the "custom" kind,
-// which the custom floor allows by default (see CustomPermissions).
+// permission engine (RNF-4.1). The one exception is the non-mutating subset
+// of the "custom" kind, which the custom floor allows by default (see
+// CustomPermissions); mutating custom tools stay deny-by-default behind the
+// custom write floor.
 type PermissionsPolicy struct {
 	FS     FSPermissions     `json:"fs"`
 	Shell  ShellPermissions  `json:"shell"`
@@ -157,9 +198,10 @@ type Engine struct {
 	fsRead  patternLists
 	fsWrite patternLists
 
-	shellAllow []string
-	gitAllow   []string
-	customDeny []string
+	shellAllow  []string
+	gitAllow    []string
+	customDeny  []string
+	customAllow []string
 
 	workspaceRoot string // cleaned absolute path
 	logger        *slog.Logger
@@ -189,12 +231,16 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	if err := validateAllowList("permissions.custom.deny", policy.Custom.Deny); err != nil {
 		return nil, err
 	}
+	if err := validateAllowList("permissions.custom.allow", policy.Custom.Allow); err != nil {
+		return nil, err
+	}
 	return &Engine{
 		fsRead:        splitPatterns(policy.FS.Read),
 		fsWrite:       splitPatterns(policy.FS.Write),
 		shellAllow:    policy.Shell.Allow,
 		gitAllow:      policy.Git.Allow,
 		customDeny:    policy.Custom.Deny,
+		customAllow:   policy.Custom.Allow,
 		workspaceRoot: filepath.Clean(workspaceRoot),
 		logger:        logger,
 	}, nil
@@ -268,9 +314,12 @@ func shellGlobMatches(pattern, base string) bool {
 //     BEFORE the allowlist is consulted.
 //  3. The kind's list is matched; a hit allows ("<kind>:<pattern>" for fs,
 //     "<kind>:<basename>" for shell, "<kind>:<subcommand>" for git) or, for
-//     custom, denies ("custom:<tool>").
-//  4. custom only: the custom floor ALLOWS internal harness tools
-//     ("floor:custom") when no deny rule matched.
+//     custom, denies ("custom:<tool>") or explicitly allows a mutating tool
+//     ("custom:<tool>").
+//  4. custom only: the custom floor ALLOWS non-mutating internal harness
+//     tools ("floor:custom") when no deny rule matched; the custom write
+//     floor DENIES mutating tools ("custom-write-floor:<tool>") unless an
+//     explicit allow entry matched in step 3.
 //  5. Otherwise default deny ("default-deny:<kind>").
 func (e *Engine) Check(req Request) Decision {
 	d := e.evaluate(req)
@@ -338,6 +387,20 @@ func (e *Engine) evaluate(req Request) Decision {
 			if req.Command == denied {
 				return Decision{Allowed: false, Rule: string(KindCustom) + ":" + denied}
 			}
+		}
+		// Custom write floor: mutating tools persist or destroy content
+		// that reaches the context of every future turn (RNF-4.5/4.12),
+		// so the "never reaches the host OS" rationale does not apply to
+		// them. Their default flips to DENY unless an explicit allow entry
+		// restores them; because deny rules were already checked above,
+		// an allow+deny conflict resolves to DENY (fail-closed).
+		if isCustomMutatingTool(req.Command) {
+			for _, allowed := range e.customAllow {
+				if req.Command == allowed {
+					return Decision{Allowed: true, Rule: string(KindCustom) + ":" + allowed}
+				}
+			}
+			return Decision{Allowed: false, Rule: "custom-write-floor:" + req.Command}
 		}
 		return Decision{Allowed: true, Rule: "floor:custom"}
 	}
