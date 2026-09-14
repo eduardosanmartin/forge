@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/cost"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
@@ -48,6 +49,10 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleMergeSession(ctx, req)
 	case MethodCompareSessions:
 		return h.handleCompareSessions(ctx, req)
+	case MethodSessionCost:
+		return h.handleSessionCost(ctx, req)
+	case MethodCostSummary:
+		return h.handleCostSummary(ctx, req)
 	case MethodExecuteTurn:
 		return h.handleExecuteTurn(ctx, req)
 	case MethodGetMessages:
@@ -322,6 +327,58 @@ func (h *Handler) handleCompareSessions(ctx context.Context, req *JSONRPCRequest
 		}
 	}
 	return h.resultResponse(req.ID, result)
+}
+
+// handleSessionCost estimates one session's token cost (RNF-6.3). See
+// internal/cost's package doc for the provider-attribution limitation this
+// inherits: forge does not record which provider produced a message, so the
+// estimate is attributed to the daemon's configured default provider.
+func (h *Handler) handleSessionCost(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params SessionCostParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SessionID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "session_id is required", nil)
+	}
+	sess, ok := h.mgr.GetSession(ctx, params.SessionID)
+	if !ok {
+		return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+	}
+	messages, err := h.mgr.GetMessagesSince(ctx, params.SessionID, 0)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "get messages failed", err.Error())
+	}
+	result := cost.EstimateSessionCost(params.SessionID, sess.Metadata, messages, h.mgr.cfg.Providers, h.mgr.cfg.DefaultProvider)
+	return h.resultResponse(req.ID, result)
+}
+
+// handleCostSummary aggregates estimated cost across sessions, grouped by
+// (attributed) provider (RNF-6.3).
+func (h *Handler) handleCostSummary(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params CostSummaryParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+		}
+	}
+	if params.Limit <= 0 {
+		params.Limit = 200
+	}
+	sessions, err := h.mgr.ListSessions(ctx, params.Limit, params.Offset)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "list sessions failed", err.Error())
+	}
+
+	costs := make([]cost.SessionCost, 0, len(sessions))
+	for _, sess := range sessions {
+		messages, err := h.mgr.GetMessagesSince(ctx, sess.ID, 0)
+		if err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInternalError, "get messages failed", err.Error())
+		}
+		costs = append(costs, cost.EstimateSessionCost(sess.ID, sess.Metadata, messages, h.mgr.cfg.Providers, h.mgr.cfg.DefaultProvider))
+	}
+	return h.resultResponse(req.ID, CostSummaryResult{Providers: cost.AggregateByProvider(costs)})
 }
 
 func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {

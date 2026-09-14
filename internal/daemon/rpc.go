@@ -3,6 +3,8 @@ package daemon
 
 import (
 	"encoding/json"
+
+	"github.com/eduardosanmartin/forge/internal/cost"
 )
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.
@@ -143,6 +145,9 @@ const (
 	MethodMemoryDelete = "memory.delete"
 	// RF-9.3: multi-model fanout.
 	MethodFanout = "session.fanout"
+	// RNF-6.3: estimated cost metrics.
+	MethodSessionCost = "session.cost"
+	MethodCostSummary = "cost.summary"
 )
 
 // CreateSessionParams for session.create.
@@ -517,6 +522,23 @@ type FanoutChildResult struct {
 type FanoutResult struct {
 	ParentSessionID string              `json:"parent_session_id"`
 	Children        []FanoutChildResult `json:"children"`
+}
+
+// SessionCostParams for session.cost (RNF-6.3).
+type SessionCostParams struct {
+	SessionID string `json:"session_id"`
+}
+
+// CostSummaryParams for cost.summary (RNF-6.3). Limit/Offset page through
+// sessions the same way session.list does; 0 defaults like that method too.
+type CostSummaryParams struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// CostSummaryResult for cost.summary.
+type CostSummaryResult struct {
+	Providers []cost.ProviderCost `json:"providers"`
 }
 
 // NewErrorResponse creates a JSONRPCResponse with an error.

@@ -53,6 +53,13 @@ type Provider struct {
 	// APIKey authenticates against remote endpoints. Empty falls back to the
 	// OPENCODE_API_KEY env var so secrets stay out of config files.
 	APIKey string `json:"api_key"`
+	// PricePerMillionInputTokens/OutputTokens estimate cost for paid
+	// providers (RNF-6.3: "métricas de costo... cuando aplique (modelos de
+	// pago)"). Both zero (the default, including for every local/free
+	// provider) means "not priced" — internal/cost omits a cost estimate
+	// entirely rather than reporting a misleading $0.
+	PricePerMillionInputTokens  float64 `json:"price_per_million_input_tokens,omitempty"`
+	PricePerMillionOutputTokens float64 `json:"price_per_million_output_tokens,omitempty"`
 }
 
 // StorageConfig locates forge's local database.

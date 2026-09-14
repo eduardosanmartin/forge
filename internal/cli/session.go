@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/eduardosanmartin/forge/internal/client"
+	"github.com/eduardosanmartin/forge/internal/cost"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/logging"
@@ -31,7 +32,65 @@ func newSessionCommand() *cobra.Command {
 	cmd.AddCommand(newSessionCompareCommand())
 	cmd.AddCommand(newSessionListCommand())
 	cmd.AddCommand(newSessionSwitchCommand())
+	cmd.AddCommand(newSessionCostCommand())
 	return cmd
+}
+
+func newSessionCostCommand() *cobra.Command {
+	var jsonOut bool
+	cmd := &cobra.Command{
+		Use:   "cost <session-id>",
+		Short: "Estimate a session's token cost (RNF-6.3)",
+		Long: "Sums token usage across the session and, when the daemon's default provider has\n" +
+			"pricing configured (providers.<name>.price_per_million_input_tokens/output_tokens\n" +
+			"in config), estimates a dollar cost. A provider with no pricing configured (every\n" +
+			"local model by default) reports usage but no dollar figure — that's \"not priced\",\n" +
+			"not \"free\". See `forge cost summary` for the same thing aggregated across sessions.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionCost(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOut)
+		},
+	}
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "print machine-readable JSON envelope on stdout")
+	return cmd
+}
+
+func runSessionCost(ctx context.Context, out io.Writer, sessionID string, jsonOut bool) error {
+	if out == nil {
+		out = os.Stdout
+	}
+	cl, err := client.Connect(ctx, "")
+	if err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session cost", err.Error())
+		}
+		return daemonHint(err)
+	}
+	defer cl.Close()
+
+	var res cost.SessionCost
+	if err := cl.Call(ctx, daemon.MethodSessionCost, daemon.SessionCostParams{SessionID: sessionID}, &res); err != nil {
+		if jsonOut {
+			_ = writeJSONErrorEnvelope(out, "session cost", err.Error())
+		}
+		return err
+	}
+	if jsonOut {
+		return writeJSONResultEnvelope(out, "session cost", res)
+	}
+
+	fmt.Fprintf(out, "session %s (provider: %s", res.SessionID, res.Provider)
+	if res.Model != "" {
+		fmt.Fprintf(out, ", model: %s", res.Model)
+	}
+	fmt.Fprintln(out, ")")
+	fmt.Fprintf(out, "  tokens: %d prompt + %d completion = %d total\n", res.PromptTokens, res.CompletionTokens, res.TotalTokens)
+	if res.Priced {
+		fmt.Fprintf(out, "  estimated cost: $%.4f\n", res.EstimatedUSD)
+	} else {
+		fmt.Fprintln(out, "  estimated cost: not priced (no pricing configured for this provider)")
+	}
+	return nil
 }
 
 func newSessionSuccessCommand() *cobra.Command {
@@ -78,7 +137,7 @@ func newSessionReplayCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "replay <session-id>",
 		Short: "Replay a session's full transcript grouped by turns (RNF-6.2)",
-		Long: "Renders the session's persisted messages as grouped turns: user prompts, assistant tool calls (redacted), tool results (redacted, truncated), and token usage totals. The message store IS the recording; this command is the replay presentation.",
+		Long:  "Renders the session's persisted messages as grouped turns: user prompts, assistant tool calls (redacted), tool results (redacted, truncated), and token usage totals. The message store IS the recording; this command is the replay presentation.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSessionReplay(cmd.Context(), cmd.OutOrStdout(), args[0], jsonOut)
@@ -140,9 +199,9 @@ func runSessionReplay(ctx context.Context, out io.Writer, sessionID string, json
 		// Emit raw message results as JSON plus a human replay text field, all
 		// inside the standard envelope.
 		type replayResult struct {
-			SessionID string                `json:"session_id"`
+			SessionID string                 `json:"session_id"`
 			Messages  []daemon.MessageResult `json:"messages"`
-			Replay    string                `json:"replay"`
+			Replay    string                 `json:"replay"`
 		}
 		rr := replayResult{
 			SessionID: sessionID,
