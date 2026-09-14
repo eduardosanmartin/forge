@@ -54,6 +54,7 @@
     "max_turn_seconds": 300
   },
   "project": {
-    "sensitivity": "general"
+    "sensitivity": "general",
+    "spec_path": ""
   }
 }

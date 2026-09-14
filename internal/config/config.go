@@ -311,6 +311,9 @@ const AgentMaxParallelChildrenMax = 4
 // and regulated/sensitive are normalized to the canonical forms on Validate/Load.
 type ProjectConfig struct {
 	Sensitivity string `json:"sensitivity"`
+	// SpecPath is the optional workspace-relative path to the project spec
+	// file (RF-8.4). Empty = probe the workspace root defaults.
+	SpecPath string `json:"spec_path"`
 }
 
 // Sensitivity canonical values (RNF-9.1, spec §7.2).
