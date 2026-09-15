@@ -123,7 +123,7 @@ func TestCycleLandsOnDistinctLayoutsWithNormalizedSidebar(t *testing.T) {
 	}
 	v = m.View().Content
 	// Rail toggle is deterministic: rail off again must render exactly like
-	// the earlier rail-off frame (same toast, same chrome).
+	// the earlier rail-off frame (same chrome, no transient toast to differ).
 	if v != offView {
 		t.Fatal("rail off again should equal the earlier rail-off view")
 	}

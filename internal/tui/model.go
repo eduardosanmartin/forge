@@ -1773,11 +1773,10 @@ func (m *Model) toggleSidebar() {
 	// showSidebar now means rail visible.
 	m.showSidebar = !m.showSidebar
 	m.config.Sidebar = m.showSidebar
-	if m.showSidebar {
-		m.toast = "rail on"
-	} else {
-		m.toast = "rail off"
-	}
+	// No toast here: the footer's Layout field (footerLayoutLabel) already
+	// shows "rail on"/"rail off" persistently, right below where a toast
+	// would render — a transient toast duplicated that exact text on the
+	// same frame instead of adding information.
 	// relayout recomputes effective width (rail steals 33 cols from the
 	// transcript) and re-measures the footer at the current size.
 	m.relayout()

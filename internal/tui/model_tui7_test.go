@@ -67,8 +67,12 @@ func TestM2_CtrlOAndCtrlLToggleRail(t *testing.T) {
 	if mm.ShowSidebar() == initial {
 		t.Fatalf("ctrl+o should toggle rail")
 	}
-	if !strings.Contains(mm.Toast(), "rail") {
-		t.Fatalf("toast should mention rail, got %q", mm.Toast())
+	// No toast: the footer's Layout field already shows "rail on"/"rail
+	// off" persistently — a toast here would duplicate that same text
+	// right below it on the same frame (the bug this test now guards
+	// against).
+	if mm.Toast() != "" {
+		t.Fatalf("toggling the rail should not set a toast (footer already shows layout state), got %q", mm.Toast())
 	}
 	// ctrl+l alias toggles back
 	model, _ = mm.Update(keyPress("ctrl+l"))
