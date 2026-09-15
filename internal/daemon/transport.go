@@ -232,6 +232,16 @@ func (t *Transport) Stop() error {
 	return nil
 }
 
+// wsReadLimitBytes overrides coder/websocket's 32 KiB default per-message
+// read limit — mirrors internal/client's own wsReadLimitBytes (kept as a
+// separate constant here since internal/daemon cannot import internal/client).
+// A session.execute_turn response carries the full turn transcript as one
+// JSON-RPC message and routinely exceeds 32 KiB for anything beyond a
+// trivial exchange; the default previously closed the connection outright
+// with StatusMessageTooBig (observed in practice via the RF-11 manifest
+// decomposition feature against a real model).
+const wsReadLimitBytes = 16 * 1024 * 1024
+
 // handleWebSocket upgrades HTTP to WebSocket and starts the client handler.
 func (t *Transport) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, nil)
@@ -241,6 +251,7 @@ func (t *Transport) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	conn.SetReadLimit(wsReadLimitBytes)
 
 	readCtx, readCancel := context.WithCancel(context.Background())
 	cc := &ClientConn{

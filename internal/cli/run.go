@@ -56,6 +56,7 @@ func newRunCommand() *cobra.Command {
 		stateDir         string
 		resume           bool
 		verifyAudit      bool
+		decompose        bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills] <prompt>",
@@ -85,7 +86,14 @@ func newRunCommand() *cobra.Command {
 			"                     interrupted run; refuses to resume a completed/failed/killed run.\n" +
 			"  --verify-audit     Verify the tamper-evident audit log (RNF-4.10, written only under\n" +
 			"                     regulado/datos-sensibles sensitivity) instead of running anything —\n" +
-			"                     recomputes the hash chain and reports whether it's intact.",
+			"                     recomputes the hash chain and reports whether it's intact.\n" +
+			"  --decompose        When the manifest declares no explicit \"tasks\", ask the daemon's\n" +
+			"                     default model to break \"goal\" (+ \"spec\" when present) into an atomic\n" +
+			"                     task list before running — each task sized for a single small turn\n" +
+			"                     (see sugerenciasDeClaude.md §5). The proposal is written to\n" +
+			"                     --state-dir/.forge/runs/<run_id>/tasks.decomposed.json and gated by\n" +
+			"                     the manifest's after_spec_decomposition checkpoint when declared.\n" +
+			"                     Requires --manifest; refuses a manifest that already has \"tasks\".",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
 				if len(args) != 0 {
@@ -97,6 +105,12 @@ func newRunCommand() *cobra.Command {
 				if resume && verifyAudit {
 					return usageErrorf("--resume and --verify-audit are mutually exclusive")
 				}
+				if decompose && resume {
+					return usageErrorf("--decompose and --resume are mutually exclusive — a resumed run reuses its original task list, decomposed or not")
+				}
+				if decompose && verifyAudit {
+					return usageErrorf("--decompose and --verify-audit are mutually exclusive")
+				}
 				return nil
 			}
 			if resume {
@@ -104,6 +118,9 @@ func newRunCommand() *cobra.Command {
 			}
 			if verifyAudit {
 				return usageErrorf("--verify-audit requires --manifest")
+			}
+			if decompose {
+				return usageErrorf("--decompose requires --manifest")
 			}
 			if len(args) != 1 {
 				return usageErrorf("run accepts exactly 1 prompt argument, got %d", len(args))
@@ -118,7 +135,7 @@ func newRunCommand() *cobra.Command {
 				if verifyAudit {
 					return runVerifyAudit(cmd.OutOrStdout(), manifestPath, stateDir, jsonOut)
 				}
-				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir, resume)
+				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir, resume, decompose)
 			}
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
 				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
@@ -136,6 +153,7 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().StringVar(&stateDir, "state-dir", "", "directory for run state/report persistence (default: current directory)")
 	cmd.Flags().BoolVar(&resume, "resume", false, "resume a manifest run interrupted by a crash, disconnect, or HITL pause (RF-11.8) instead of starting over")
 	cmd.Flags().BoolVar(&verifyAudit, "verify-audit", false, "verify the tamper-evident audit log (RNF-4.10) instead of running anything")
+	cmd.Flags().BoolVar(&decompose, "decompose", false, "ask the default model to break the manifest's goal into an atomic task list before running (requires an empty \"tasks\" in the manifest)")
 	return cmd
 }
 
@@ -229,7 +247,7 @@ func previewToolArgs(args json.RawMessage) string {
 	return client.FormatToolArgs(args)
 }
 
-func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool, stateDir string, resume bool) error {
+func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool, stateDir string, resume, decompose bool) error {
 	app, _ := AppFromContext(ctx)
 	if app == nil || app.Config == nil {
 		return fmt.Errorf("configuration not loaded (internal error)")
@@ -240,6 +258,9 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 	mani, err := loadManifest(manifestPath)
 	if err != nil {
 		return err
+	}
+	if decompose && len(mani.Tasks) > 0 {
+		return &UsageError{Err: fmt.Errorf("--decompose is redundant: manifest %q already declares %d task(s)", manifestPath, len(mani.Tasks))}
 	}
 	if err := mani.ValidateAgainstSensitivity(cfg); err != nil {
 		return fmt.Errorf("sensitivity ceiling rejected manifest: %w", err)
@@ -270,8 +291,11 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 		sessID = prev.SessionID
 	}
 
-	// Dry-run needs no daemon and no LLM.
-	if mani.Mode == "dry_run" {
+	// Dry-run needs no daemon and no LLM — UNLESS decomposition was
+	// requested: that needs both to ask the model for a task list, even
+	// though the resulting plan is only previewed, never executed
+	// (Runner.Run decomposes BEFORE its own dry_run short-circuit).
+	if mani.Mode == "dry_run" && !decompose {
 		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "")
 		rep, _ := r.Run(ctx)
 		return writeManifestReport(rep, jsonOut)
@@ -283,15 +307,26 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 	}
 	defer cl.Close()
 
-	if !resume {
+	if !resume && mani.Mode != "dry_run" {
 		// Create isolated session for the run (RNF-8.1 branch isolation primitive).
+		// Skipped for dry_run: Runner.Run never calls Executor for dry_run
+		// (it short-circuits to the report right after decomposing), so
+		// there's nothing to back with a real session.
 		sessID, err = createRunSession(ctx, cl, mani)
 		if err != nil {
 			return fmt.Errorf("create run session: %w", err)
 		}
 	}
 
-	r := newManifestRunner(mani, cfg, client.ManifestExecutor(ctx, cl, sessID), autoYes, stateDir, sessID)
+	var exec run.Executor
+	if mani.Mode != "dry_run" {
+		exec = client.ManifestExecutor(ctx, cl, sessID)
+	}
+	r := newManifestRunner(mani, cfg, exec, autoYes, stateDir, sessID)
+	if decompose {
+		r.Decompose = true
+		r.Decomposer = client.ManifestDecomposer(cl)
+	}
 	var rep *run.Report
 	var runErr error
 	if resume {

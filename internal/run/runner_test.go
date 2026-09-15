@@ -704,3 +704,218 @@ func TestRunnerAuditLogSurvivesResume(t *testing.T) {
 		t.Fatalf("expected records from both before and after the resume, got %d", res.Records)
 	}
 }
+
+// --- decomposition (RF-11 task fragmentation) ---
+
+func testManifestNoTasks(mode string) *Manifest {
+	m := testManifest(mode)
+	m.Tasks = nil
+	return m
+}
+
+func fixedDecomposer(tasks []Task, err error) Decomposer {
+	return func(_ context.Context, _, _ string) ([]Task, error) {
+		return tasks, err
+	}
+}
+
+func TestRunnerDecomposePopulatesTasksBeforeCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	m := testManifestNoTasks(ModeCheckpoint)
+	m.HITL.Checkpoints = append(m.HITL.Checkpoints, Checkpoint{ID: "post-decomp", Trigger: TriggerAfterDecomposition, Required: true})
+	cfg := config.Defaults()
+	var sawTasksAtCheckpoint int
+	r := &Runner{
+		Manifest:   m,
+		Config:     cfg,
+		Executor:   okExecutor(5, 1),
+		Decompose:  true,
+		Decomposer: fixedDecomposer([]Task{{ID: "d1", Goal: "decomposed task one"}, {ID: "d2", Goal: "decomposed task two"}}, nil),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+			if cp.ID == "post-decomp" {
+				sawTasksAtCheckpoint = len(m.Tasks)
+			}
+			return true, nil
+		},
+		StateDir: dir,
+	}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sawTasksAtCheckpoint != 2 {
+		t.Errorf("after_spec_decomposition checkpoint saw %d tasks, want 2 (decomposition must happen BEFORE this gate)", sawTasksAtCheckpoint)
+	}
+	if len(rep.CompletedTasks) != 2 || rep.CompletedTasks[0] != "d1" || rep.CompletedTasks[1] != "d2" {
+		t.Errorf("completed tasks = %v, want [d1 d2] (decomposed tasks must actually run)", rep.CompletedTasks)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".forge", "runs", m.RunID, "tasks.decomposed.json"))
+	if err != nil {
+		t.Fatalf("expected tasks.decomposed.json to be persisted as an audit trail: %v", err)
+	}
+	if !strings.Contains(string(data), "decomposed task one") {
+		t.Errorf("tasks.decomposed.json missing expected content: %s", data)
+	}
+}
+
+func TestRunnerDecomposeSkippedWhenTasksAlreadyAuthored(t *testing.T) {
+	m := testManifest(ModeCheckpoint) // already has hand-written Tasks
+	cfg := config.Defaults()
+	called := false
+	r := &Runner{
+		Manifest:  m,
+		Config:    cfg,
+		Executor:  okExecutor(5, 1),
+		Decompose: true,
+		Decomposer: func(_ context.Context, _, _ string) ([]Task, error) {
+			called = true
+			return nil, errors.New("should never be invoked")
+		},
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if called {
+		t.Error("Decomposer must not run when the manifest already declares tasks")
+	}
+}
+
+func TestRunnerDecomposeErrorFailsRun(t *testing.T) {
+	m := testManifestNoTasks(ModeCheckpoint)
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest:   m,
+		Config:     cfg,
+		Executor:   okExecutor(5, 1),
+		Decompose:  true,
+		Decomposer: fixedDecomposer(nil, errors.New("model unreachable")),
+	}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "model unreachable") {
+		t.Fatalf("expected decomposer error to fail the run, got %v", err)
+	}
+}
+
+func TestRunnerDecomposeInvalidTaskListRejected(t *testing.T) {
+	m := testManifestNoTasks(ModeCheckpoint)
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest:   m,
+		Config:     cfg,
+		Executor:   okExecutor(5, 1),
+		Decompose:  true,
+		Decomposer: fixedDecomposer([]Task{{ID: "", Goal: "missing an id"}}, nil),
+	}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid task list") {
+		t.Fatalf("expected invalid decomposed tasks to fail the run, got %v", err)
+	}
+}
+
+func TestRunnerDecomposeWithoutDecomposerErrors(t *testing.T) {
+	m := testManifestNoTasks(ModeCheckpoint)
+	cfg := config.Defaults()
+	r := &Runner{Manifest: m, Config: cfg, Executor: okExecutor(5, 1), Decompose: true}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no Decomposer is wired") {
+		t.Fatalf("expected a clear error when Decompose is set without a Decomposer, got %v", err)
+	}
+}
+
+func TestRunnerDryRunPreviewsDecomposedTaskCount(t *testing.T) {
+	m := testManifestNoTasks(ModeDryRun)
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest:   m,
+		Config:     cfg,
+		Decompose:  true,
+		Decomposer: fixedDecomposer([]Task{{ID: "d1", Goal: "a"}, {ID: "d2", Goal: "b"}, {ID: "d3", Goal: "c"}}, nil),
+	}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.TotalTasks != 3 {
+		t.Errorf("dry_run TotalTasks = %d, want 3 (the decomposed plan, not the single-task fallback)", rep.TotalTasks)
+	}
+}
+
+// --- mechanical done_criteria verification (5.3: don't trust the model's own claim of success) ---
+
+func TestRunnerDoneCriteriaCmdSuccessCompletesTask(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go version"}}
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+	}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed", rep.Status)
+	}
+}
+
+func TestRunnerDoneCriteriaCmdFailureExhaustsRetries(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Budget.MaxRetriesPerTask = 1
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go __not_a_real_subcommand__"}}
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest: m,
+		Config:   cfg,
+		Executor: okExecutor(5, 1), // the agent turn itself "succeeds" — only the mechanical check fails
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+			return cp.ID != "implicit-retries-exhausted", nil
+		},
+	}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "paused") {
+		t.Fatalf("expected a failing done_criteria command to exhaust retries like any other task failure, got %v", err)
+	}
+}
+
+func TestRunnerDoneCriteriaRejectsShellOperators(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Budget.MaxRetriesPerTask = 0
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go build ./... && go test ./..."}}
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest: m,
+		Config:   cfg,
+		Executor: okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+			return cp.ID != "implicit-retries-exhausted", nil
+		},
+	}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "shell operator") {
+		t.Fatalf("expected a clear shell-operator rejection, got %v", err)
+	}
+}
+
+func TestRunnerDoneCriteriaDescriptiveTextIsNeverChecked(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "looks right to me, no command to run"}}
+	cfg := config.Defaults()
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+	}
+	rep, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if rep.Status != StatusCompleted {
+		t.Fatalf("status = %q, want completed (plain-text done_criteria must never be mechanically checked)", rep.Status)
+	}
+}

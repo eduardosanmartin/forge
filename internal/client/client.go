@@ -52,6 +52,19 @@ const (
 	// eventsBuffer is the per-subscriber notification channel capacity.
 	// Notifications that overflow are dropped (best-effort stream).
 	eventsBuffer = 64
+
+	// wsReadLimitBytes overrides coder/websocket's 32 KiB default per-message
+	// read limit (set on both this client's connections and the daemon's
+	// accepted connections — internal/daemon/transport.go). A single
+	// session.execute_turn response carries the full turn transcript
+	// (messages, tool traces, usage) as one JSON-RPC message; anything past
+	// a trivial exchange — a verbose model response, a handful of tool
+	// calls, a manifest decomposition turn's proposed task list — routinely
+	// exceeds 32 KiB and previously closed the connection outright with
+	// StatusMessageTooBig (observed in practice running the RF-11 manifest
+	// decomposition feature against a real model). 16 MiB matches other
+	// generous size ceilings already used elsewhere in the codebase.
+	wsReadLimitBytes = 16 * 1024 * 1024
 )
 
 // ErrDaemonNotRunning reports that no forge daemon could be reached, either
@@ -164,6 +177,7 @@ func Connect(ctx context.Context, addr string) (*Client, error) {
 		lifeStop()
 		return nil, fmt.Errorf("%w: dial %s: %v", ErrDaemonNotRunning, c.url, err)
 	}
+	conn.SetReadLimit(wsReadLimitBytes)
 
 	c.setConn(conn)
 	go c.serve(conn)
@@ -282,6 +296,7 @@ func (c *Client) reconnect() *websocket.Conn {
 		conn, _, err := websocket.Dial(dialCtx, c.url, DialOptions())
 		cancel()
 		if err == nil {
+			conn.SetReadLimit(wsReadLimitBytes)
 			c.setConn(conn)
 			c.logger.Info("reconnected to daemon", "addr", c.addr)
 			return conn

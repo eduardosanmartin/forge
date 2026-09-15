@@ -180,6 +180,13 @@ type ExecuteTurnParams struct {
 	EnableAnchoring  bool   `json:"enable_anchoring,omitempty"`
 	EnableRouting    bool   `json:"enable_routing,omitempty"`
 	EnableSkills     bool   `json:"enable_skills,omitempty"`
+	// ModelHint pins this turn to a router role ("cheap"/"generation"/
+	// "reasoning" — routing.ModelRole) instead of the session's default
+	// model, resolved server-side via the registry's ModelRouter. Empty
+	// (the default for every existing caller) behaves exactly as before.
+	// Wired from run.Task.ModelHint for RF-11 manifest task execution
+	// (client.ManifestExecutor) — see SessionManager.ExecuteTurnWithModelHint.
+	ModelHint string `json:"model_hint,omitempty"`
 }
 
 // GetMessagesParams for session.get_messages.
@@ -367,6 +374,8 @@ type MessageResult struct {
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Name       string           `json:"name,omitempty"`
 	Usage      *UsageResult     `json:"usage,omitempty"`
+	Model      string           `json:"model,omitempty"`       // model that produced this message (assistant only)
+	DurationMs int64            `json:"duration_ms,omitempty"` // LLM call time that produced this message (assistant only)
 	CreatedAt  int64            `json:"created_at"`
 }
 

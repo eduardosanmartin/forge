@@ -387,7 +387,7 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 	}
 
-	messages, err := h.mgr.ExecuteTurn(ctx, params.SessionID, params.UserMessage,
+	messages, err := h.mgr.ExecuteTurnWithModelHint(ctx, params.SessionID, params.UserMessage, params.ModelHint,
 		params.EnableRetrieval, params.EnableCompaction, params.EnableAnchoring, params.EnableRouting, params.EnableSkills)
 	if err != nil {
 		switch {
@@ -405,7 +405,16 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 		result.Messages[i] = h.messageToResult(msg)
 	}
 	summarizeTurn(&result)
+	// Prefer the model actually recorded on the final assistant message (it
+	// reflects overrides/routing for this turn); the registry default is
+	// only a fallback for the rare case a message predates that column.
 	result.Model = h.mgr.DefaultModel()
+	for i := len(result.Messages) - 1; i >= 0; i-- {
+		if result.Messages[i].Role == "assistant" && result.Messages[i].Model != "" {
+			result.Model = result.Messages[i].Model
+			break
+		}
+	}
 	return h.resultResponse(req.ID, result)
 }
 
@@ -846,6 +855,8 @@ func (h *Handler) messageToResult(msg store.Message) MessageResult {
 		ToolCallID: msg.ToolCallID,
 		Name:       msg.Name,
 		Usage:      usage,
+		Model:      msg.Model,
+		DurationMs: msg.DurationMs,
 		CreatedAt:  msg.CreatedAt,
 	}
 }

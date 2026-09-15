@@ -44,6 +44,24 @@ func (r *Runner) persistState() error {
 	return nil
 }
 
+// persistDecomposedTasks writes an LLM-proposed task list to
+// StateDir/.forge/runs/<run_id>/tasks.decomposed.json — an audit trail of
+// what the Decomposer actually proposed (and what the after_spec_decomposition
+// checkpoint approved), independent of state.json's current-snapshot role.
+func persistDecomposedTasks(stateDir, runID string, tasks []Task) error {
+	dir := filepath.Join(stateDir, ".forge", "runs", runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	path := filepath.Join(dir, "tasks.decomposed.json")
+	data, err := json.MarshalIndent(tasks, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal decomposed tasks: %w", err)
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0o644)
+}
+
 func (r *Runner) persistReport(rep *Report) error {
 	if r.StateDir == "" {
 		return nil
