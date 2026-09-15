@@ -17,7 +17,7 @@ forge (binario único)
 │   ├── daemon/         # servidor WebSocket JSON-RPC 2.0 + session mgr
 │   ├── e2e/            # tests live/offline contra criterio de salida
 │   ├── isolation/      # Landlock+seccomp (Linux) / no-op (otros)
-│   ├── llm/            # Provider interface + Ollama adapter + registry
+│   ├── llm/            # Provider interface + OpenAI-compatible adapter + registry
 │   ├── logging/        # slog JSON + redacción secrets
 │   ├── pathmatch/      # glob doublestar (fs perms + config validation)
 │   ├── perms/          # deny-by-default engine + git floor
@@ -92,7 +92,7 @@ $env:GOOS="linux"; go build ./...; go vet ./...; go test -c ./internal/isolation
 | `internal/agent` | Loop agente, ensamblado contexto (system→tools→memoria→historia), métricas | `loop.go`, `context.go`, `metrics.go` |
 | `internal/tools` | Registry + fs/shell/git tools (MCP-shape) + fencing + redacción | `registry.go`, `fs.go`, `shell.go`, `git.go`, `fencing.go`, `workdir.go` |
 | `internal/isolation` | Landlock+seccomp (Linux) / no-op (otros) + wrapper re-exec | `linux.go`, `other.go`, `isolation.go`, `wrap.go` |
-| `internal/llm` | Provider interface + Ollama adapter + registry hot-swap | `provider.go`, `ollama.go`, `registry.go` |
+| `internal/llm` | Provider interface + OpenAI-compatible adapter + registry hot-swap | `provider.go`, `openai_compatible.go`, `registry.go` |
 | `internal/store` | SQLite sessions/messages (WAL, migraciones embed) | `store.go`, `migrate.go`, `migrations/001.sql` |
 | `internal/perms` | Deny-by-default engine + git floor | `perms.go`, `gitfloor.go`, `audit.go` |
 | `internal/client` | WebSocket JSON-RPC client + REPL + one-shot | `client.go`, `repl.go`, `oneshot.go` |

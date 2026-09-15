@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -41,6 +41,7 @@ type ChatRequest struct {
 	Temperature *float64
 	MaxTokens   *int
 	Stream      bool
+	SessionID   string // stable conversation ID, sent as x-opencode-session when non-empty (required by opencode go provider)
 }
 
 // ToolDef represents a tool definition for function calling.

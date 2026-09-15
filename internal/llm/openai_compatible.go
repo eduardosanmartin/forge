@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -22,8 +22,10 @@ import (
 	"github.com/eduardosanmartin/forge/internal/logging"
 )
 
-// OllamaProvider implements Provider for OpenAI-compatible endpoints (e.g., Ollama).
-type OllamaProvider struct {
+const forgeUserAgent = "forge/0.0.0-dev"
+
+// OpenAICompatibleProvider implements Provider for OpenAI-compatible endpoints (e.g., Ollama, OpenCode Zen, OpenRouter).
+type OpenAICompatibleProvider struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
@@ -34,10 +36,10 @@ type OllamaProvider struct {
 	closedMu   sync.Mutex
 }
 
-// NewOllamaProvider creates a new Ollama provider.
+// NewOpenAICompatibleProvider creates a new OpenAI-compatible provider.
 // allowedHosts enforces network egress allowlist (RNF-4.9): baseURL host:port must
 // be in the list (exact match). Empty allowlist = deny all. Returns error if not allowed.
-func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *slog.Logger) (*OllamaProvider, error) {
+func NewOpenAICompatibleProvider(baseURL, apiKey string, allowedHosts []string, logger *slog.Logger) (*OpenAICompatibleProvider, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -84,7 +86,7 @@ func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *sl
 		},
 	}
 
-	p := &OllamaProvider{
+	p := &OpenAICompatibleProvider{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		httpClient: client,
@@ -136,7 +138,7 @@ func validateAllowlist(baseURL string, allowedHosts []string) error {
 
 // refreshModels fetches models from /models (OpenAI-compatible endpoint).
 // The baseURL is guaranteed to have /v1 path by the constructor.
-func (p *OllamaProvider) refreshModels() error {
+func (p *OpenAICompatibleProvider) refreshModels() error {
 	models, err := p.fetchModels(p.baseURL + "/models")
 	if err != nil {
 		p.logger.Debug("fetch /models failed", "error", err)
@@ -160,16 +162,17 @@ func (p *OllamaProvider) refreshModels() error {
 	return nil
 }
 
-func (p *OllamaProvider) fetchModels(endpoint string) ([]string, error) {
+func (p *OpenAICompatibleProvider) fetchModels(endpoint string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
 	if err != nil {
 		return nil, err
+	}
+	req.Header.Set("User-Agent", forgeUserAgent)
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
 	resp, err := p.httpClient.Do(req)
@@ -213,7 +216,7 @@ func (p *OllamaProvider) fetchModels(endpoint string) ([]string, error) {
 }
 
 // Chat implements Provider.Chat for non-streaming requests.
-func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	p.closedMu.Lock()
 	if p.closed {
 		p.closedMu.Unlock()
@@ -232,8 +235,12 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		return ChatResponse{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", forgeUserAgent)
 	if p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	if req.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", req.SessionID)
 	}
 
 	p.logger.Debug("chat request", "endpoint", endpoint, "body", logging.Redact(string(body)))
@@ -264,7 +271,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 }
 
 // ChatStream implements Provider.ChatStream for streaming requests.
-func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
+func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
 	p.closedMu.Lock()
 	if p.closed {
 		p.closedMu.Unlock()
@@ -286,8 +293,12 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", forgeUserAgent)
 	if p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	if req.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", req.SessionID)
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
@@ -348,7 +359,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 	return ch, nil
 }
 
-func (p *OllamaProvider) buildRequestBody(req ChatRequest) map[string]any {
+func (p *OpenAICompatibleProvider) buildRequestBody(req ChatRequest) map[string]any {
 	body := map[string]any{
 		"model":    req.Model,
 		"messages": p.messagesToAPI(req.Messages),
@@ -376,7 +387,7 @@ func (p *OllamaProvider) buildRequestBody(req ChatRequest) map[string]any {
 	return body
 }
 
-func (p *OllamaProvider) messagesToAPI(msgs []Message) []map[string]any {
+func (p *OpenAICompatibleProvider) messagesToAPI(msgs []Message) []map[string]any {
 	out := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
 		msg := map[string]any{
@@ -408,7 +419,7 @@ func (p *OllamaProvider) messagesToAPI(msgs []Message) []map[string]any {
 	return out
 }
 
-func (p *OllamaProvider) toolsToAPI(tools []ToolDef) []map[string]any {
+func (p *OpenAICompatibleProvider) toolsToAPI(tools []ToolDef) []map[string]any {
 	out := make([]map[string]any, len(tools))
 	for i, t := range tools {
 		out[i] = map[string]any{
@@ -424,7 +435,7 @@ func (p *OllamaProvider) toolsToAPI(tools []ToolDef) []map[string]any {
 }
 
 // ListModels implements Provider.ListModels.
-func (p *OllamaProvider) ListModels() ([]string, error) {
+func (p *OpenAICompatibleProvider) ListModels() ([]string, error) {
 	p.modelsMu.RLock()
 	defer p.modelsMu.RUnlock()
 	// Return a copy
@@ -434,7 +445,7 @@ func (p *OllamaProvider) ListModels() ([]string, error) {
 }
 
 // Close implements Provider.Close.
-func (p *OllamaProvider) Close() error {
+func (p *OpenAICompatibleProvider) Close() error {
 	p.closedMu.Lock()
 	defer p.closedMu.Unlock()
 	if p.closed {
@@ -446,7 +457,7 @@ func (p *OllamaProvider) Close() error {
 }
 
 // mapError maps network/transport errors to typed errors.
-func (p *OllamaProvider) mapError(err error) error {
+func (p *OpenAICompatibleProvider) mapError(err error) error {
 	var netErr *url.Error
 	if errors.As(err, &netErr) {
 		if netErr.Timeout() {
@@ -461,7 +472,7 @@ func (p *OllamaProvider) mapError(err error) error {
 }
 
 // mapHTTPError maps HTTP error status codes to typed errors.
-func (p *OllamaProvider) mapHTTPError(statusCode int, body []byte) error {
+func (p *OpenAICompatibleProvider) mapHTTPError(statusCode int, body []byte) error {
 	bodyStr := logging.Redact(string(body))
 	switch statusCode {
 	case http.StatusNotFound:

@@ -36,7 +36,7 @@
 | **Síntoma** | Contra Ollama real: `tool_calls` → `[]`, `Usage` = `{0,0,0}`, `finish_reason` = `""`; tests pasaban porque mock usaba structs Go (dialecto Go↔Go) |
 | **Causa Raíz** | Structs `Message`, `ToolCall`, `ChatResponse`, `Usage`, `Choice`, `StreamChunk`, `StreamChoice` **sin tags json** → `encoding/json` usa nombres Go (PascalCase) vs wire snake_case (`tool_calls`, `prompt_tokens`, `finish_reason`) |
 | **Fix** | Agregados tags `json:"snake_case"` a TODOS los campos wire-facing en `provider.go` (12 structs). Ver `provider.go` líneas 10-90. |
-| **Validación** | Test de regresión `TestOllamaProvider_Chat_RealWireFormat` en `wireformat_test.go` alimenta JSON crudo OpenAI con snake_case y aserciona decode correcto de `tool_calls`, `finish_reason`, `usage`. |
+| **Validación** | Test de regresión `TestOpenAICompatibleProvider_Chat_RealWireFormat` en `wireformat_test.go` alimenta JSON crudo OpenAI con snake_case y aserciona decode correcto de `tool_calls`, `finish_reason`, `usage`. |
 | **Prevención** | Regla: **todo struct que cruza la red debe tener tags json explícitos**. Test de wire-format obligatorio para cada adapter nuevo. |
 
 ---
@@ -45,10 +45,10 @@
 
 | Campo | Detalle |
 |-------|---------|
-| **Componente** | `internal/llm/ollama.go` → `validateAllowlist` |
+| **Componente** | `internal/llm/openai_compatible.go` → `validateAllowlist` |
 | **Síntoma** | Config default `allowed_hosts: ["127.0.0.1", "localhost"]` (sin puerto) → match exacto contra `"127.0.0.1:11434"` falla → adaptador no se construye → egress 100% denegado |
 | **Causa Raíz** | `validateAllowlist` hacía match exacto `allowed == hostPort`. Defaults sin puerto nunca matchean host:port real. |
-| **Fix** | Lógica híbrida en `validateAllowlist` (ollama.go:89-110):<br/>- Entrada **con puerto** (`"127.0.0.1:11434"`) → match exacto host:port<br/>- Entrada **sin puerto** (`"127.0.0.1"`) → match **hostname** en cualquier puerto<br/>- Lista vacía = deny all (deny-by-default intacto) |
+| **Fix** | Lógica híbrida en `validateAllowlist` (openai_compatible.go:89-110):<br/>- Entrada **con puerto** (`"127.0.0.1:11434"`) → match exacto host:port<br/>- Entrada **sin puerto** (`"127.0.0.1"`) → match **hostname** en cualquier puerto<br/>- Lista vacía = deny all (deny-by-default intacto) |
 | **Validación** | Test `TestValidateAllowlist_PortSemantics` en `wireformat_test.go` cubre 6 casos (portless match, exact match, mismatch, empty deny). |
 | **Prevención** | Documentar semántica en `CONFIGURACIÓN.md`. Test de semántica obligatorio para cualquier cambio en allowlist. |
 

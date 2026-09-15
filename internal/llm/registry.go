@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -77,7 +77,7 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 	// Build model router from config
 	r.router = r.buildModelRouter(cfg)
 
-	// Set default model: config-declared models take priority, Ollama list as fallback
+	// Set default model: config-declared models take priority, provider list as fallback
 	if provider, ok := r.providers[r.defaultProvider]; ok {
 		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
 			r.defaultModel = cfg.Providers[r.defaultProvider].Models[0]
@@ -122,7 +122,7 @@ func (r *Registry) buildModelRouter(cfg *config.Config) *routing.ModelRouter {
 func (r *Registry) createProvider(name string, p config.Provider) (Provider, error) {
 	switch p.Kind {
 	case "openai-compatible":
-		return NewOllamaProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		return NewOpenAICompatibleProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "anthropic":
 		return NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "gemini":
