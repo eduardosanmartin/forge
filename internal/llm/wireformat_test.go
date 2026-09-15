@@ -9,13 +9,13 @@ import (
 	"github.com/eduardosanmartin/forge/internal/logging"
 )
 
-// TestOllamaProvider_Chat_RealWireFormat is a regression lock: the mock
+// TestOpenAICompatibleProvider_Chat_RealWireFormat is a regression lock: the mock
 // server normally round-trips Go structs (Go-dialect JSON), which masked a
 // bug where response structs lacked snake_case json tags — tool_calls,
 // finish_reason, and usage silently decoded to zero values against real
 // servers. This test feeds RAW OpenAI-compatible wire bytes and asserts
 // every critical field decodes.
-func TestOllamaProvider_Chat_RealWireFormat(t *testing.T) {
+func TestOpenAICompatibleProvider_Chat_RealWireFormat(t *testing.T) {
 	raw := []byte(`{
 		"id": "chatcmpl-wire",
 		"object": "chat.completion",
@@ -45,7 +45,7 @@ func TestOllamaProvider_Chat_RealWireFormat(t *testing.T) {
 	mock.SetDefaultResponse(&MockResponse{StatusCode: http.StatusOK, Body: raw})
 
 	logger, _, _ := logging.New(logging.Config{Level: "error"})
-	provider, err := NewOllamaProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
+	provider, err := NewOpenAICompatibleProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

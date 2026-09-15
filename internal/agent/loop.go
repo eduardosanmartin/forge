@@ -66,6 +66,24 @@ type TurnOptions struct {
 	StreamingEnabled bool
 	OnDelta          func(delta string)
 	Timeout          time.Duration
+	// NoTools strips tool definitions from the ChatRequest for this turn,
+	// forcing a plain-text answer. Used for turns that must never call a
+	// tool no matter how capable/compliant the model is — e.g. the RF-11
+	// manifest decomposition turn (internal/run/decompose.go), which asks
+	// for a JSON task list and previously could exhaust max_iterations
+	// exploring the filesystem instead of answering when the model chose to
+	// use the tools it technically had available despite being told not to.
+	NoTools bool
+	// OverrideModel pins this single turn to a specific model name, taking
+	// priority over the agent's own overrideModel (set only for spawn_subagent
+	// children — see SpawnChild) and over the session's v1 routing flag.
+	// Empty means "no override for this call" — the existing resolution
+	// chain applies unchanged. Wired from a manifest Task.ModelHint resolved
+	// through the registry's ModelRouter (internal/daemon/session_mgr.go's
+	// ExecuteTurnWithModelHint) so per-task model sizing (RF-11 decomposition,
+	// sugerenciasDeClaude.md §5.6) actually reaches the LLM call instead of
+	// staying a purely declarative field.
+	OverrideModel string
 }
 
 // ChatStreamer matches providers/registries that support streaming.
@@ -255,8 +273,12 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			break
 		}
 
-		// Get tool definitions
-		toolDefs := a.ctxAssembler.ToolDefs()
+		// Get tool definitions — empty when this turn must never call a tool
+		// (opts.NoTools), regardless of what the registry has available.
+		var toolDefs []llm.ToolDef
+		if !opts.NoTools {
+			toolDefs = a.ctxAssembler.ToolDefs()
+		}
 
 		// Call LLM
 		llmStartTime := time.Now()
@@ -277,7 +299,9 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			break
 		}
 
-		if a.overrideModel != "" {
+		if opts.OverrideModel != "" {
+			model = opts.OverrideModel
+		} else if a.overrideModel != "" {
 			model = a.overrideModel
 		} else if routingEnabled {
 			// v1 routing: when the session flag is on and the registry can
@@ -297,10 +321,11 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		}
 
 		req := llm.ChatRequest{
-			Model:    model,
-			Messages: llmMessages,
-			Tools:    toolDefs,
-			Stream:   false,
+			Model:     model,
+			Messages:  llmMessages,
+			Tools:     toolDefs,
+			Stream:    false,
+			SessionID: sessionID,
 		}
 
 		var resp llm.ChatResponse
@@ -353,11 +378,13 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		if len(choice.Message.ToolCalls) > 0 {
 			// Append assistant message with tool calls
 			assistantMsg := &store.Message{
-				SessionID: sessionID,
-				Role:      "assistant",
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
-				Usage:     resp.Usage,
+				SessionID:  sessionID,
+				Role:       "assistant",
+				Content:    choice.Message.Content,
+				ToolCalls:  choice.Message.ToolCalls,
+				Usage:      resp.Usage,
+				Model:      model,
+				DurationMs: llmElapsed,
 			}
 			_, _, err = a.store.AppendMessage(ctx, assistantMsg)
 			if err != nil {
@@ -481,10 +508,12 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 		// No tool calls - final response
 		finalMsg := &store.Message{
-			SessionID: sessionID,
-			Role:      "assistant",
-			Content:   choice.Message.Content,
-			Usage:     resp.Usage,
+			SessionID:  sessionID,
+			Role:       "assistant",
+			Content:    choice.Message.Content,
+			Usage:      resp.Usage,
+			Model:      model,
+			DurationMs: llmElapsed,
 		}
 		_, _, err = a.store.AppendMessage(ctx, finalMsg)
 		if err != nil {

@@ -64,8 +64,8 @@ func TestRegistry_List(t *testing.T) {
 	registry, _ := setupRegistry(t)
 
 	tools := registry.List()
-	if len(tools) != 9 {
-		t.Errorf("Expected 9 tools, got %d", len(tools))
+	if len(tools) != 10 {
+		t.Errorf("Expected 10 tools, got %d", len(tools))
 	}
 
 	names := make(map[string]bool)
@@ -73,7 +73,7 @@ func TestRegistry_List(t *testing.T) {
 		names[tool.Name()] = true
 	}
 
-	expected := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git", "git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task"}
+	expected := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git", "git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task", "github"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("Missing tool: %s", name)

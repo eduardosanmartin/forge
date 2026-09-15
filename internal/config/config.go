@@ -53,7 +53,27 @@ type Provider struct {
 	// APIKey authenticates against remote endpoints. Empty falls back to the
 	// OPENCODE_API_KEY env var so secrets stay out of config files.
 	APIKey string `json:"api_key"`
+	// PricePerMillionInputTokens/OutputTokens estimate cost for paid
+	// providers (RNF-6.3: "métricas de costo... cuando aplique (modelos de
+	// pago)"). Both zero (the default, including for every local/free
+	// provider) means "not priced" — internal/cost omits a cost estimate
+	// entirely rather than reporting a misleading $0.
+	PricePerMillionInputTokens  float64 `json:"price_per_million_input_tokens,omitempty"`
+	PricePerMillionOutputTokens float64 `json:"price_per_million_output_tokens,omitempty"`
+	// RequestTimeoutSeconds bounds one chat completion HTTP call to this
+	// provider. 0/unset falls back to DefaultRequestTimeoutSeconds (15 min)
+	// — previously this was a single hardcoded 15-minute constant shared by
+	// every provider regardless of profile, which meant a hung local model
+	// blocked a turn for the same 15 minutes as a legitimately slow remote
+	// one. Set this low (e.g. 120-180) for a local model known to be fast,
+	// or raise it for a large remote model under real load.
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
 }
+
+// DefaultRequestTimeoutSeconds is the fallback per-request HTTP timeout when
+// a provider does not set request_timeout_seconds (900s = 15 minutes, the
+// value every provider used unconditionally before this field existed).
+const DefaultRequestTimeoutSeconds = 900
 
 // StorageConfig locates forge's local database.
 type StorageConfig struct {
@@ -69,6 +89,30 @@ type NetworkConfig struct {
 type LoggingConfig struct {
 	Level string `json:"level"`
 	File  string `json:"file"`
+}
+
+// DaemonConfig configures the daemon transport's remote-access safety floor
+// (RF-7.4/RNF-4.11). A loopback --addr needs neither field: today's default
+// (unauthenticated, plain HTTP on 127.0.0.1) is unchanged. Binding to a
+// non-loopback address is refused unless BOTH are set — see the bind-address
+// check in internal/daemon.
+type DaemonConfig struct {
+	// Addr is the default listen address (host:port) `forge serve` binds to
+	// when --addr isn't passed explicitly on the command line. Empty falls
+	// back to the CLI flag's own default (127.0.0.1:0, an ephemeral port).
+	// Setting this lets a project pin a stable local port instead of getting
+	// a new one on every restart.
+	Addr string `json:"addr,omitempty"`
+	// AuthTokenHash is SHA-256(token) as lowercase hex. The raw token is
+	// never persisted — `forge daemon set-password` writes only this hash.
+	// Empty means auth is disabled (only valid for a loopback bind).
+	AuthTokenHash string `json:"auth_token_hash,omitempty"`
+	// TLSCertFile/TLSKeyFile is a PEM certificate+key pair the transport
+	// serves over. Both empty means plain HTTP (only valid for a loopback
+	// bind). `forge serve --tls-self-signed` populates these at runtime
+	// without persisting them to the config file.
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
 }
 
 // FSPermissions bounds filesystem access with glob patterns. Relative
@@ -98,6 +142,14 @@ type GitPermissions struct {
 	Allow []string `json:"allow"`
 }
 
+// GitHubPermissions allows the fixed read-only github tool subcommands
+// (RF-10.3): "issue-list", "issue-view", "pr-list", "pr-view". Empty by
+// default — deny-by-default like git/shell, not floor-allowed like the
+// custom kind, since this tool reaches the network via the `gh` CLI.
+type GitHubPermissions struct {
+	Allow []string `json:"allow"`
+}
+
 // CustomPermissions arbitrates forge-internal harness tools (kind "custom")
 // by tool name (case-sensitive). It mirrors perms.CustomPermissions:
 //
@@ -121,6 +173,7 @@ type PermissionsPolicy struct {
 	FS     FSPermissions     `json:"fs"`
 	Shell  ShellPermissions  `json:"shell"`
 	Git    GitPermissions    `json:"git"`
+	GitHub GitHubPermissions `json:"github"`
 	Custom CustomPermissions `json:"custom"`
 }
 
@@ -337,6 +390,7 @@ type Config struct {
 	Limits          LimitsConfig        `json:"limits"`
 	Agent           AgentConfig         `json:"agent"`
 	Project         ProjectConfig       `json:"project"`
+	Daemon          DaemonConfig        `json:"daemon"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -414,6 +468,7 @@ type filePermissions struct {
 	FS     *FSPermissions     `json:"fs"`
 	Shell  *ShellPermissions  `json:"shell"`
 	Git    *GitPermissions    `json:"git"`
+	GitHub *GitHubPermissions `json:"github"`
 	Custom *CustomPermissions `json:"custom"`
 }
 
@@ -449,6 +504,7 @@ type fileConfig struct {
 	Limits          *fileLimits         `json:"limits"`
 	Agent           *fileAgent          `json:"agent"`
 	Project         *ProjectConfig      `json:"project"`
+	Daemon          *DaemonConfig       `json:"daemon"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -599,6 +655,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		if fp.Git != nil {
 			dst.Permissions.Git = *fp.Git
 		}
+		if fp.GitHub != nil {
+			dst.Permissions.GitHub = *fp.GitHub
+		}
 		if fp.Custom != nil {
 			dst.Permissions.Custom = *fp.Custom
 		}
@@ -662,6 +721,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.Project != nil {
 		dst.Project = *fc.Project
+	}
+	if fc.Daemon != nil {
+		dst.Daemon = *fc.Daemon
 	}
 }
 
@@ -849,6 +911,10 @@ func (c *Config) Validate() error {
 		if len(p.Models) < 1 {
 			violations = append(violations, fmt.Errorf(
 				"%s: must declare at least one model", label))
+		}
+		if p.RequestTimeoutSeconds < 0 {
+			violations = append(violations, fmt.Errorf(
+				"%s: request_timeout_seconds must be >= 0, got %d", label, p.RequestTimeoutSeconds))
 		}
 	}
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -78,6 +79,46 @@ func (a *ClientAdapter) Events(ctx context.Context) (<-chan daemon.JSONRPCNotifi
 	return a.c.Events(ctx)
 }
 
+// resolveDefaultModel reads the project config JSON at configPath and returns
+// providers[default_provider].models[0]. Returns "" on any error — the footer
+// already hides an empty model name.
+func resolveDefaultModel(configPath string) string {
+	if configPath == "" {
+		configPath = ".forge/config.json"
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return ""
+	}
+	var dp string
+	if raw, ok := doc["default_provider"]; ok {
+		if err := json.Unmarshal(raw, &dp); err != nil {
+			return ""
+		}
+	}
+	if dp == "" {
+		return ""
+	}
+	rawProv, ok := doc["providers"]
+	if !ok {
+		return ""
+	}
+	var providers map[string]struct {
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rawProv, &providers); err != nil {
+		return ""
+	}
+	if p, ok := providers[dp]; ok && len(p.Models) > 0 && p.Models[0] != "" {
+		return p.Models[0]
+	}
+	return ""
+}
+
 // Run launches the TUI program. It dials the daemon via internal/client and
 // builds the model.
 func Run(ctx context.Context, addr string) error {
@@ -99,6 +140,9 @@ func Run(ctx context.Context, addr string) error {
 	}
 
 	m := NewModel(cfg, pal, cfg.Palette, cfgPath, tuiClient)
+	if m.currentModel == "" {
+		m.currentModel = resolveDefaultModel(cfgPath)
+	}
 	if daemonErr != "" {
 		m.daemonErr = daemonErr
 	}

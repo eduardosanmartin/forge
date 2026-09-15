@@ -43,7 +43,16 @@ func NewModelRouter(roleModels map[ModelRole]string) *ModelRouter {
 // ModelForStep returns the model name for a given step type.
 // Falls back through: generation -> cheap -> reasoning.
 func (r *ModelRouter) ModelForStep(step StepType) string {
-	role := r.roleForStep(step)
+	return r.ModelForRole(r.roleForStep(step))
+}
+
+// ModelForRole returns the model name configured for role, or the same
+// generation -> cheap -> reasoning fallback chain when role has no model
+// configured (or role itself is unrecognized). Used directly wherever a
+// caller already speaks in role vocabulary rather than step vocabulary —
+// e.g. a manifest Task's model_hint (internal/run/manifest.go), set by the
+// decomposition step (internal/run/decompose.go) or by hand.
+func (r *ModelRouter) ModelForRole(role ModelRole) string {
 	if model, ok := r.roleModels[role]; ok && model != "" {
 		return model
 	}

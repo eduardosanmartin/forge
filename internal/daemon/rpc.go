@@ -3,6 +3,8 @@ package daemon
 
 import (
 	"encoding/json"
+
+	"github.com/eduardosanmartin/forge/internal/cost"
 )
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.
@@ -143,6 +145,9 @@ const (
 	MethodMemoryDelete = "memory.delete"
 	// RF-9.3: multi-model fanout.
 	MethodFanout = "session.fanout"
+	// RNF-6.3: estimated cost metrics.
+	MethodSessionCost = "session.cost"
+	MethodCostSummary = "cost.summary"
 )
 
 // CreateSessionParams for session.create.
@@ -175,6 +180,13 @@ type ExecuteTurnParams struct {
 	EnableAnchoring  bool   `json:"enable_anchoring,omitempty"`
 	EnableRouting    bool   `json:"enable_routing,omitempty"`
 	EnableSkills     bool   `json:"enable_skills,omitempty"`
+	// ModelHint pins this turn to a router role ("cheap"/"generation"/
+	// "reasoning" — routing.ModelRole) instead of the session's default
+	// model, resolved server-side via the registry's ModelRouter. Empty
+	// (the default for every existing caller) behaves exactly as before.
+	// Wired from run.Task.ModelHint for RF-11 manifest task execution
+	// (client.ManifestExecutor) — see SessionManager.ExecuteTurnWithModelHint.
+	ModelHint string `json:"model_hint,omitempty"`
 }
 
 // GetMessagesParams for session.get_messages.
@@ -362,6 +374,8 @@ type MessageResult struct {
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Name       string           `json:"name,omitempty"`
 	Usage      *UsageResult     `json:"usage,omitempty"`
+	Model      string           `json:"model,omitempty"`       // model that produced this message (assistant only)
+	DurationMs int64            `json:"duration_ms,omitempty"` // LLM call time that produced this message (assistant only)
 	CreatedAt  int64            `json:"created_at"`
 }
 
@@ -517,6 +531,23 @@ type FanoutChildResult struct {
 type FanoutResult struct {
 	ParentSessionID string              `json:"parent_session_id"`
 	Children        []FanoutChildResult `json:"children"`
+}
+
+// SessionCostParams for session.cost (RNF-6.3).
+type SessionCostParams struct {
+	SessionID string `json:"session_id"`
+}
+
+// CostSummaryParams for cost.summary (RNF-6.3). Limit/Offset page through
+// sessions the same way session.list does; 0 defaults like that method too.
+type CostSummaryParams struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// CostSummaryResult for cost.summary.
+type CostSummaryResult struct {
+	Providers []cost.ProviderCost `json:"providers"`
 }
 
 // NewErrorResponse creates a JSONRPCResponse with an error.

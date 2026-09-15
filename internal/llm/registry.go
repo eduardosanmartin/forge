@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/routing"
@@ -77,7 +78,7 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 	// Build model router from config
 	r.router = r.buildModelRouter(cfg)
 
-	// Set default model: config-declared models take priority, Ollama list as fallback
+	// Set default model: config-declared models take priority, provider list as fallback
 	if provider, ok := r.providers[r.defaultProvider]; ok {
 		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
 			r.defaultModel = cfg.Providers[r.defaultProvider].Models[0]
@@ -119,17 +120,41 @@ func (r *Registry) buildModelRouter(cfg *config.Config) *routing.ModelRouter {
 	return routing.NewModelRouter(roleModels)
 }
 
+// requestTimeoutSetter is implemented by every provider constructor below;
+// it's a local optional interface (rather than adding SetRequestTimeout to
+// the shared Provider interface) so provider kinds added later without
+// per-request timeout support still satisfy Provider.
+type requestTimeoutSetter interface {
+	SetRequestTimeout(time.Duration)
+}
+
 func (r *Registry) createProvider(name string, p config.Provider) (Provider, error) {
+	var (
+		provider Provider
+		err      error
+	)
 	switch p.Kind {
 	case "openai-compatible":
-		return NewOllamaProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewOpenAICompatibleProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "anthropic":
-		return NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "gemini":
-		return NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", p.Kind)
 	}
+	if err != nil {
+		return nil, err
+	}
+	// config.DefaultRequestTimeoutSeconds (== the constructors' own built-in
+	// default) makes this a no-op when unset; only an explicit override
+	// changes anything.
+	if p.RequestTimeoutSeconds > 0 {
+		if setter, ok := provider.(requestTimeoutSetter); ok {
+			setter.SetRequestTimeout(time.Duration(p.RequestTimeoutSeconds) * time.Second)
+		}
+	}
+	return provider, nil
 }
 
 // GetProvider returns a provider by name.

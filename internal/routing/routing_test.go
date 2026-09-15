@@ -4,6 +4,27 @@ import (
 	"testing"
 )
 
+// TestModelForRole_DirectAndFallback covers ModelForRole directly (used
+// wherever a caller already has a role name, e.g. run.Task.ModelHint /
+// daemon.ExecuteTurnParams.ModelHint — not a step), including its fallback
+// chain for a role with no model configured or an unrecognized role name.
+func TestModelForRole_DirectAndFallback(t *testing.T) {
+	r := NewModelRouter(map[ModelRole]string{
+		RoleCheap:      "cheap-model",
+		RoleGeneration: "generation-model",
+	})
+	if got := r.ModelForRole(RoleCheap); got != "cheap-model" {
+		t.Errorf("ModelForRole(cheap) = %q, want cheap-model", got)
+	}
+	// RoleReasoning has no configured model: falls back generation -> cheap -> reasoning.
+	if got := r.ModelForRole(RoleReasoning); got != "generation-model" {
+		t.Errorf("ModelForRole(reasoning) fallback = %q, want generation-model", got)
+	}
+	if got := r.ModelForRole(ModelRole("not-a-real-role")); got != "generation-model" {
+		t.Errorf("unrecognized role fallback = %q, want generation-model", got)
+	}
+}
+
 func TestModelRouterBasic(t *testing.T) {
 	router := NewModelRouter(map[ModelRole]string{
 		RoleCheap:      "qwen2.5-coder:1.5b",

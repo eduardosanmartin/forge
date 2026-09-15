@@ -43,28 +43,60 @@ func init() {
 func newServeCommand() *cobra.Command {
 	var addr string
 	var approveExternal bool
+	var tlsCert string
+	var tlsKey string
+	var tlsSelfSigned bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the forge daemon",
+		Long: "Starts the daemon (JSON-RPC over WebSocket, plus the embedded GUI at /).\n\n" +
+			"Remote access (RF-7.4/RNF-4.11): binding --addr beyond loopback is refused\n" +
+			"unless BOTH an auth token (set with `forge daemon set-password`) and TLS are\n" +
+			"configured — there is no insecure remote mode. TLS options:\n" +
+			"  --tls-cert/--tls-key   Serve a real PEM certificate+key pair.\n" +
+			"  --tls-self-signed      Generate/reuse an ephemeral self-signed pair under\n" +
+			"                         ~/.forge — genuinely encrypted, but not verifiable\n" +
+			"                         against a public CA (fine for a private/VPN network;\n" +
+			"                         use a real cert for public exposure).",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, ok := AppFromContext(cmd.Context())
 			if !ok {
 				return fmt.Errorf("app not initialized")
 			}
-
-			// Store addr in config temporarily for daemon creation
-			originalStoragePath := app.Config.Storage.Path
-			if addr != "" {
-				// We'll pass addr directly to daemon.New
-				_ = addr // avoid unused warning
+			if !cmd.Flags().Changed("addr") && app.Config.Daemon.Addr != "" {
+				addr = app.Config.Daemon.Addr
 			}
-			_ = originalStoragePath
+			if tlsCert != "" || tlsKey != "" {
+				if tlsCert == "" || tlsKey == "" {
+					return &UsageError{Err: fmt.Errorf("--tls-cert and --tls-key must be given together")}
+				}
+				if tlsSelfSigned {
+					return &UsageError{Err: fmt.Errorf("--tls-self-signed cannot be combined with --tls-cert/--tls-key")}
+				}
+				app.Config.Daemon.TLSCertFile = tlsCert
+				app.Config.Daemon.TLSKeyFile = tlsKey
+			} else if tlsSelfSigned {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("resolve home directory for --tls-self-signed: %w", err)
+				}
+				cert, key, err := daemon.EnsureSelfSignedCert(filepath.Join(home, ".forge"))
+				if err != nil {
+					return fmt.Errorf("--tls-self-signed: %w", err)
+				}
+				app.Config.Daemon.TLSCertFile = cert
+				app.Config.Daemon.TLSKeyFile = key
+				app.Logger.Warn("serving with a self-signed certificate: not verifiable against a public CA — fine for a private network, not for public exposure", "cert", cert)
+			}
 
 			return runServe(cmd.Context(), app, addr, approveExternal)
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (host:port)")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (host:port); defaults to daemon.addr in config if set, else an ephemeral port")
 	cmd.Flags().BoolVar(&approveExternal, "approve-external-plugins", false, "allow external plugins/skills without per-plugin approved.flag (global override)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate file (required with --tls-key for remote access)")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key file (required with --tls-cert for remote access)")
+	cmd.Flags().BoolVar(&tlsSelfSigned, "tls-self-signed", false, "generate/reuse an ephemeral self-signed TLS pair under ~/.forge instead of a real certificate")
 	return cmd
 }
 
@@ -131,6 +163,8 @@ func newStatusCommand() *cobra.Command {
 }
 
 func runServe(ctx context.Context, app *App, addr string, approveExternal bool) error {
+	printBanner()
+
 	// v0 workspace semantics: forge operates on the directory the daemon was
 	// launched from. Relative permission patterns ("./**") and tool paths
 	// resolve against this root. Storage.Path is the database location, not
@@ -166,6 +200,9 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 		},
 		Git: perms.GitPermissions{
 			Allow: app.Config.Permissions.Git.Allow,
+		},
+		GitHub: perms.GitHubPermissions{
+			Allow: app.Config.Permissions.GitHub.Allow,
 		},
 		Custom: perms.CustomPermissions{
 			Deny:  app.Config.Permissions.Custom.Deny,
@@ -283,7 +320,9 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	return d.Start(ctx)
+	err = d.Start(ctx)
+	printBanner()
+	return err
 }
 
 func runAttach(ctx context.Context, sessionID string) error {
@@ -294,8 +333,8 @@ func runAttach(ctx context.Context, sessionID string) error {
 	}
 
 	// Connect to WebSocket
-	url := fmt.Sprintf("ws://%s/ws", addr)
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	url := client.WSURL(addr)
+	conn, _, err := websocket.Dial(ctx, url, client.DialOptions())
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -353,8 +392,8 @@ func runHalt(ctx context.Context, args []string) error {
 		return fmt.Errorf("daemon not running: %w", err)
 	}
 
-	url := fmt.Sprintf("ws://%s/ws", addr)
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	url := client.WSURL(addr)
+	conn, _, err := websocket.Dial(ctx, url, client.DialOptions())
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -391,8 +430,8 @@ func runResume(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("daemon not running: %w", err)
 	}
 
-	url := fmt.Sprintf("ws://%s/ws", addr)
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	url := client.WSURL(addr)
+	conn, _, err := websocket.Dial(ctx, url, client.DialOptions())
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -421,8 +460,8 @@ func runSessions(ctx context.Context, out io.Writer, jsonOut bool) error {
 		return fmt.Errorf("daemon not running: %w", err)
 	}
 
-	url := fmt.Sprintf("ws://%s/ws", addr)
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	url := client.WSURL(addr)
+	conn, _, err := websocket.Dial(ctx, url, client.DialOptions())
 	if err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
@@ -470,8 +509,8 @@ func runStatus(ctx context.Context, out io.Writer, jsonOut bool) error {
 		return nil
 	}
 
-	url := fmt.Sprintf("ws://%s/ws", addr)
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	url := client.WSURL(addr)
+	conn, _, err := websocket.Dial(ctx, url, client.DialOptions())
 	if err != nil {
 		fmt.Printf("daemon: unreachable (%v)\n", err)
 		return nil

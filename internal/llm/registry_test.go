@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -50,6 +50,86 @@ func TestRegistry_New_Basic(t *testing.T) {
 	}
 	if model != "model-1" {
 		t.Errorf("default model: got %q, want %q", model, "model-1")
+	}
+}
+
+// TestRegistry_CreateProvider_RequestTimeoutSecondsOverridesDefault confirms
+// config.Provider.RequestTimeoutSeconds actually reaches the constructed
+// provider's http.Client — previously every provider was stuck with the
+// same hardcoded 15-minute timeout regardless of its profile (a fast local
+// model and a legitimately slow remote one had no way to differ).
+func TestRegistry_CreateProvider_RequestTimeoutSecondsOverridesDefault(t *testing.T) {
+	mock := NewMockServer()
+	defer mock.Close()
+	mock.SetDefaultResponse((&ModelsResponseBuilder{Models: []string{"model-1"}}).Build())
+
+	cfg := &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		DefaultProvider: "ollama",
+		Providers: map[string]config.Provider{
+			"ollama": {
+				Kind:                  "openai-compatible",
+				BaseURL:               mock.URL(),
+				Models:                []string{"model-1"},
+				RequestTimeoutSeconds: 120,
+			},
+		},
+		Network: config.NetworkConfig{AllowedHosts: []string{hostFromURL(mock.URL())}},
+	}
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	registry, err := New(cfg, cfg.Network.AllowedHosts, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer registry.Close()
+
+	provider, ok := registry.GetProvider("ollama")
+	if !ok {
+		t.Fatal("GetProvider: not found")
+	}
+	oc, ok := provider.(*OpenAICompatibleProvider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *OpenAICompatibleProvider", provider)
+	}
+	if got := oc.httpClient.Timeout; got != 120*time.Second {
+		t.Errorf("httpClient.Timeout = %s, want 120s", got)
+	}
+}
+
+// TestRegistry_CreateProvider_RequestTimeoutSecondsZeroKeepsBuiltinDefault
+// confirms leaving request_timeout_seconds unset preserves the existing
+// 15-minute default — this override is opt-in, not a behavior change for
+// every config that predates the field.
+func TestRegistry_CreateProvider_RequestTimeoutSecondsZeroKeepsBuiltinDefault(t *testing.T) {
+	mock := NewMockServer()
+	defer mock.Close()
+	mock.SetDefaultResponse((&ModelsResponseBuilder{Models: []string{"model-1"}}).Build())
+
+	cfg := &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		DefaultProvider: "ollama",
+		Providers: map[string]config.Provider{
+			"ollama": {Kind: "openai-compatible", BaseURL: mock.URL(), Models: []string{"model-1"}},
+		},
+		Network: config.NetworkConfig{AllowedHosts: []string{hostFromURL(mock.URL())}},
+	}
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	registry, err := New(cfg, cfg.Network.AllowedHosts, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer registry.Close()
+
+	provider, ok := registry.GetProvider("ollama")
+	if !ok {
+		t.Fatal("GetProvider: not found")
+	}
+	oc, ok := provider.(*OpenAICompatibleProvider)
+	if !ok {
+		t.Fatalf("provider type = %T, want *OpenAICompatibleProvider", provider)
+	}
+	if got := oc.httpClient.Timeout; got != 15*time.Minute {
+		t.Errorf("httpClient.Timeout = %s, want the unchanged 15m default", got)
 	}
 }
 

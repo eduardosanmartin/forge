@@ -12,12 +12,18 @@ import (
 // through the daemon (sessionID is the isolated run session). It forwards the
 // daemon's tool trace as actual tool-call records so high-sensitivity
 // after_task checkpoints can inspect real tool usage, not goal text.
+// task.ModelHint (when set — by hand or by the decomposition step, §5.2)
+// travels as ExecuteTurnParams.ModelHint: the daemon resolves it through the
+// registry's ModelRouter into a concrete per-turn model override
+// (sugerenciasDeClaude.md §5.6) — this is the piece that was missing before:
+// the field existed on Task but nothing consumed it.
 func ManifestExecutor(ctx context.Context, cl *Client, sessionID string) run.Executor {
 	return func(ctx context.Context, task run.Task) (run.ExecResult, error) {
 		var res daemon.ExecuteTurnResult
 		if err := cl.Call(ctx, daemon.MethodExecuteTurn, daemon.ExecuteTurnParams{
 			SessionID:   sessionID,
 			UserMessage: task.Goal,
+			ModelHint:   task.ModelHint,
 		}, &res); err != nil {
 			return run.ExecResult{}, fmt.Errorf("execute task %s: %w", task.ID, err)
 		}
@@ -38,5 +44,45 @@ func ManifestExecutor(ctx context.Context, cl *Client, sessionID string) run.Exe
 		// slice means no tools were executed, which is distinct from nil
 		// (unavailable) used by legacy mocks.
 		return run.ExecResult{Tokens: tokens, Iterations: iters, ToolCalls: toolCalls}, nil
+	}
+}
+
+// ManifestDecomposer returns a run.Decomposer that asks the daemon's default
+// model to break goal+spec into a task list (run.BuildDecompositionPrompt),
+// through a dedicated, throwaway session created fresh on every call — kept
+// separate from the run's own session so decomposition chatter (and any
+// tool calls the model makes while exploring the spec) never becomes part
+// of the context every subsequent task turn sees.
+func ManifestDecomposer(cl *Client) run.Decomposer {
+	return func(ctx context.Context, goal, spec string) ([]run.Task, error) {
+		var created daemon.SessionResult
+		if err := cl.Call(ctx, daemon.MethodCreateSession, daemon.CreateSessionParams{
+			// no_tools (internal/daemon/session_mgr.go): forces a plain-text
+			// answer for every turn in this session — the decomposition
+			// prompt already asks the model not to call tools, but that's
+			// prompt compliance only; this makes it a hard technical
+			// constraint (empty tools array in the ChatRequest) instead.
+			// Found necessary in practice: a real decomposition call against
+			// this very repo exhausted max_iterations exploring the
+			// filesystem instead of answering, despite the prompt asking it
+			// not to.
+			Metadata: map[string]any{"source": "run_manifest_decompose", "no_tools": true},
+		}, &created); err != nil {
+			return nil, fmt.Errorf("create decomposition session: %w", err)
+		}
+
+		var res daemon.ExecuteTurnResult
+		if err := cl.Call(ctx, daemon.MethodExecuteTurn, daemon.ExecuteTurnParams{
+			SessionID:   created.ID,
+			UserMessage: run.BuildDecompositionPrompt(goal, spec),
+		}, &res); err != nil {
+			return nil, fmt.Errorf("decomposition turn: %w", err)
+		}
+
+		tasks, err := run.ParseDecomposedTasks(res.FinalContent)
+		if err != nil {
+			return nil, err
+		}
+		return tasks, nil
 	}
 }

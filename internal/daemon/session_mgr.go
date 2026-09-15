@@ -14,6 +14,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
+	"github.com/eduardosanmartin/forge/internal/routing"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -293,6 +294,22 @@ func (m *SessionManager) DeleteSession(ctx context.Context, id string) error {
 // ExecuteTurn executes a single agent turn for a session.
 // v1Flags can include: enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills
 func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage string, v1Flags ...bool) ([]store.Message, error) {
+	return m.executeTurn(ctx, sessionID, userMessage, "", v1Flags...)
+}
+
+// ExecuteTurnWithModelHint is ExecuteTurn plus a per-call model override
+// (RF-11 manifest execution, sugerenciasDeClaude.md §5.6): modelHint is a
+// routing.ModelRole name ("cheap"/"generation"/"reasoning" — matches
+// run.Task.ModelHint's vocabulary exactly). When non-empty and the registry
+// exposes a ModelRouter, it's resolved to a concrete model name and pinned
+// for this one turn only (agent.TurnOptions.OverrideModel) — the session's
+// own default model and any other turn in it are unaffected. An empty hint,
+// or a registry without router support, behaves exactly like ExecuteTurn.
+func (m *SessionManager) ExecuteTurnWithModelHint(ctx context.Context, sessionID, userMessage, modelHint string, v1Flags ...bool) ([]store.Message, error) {
+	return m.executeTurn(ctx, sessionID, userMessage, modelHint, v1Flags...)
+}
+
+func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage, modelHint string, v1Flags ...bool) ([]store.Message, error) {
 	// Check if session exists
 	session, err := m.store.GetSession(ctx, sessionID)
 	if err != nil {
@@ -343,6 +360,32 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		}
 		if v, ok := session.Metadata["v1_skills"].(bool); ok {
 			enableSkills = v
+		}
+	}
+
+	// no_tools: set once at session creation (see client.ManifestDecomposer)
+	// for a session that must never call a tool, e.g. the RF-11 manifest
+	// decomposition turn — read-only here, unlike the v1 flags above it's
+	// never resolved from RPC params, only from how the session was created.
+	noTools := false
+	if session.Metadata != nil {
+		if v, ok := session.Metadata["no_tools"].(bool); ok {
+			noTools = v
+		}
+	}
+
+	// modelHint (ExecuteTurnWithModelHint only) resolves through the
+	// registry's ModelRouter into a concrete per-turn model override. An
+	// unrecognized hint or a registry without router support silently
+	// resolves to "" — the turn just runs with no override, exactly like a
+	// plain ExecuteTurn call, rather than failing the turn over what is
+	// fundamentally a sizing hint, not a hard requirement.
+	overrideModel := ""
+	if modelHint != "" {
+		if rp, ok := m.llmReg.(routerProvider); ok {
+			if router := rp.GetRouter(); router != nil {
+				overrideModel = router.ModelForRole(routing.ModelRole(modelHint))
+			}
 		}
 	}
 
@@ -418,6 +461,8 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		var firstSent bool
 		opts := agent.TurnOptions{
 			StreamingEnabled: true,
+			NoTools:          noTools,
+			OverrideModel:    overrideModel,
 			OnDelta: func(delta string) {
 				// Publish per-delta notification (additive, best-effort, non-blocking).
 				// TTFT is emitted on first delta for observability.
@@ -444,7 +489,9 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
 		}
 	} else if streamingEnabled {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel})
+	} else if noTools || overrideModel != "" {
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel})
 	} else {
 		result, turnErr = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
 	}
@@ -571,6 +618,15 @@ func (e *ModelUnavailableError) Unwrap() error { return e.Err }
 // modelSetter matches registries that support hot-swapping the default model.
 type modelSetter interface {
 	SetDefault(model string) error
+}
+
+// routerProvider is implemented by an LLM registry that exposes its
+// role/step model router (*llm.Registry does). Type-asserted the same way
+// modelSetter is, rather than widening LLMRegistryInterface, so a registry
+// without router support degrades to "no override" instead of failing to
+// satisfy the interface at all.
+type routerProvider interface {
+	GetRouter() *routing.ModelRouter
 }
 
 // MarkSuccess marks a session as human-verified successful (RF-4.4 input gate).

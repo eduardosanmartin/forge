@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -88,6 +88,14 @@ func NewAnthropicProvider(baseURL, apiKey string, allowedHosts []string, logger 
 		logger.Warn("failed to fetch anthropic models at startup", "error", err)
 	}
 	return p, nil
+}
+
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0.
+func (p *AnthropicProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
 }
 
 func (p *AnthropicProvider) refreshModels() error {

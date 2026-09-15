@@ -83,7 +83,7 @@ Spot-checks performed before writing: `internal/agent/loop.go` (RF-1.1 tool loop
 | RF-1.3 orchestrator → specialized subagents | **PARTIAL** | No dedicated subagent orchestrator package; TUI rail shows turn stats but not subagent topology | — |
 | RF-1.4 background jobs after client disconnect | **PARTIAL** | `71c6192` reconnect follows `daemon.addr` restart (file re-resolve), daemon survives; no full background-job queue | Reconnect ok, no full background jobs |
 | RF-1.2 multiple concurrent agents in one session | **OPEN** | No session-level concurrent agent scheduler; RNF-1.5 single-model queue assumption holds | Deferred |
-| RF-2.1 OpenAI-compatible (Ollama etc.) | **DONE** | `internal/llm/ollama.go`, `internal/llm/provider.go` | — |
+| RF-2.1 OpenAI-compatible (Ollama etc.) | **DONE** | `internal/llm/openai_compatible.go`, `internal/llm/provider.go` | — |
 | RF-2.2 Anthropic/Gemini adapters | **DONE** | `internal/llm/anthropic.go`, `internal/llm/gemini.go`, `f6a2acb` + `sse.go` | — |
 | RF-2.3 switch provider/model without restart | **DONE** | `internal/config` `model_roles` + `internal/llm/registry.go` hot model selection (`--session` retains) | — |
 | RF-2.6 streaming (spec 0.10, opt-in) | **PARTIAL** | `LLM.Streaming` OFF default, `ChatStream` + `message.delta.event`, failure fails turn, `ErrStreamingNotSupported` fallback only | Streaming present, not default, not yet benchmarked for TTFT |

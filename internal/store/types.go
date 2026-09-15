@@ -24,6 +24,8 @@ type Message struct {
 	ToolCallID string
 	Name       string
 	Usage      *llm.Usage
+	Model      string // model that produced this message (assistant only)
+	DurationMs int64  // wall-clock time of the LLM call that produced this message (assistant only)
 	CreatedAt  int64
 }
 

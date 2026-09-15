@@ -342,6 +342,24 @@ func TestValidateViolations(t *testing.T) {
 			wantErr: "model",
 		},
 		{
+			name: "negative request timeout",
+			cfg: mutate(func(c *Config) {
+				p := c.Providers["ollama"]
+				p.RequestTimeoutSeconds = -1
+				c.Providers["ollama"] = p
+			}),
+			wantErr: "request_timeout_seconds",
+		},
+		{
+			name: "zero request timeout is valid (falls back to built-in default)",
+			cfg: mutate(func(c *Config) {
+				p := c.Providers["ollama"]
+				p.RequestTimeoutSeconds = 0
+				c.Providers["ollama"] = p
+			}),
+			wantOK: true,
+		},
+		{
 			name:    "empty storage path",
 			cfg:     mutate(func(c *Config) { c.Storage.Path = "" }),
 			wantErr: "storage.path",
