@@ -693,7 +693,16 @@ func (m *SessionManager) SwitchModel(ctx context.Context, sessionID, modelSpec s
 	}
 
 	provider, model := "", modelSpec
-	if p, mdl, ok := strings.Cut(modelSpec, "/"); ok {
+	if p, mdl, ok := strings.Cut(modelSpec, "/"); ok && m.isKnownProvider(p) {
+		// Only split on "/" when the prefix actually names a configured
+		// provider — otherwise this is a bare model name that happens to
+		// contain a slash (e.g. a HuggingFace-style "org/model" catalog
+		// name like "opencode/muse-spark-1.3-contributor-free"), and
+		// splitting it here misreads "opencode" as a provider name,
+		// producing a "provider not found" error for a model that's
+		// actually declared under some other real provider. Falls through
+		// to the bare-model-name path below, which resolves it correctly
+		// via SetDefault/resolveModelAcrossProviders.
 		provider, model = p, mdl
 	}
 
@@ -772,6 +781,26 @@ func (m *SessionManager) resolveModelAcrossProviders(model string, setErr error)
 			"model %q exists in multiple providers (%s) — use %q to disambiguate",
 			model, strings.Join(names, ", "), fmt.Sprintf("%s/%s", names[0], model))}
 	}
+}
+
+// isKnownProvider reports whether name matches a configured provider —
+// used by SwitchModel to decide whether a "/" in modelSpec is explicit
+// provider/model syntax or just part of a bare model name (see its call
+// site). A registry that doesn't implement providerLister can't answer, so
+// this conservatively says no: modelSpec is then treated as a bare model
+// name end to end, which is the same behavior every registry had before
+// SwitchModel's "provider/model" syntax existed.
+func (m *SessionManager) isKnownProvider(name string) bool {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return false
+	}
+	for _, p := range lister.ListProviders() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ListProviders returns every configured provider's name and kind.

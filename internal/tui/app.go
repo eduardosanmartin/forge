@@ -55,6 +55,15 @@ func (a *ClientAdapter) HaltSession(sessionID, reason string) error {
 	ctx := context.Background()
 	return a.c.HaltSession(ctx, sessionID, reason)
 }
+
+// HaltAll triggers the daemon's global emergency stop (emergency.halt_all —
+// every session, not just one). The RPC itself takes no params (same call
+// shape the REPL's /halt with no target uses); reason is accepted for
+// interface symmetry with HaltSession and isn't transmitted today.
+func (a *ClientAdapter) HaltAll(reason string) error {
+	ctx := context.Background()
+	return a.c.Call(ctx, daemon.MethodHaltAll, nil, nil)
+}
 func (a *ClientAdapter) ResumeSession(sessionID string) error {
 	ctx := context.Background()
 	return a.c.ResumeSession(ctx, sessionID)

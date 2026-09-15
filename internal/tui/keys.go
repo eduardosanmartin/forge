@@ -14,6 +14,13 @@ import "charm.land/bubbles/v2/key"
 // Mouse capture: shift+drag bypasses mouse reporting for text selection (Windows Terminal honors it).
 // ctrl+m toggles mouse capture on/off at runtime with a footer toast.
 // Rail panels: ctrl+1 Context & tokens, ctrl+2 Plugins & skills, ctrl+3 Turn stats, esc closes.
+// Emergency stop: esc esc (two CONSECUTIVE presses within escDoubleTapWindow,
+// no other key between them) halts EVERY session via emergency.halt_all —
+// not a key.Binding since bubbles' key package has no double-press concept;
+// handled directly in Update's tea.KeyPressMsg case (see lastEscAt).
+// Error panel: an action/RPC error opens a floating panel with the full
+// message instead of a footer toast (see showError); esc closes it, same
+// priority tier as the rail/help/model panels.
 type KeyMap struct {
 	ToggleSidebar   key.Binding
 	CycleLayout     key.Binding

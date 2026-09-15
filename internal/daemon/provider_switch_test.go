@@ -202,6 +202,48 @@ func TestSwitchModel_BareNameNotFoundAnywhereReturnsOriginalError(t *testing.T) 
 	}
 }
 
+// TestSwitchModel_ModelNameContainingSlashIsNotMisreadAsProvider reproduces
+// a live bug: a bare model name that happens to contain a "/" (a
+// HuggingFace-style catalog name, e.g.
+// "opencode/muse-spark-1.3-contributor-free") was always split on the
+// first "/" as if it were explicit "provider/model" syntax, regardless of
+// whether the prefix named a real provider — misreading "opencode" as a
+// provider name here and failing with "provider \"opencode\" not found"
+// even though the model is declared under a real, configured provider.
+func TestSwitchModel_ModelNameContainingSlashIsNotMisreadAsProvider(t *testing.T) {
+	const slashyModel = "opencode/muse-spark-1.3-contributor-free"
+	reg := newMockSwitchableRegistry("alpha", "a1", map[string][]string{
+		"alpha": {"a1"},
+		"zen":   {slashyModel},
+	})
+	mgr, sessionID := newTestManagerWithSwitchableRegistry(t, reg)
+
+	if err := mgr.SwitchModel(context.Background(), sessionID, slashyModel); err != nil {
+		t.Fatalf("SwitchModel(%q): %v (should resolve via the bare-name fallback to provider %q, not misread \"opencode\" as a provider)", slashyModel, err, "zen")
+	}
+	if reg.defaultProvider != "zen" || reg.defaultModel != slashyModel {
+		t.Errorf("provider/model = %s/%s, want zen/%s", reg.defaultProvider, reg.defaultModel, slashyModel)
+	}
+}
+
+// TestSwitchModel_UnknownProviderPrefixTreatedAsBareModelName confirms the
+// fix precisely: "x/y" only splits as provider/model when "x" is a real
+// configured provider — here "nonexistent" isn't one, so the whole string
+// is treated as a bare model name and correctly reported as not found
+// anywhere (not as "provider \"nonexistent\" not found").
+func TestSwitchModel_UnknownProviderPrefixTreatedAsBareModelName(t *testing.T) {
+	reg := newMockSwitchableRegistry("alpha", "a1", map[string][]string{"alpha": {"a1"}, "beta": {"b1"}})
+	mgr, sessionID := newTestManagerWithSwitchableRegistry(t, reg)
+
+	err := mgr.SwitchModel(context.Background(), sessionID, "nonexistent/some-model")
+	if err == nil {
+		t.Fatal("expected an error: neither provider nor model exist")
+	}
+	if strings.Contains(err.Error(), `provider "nonexistent" not found`) {
+		t.Fatalf("error should NOT treat \"nonexistent\" as a provider name, got %v", err)
+	}
+}
+
 func TestSwitchModel_EmptySessionIDSkipsMetadataButStillSwitches(t *testing.T) {
 	reg := newMockSwitchableRegistry("alpha", "a1", map[string][]string{"alpha": {"a1"}, "beta": {"b1"}})
 	mgr, _ := newTestManagerWithSwitchableRegistry(t, reg)

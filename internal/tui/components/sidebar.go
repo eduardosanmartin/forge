@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 )
 
@@ -171,16 +172,38 @@ func (m SidebarModel) RenderColumn() string {
 }
 
 // RenderColumnCapped renders as a permanent column hard-capped to EXACTLY
-// Height rows (2 border + 2 padding + content). lipgloss Height is only a
-// minimum, so overlong card content would overflow the box and clip the
-// footer — here overlong content is truncated and short content is padded,
-// keeping the rail exactly railHeight rows as the TUI frame accounts.
+// Height rows (2 border rows + content — no vertical padding, see below).
+// lipgloss Height is only a minimum, so overlong card content would
+// overflow the box and clip the footer — here overlong content is
+// truncated and short content is padded, keeping the rail exactly
+// railHeight rows as the TUI frame accounts.
+// Capping by logical line COUNT alone isn't enough: a line wider than the
+// available content width would still wrap to extra visual rows once
+// Width-constrained by the style below, silently exceeding Height by
+// however many lines wrapped (found via a card line like "(window %
+// unavailable via RPC — shows local turns)", 50 chars against a ~28-char
+// content width) — so every line is also truncated to that width first,
+// guaranteeing one logical line is always exactly one rendered row.
+// No vertical padding (only horizontal, for the text not to hug the
+// border) deliberately: the rail's true minimum height must match the
+// transcript viewport's own floor of 3 rows (SetSize) exactly, or a
+// terminal short enough to hit that floor would size the rail taller than
+// the transcript again — the exact frame-overflow bug this box style
+// caused before (2 border + 2 padding rows meant this box could never
+// render shorter than 5 rows, silently 2 more than the viewport's floor).
 func (m SidebarModel) RenderColumnCapped() string {
-	inner := m.Height - 4 // 2 border rows + 2 padding rows
+	inner := m.Height - 2 // 2 border rows only
 	if inner < 1 {
 		inner = 1
 	}
+	innerWidth := m.Width - 4 // 2 border cols + 2 padding cols
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
 	lines := strings.Split(m.renderContent(), "\n")
+	for i, l := range lines {
+		lines[i] = ansi.Truncate(l, innerWidth, "")
+	}
 	if len(lines) > inner {
 		lines = lines[:inner]
 	}
@@ -192,7 +215,7 @@ func (m SidebarModel) RenderColumnCapped() string {
 		BorderForeground(lipgloss.Color(m.Data.Palette.Border)).
 		Background(lipgloss.Color(m.Data.Palette.BGElevated)).
 		Width(m.Width).
-		Padding(1, 1)
+		Padding(0, 1)
 	return style.Render(strings.Join(lines, "\n"))
 }
 

@@ -271,8 +271,13 @@ func TestConfigPersistenceFailureShowsToast(t *testing.T) {
 	m.input.SetValue("/layout minimal")
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
-	if !strings.Contains(mm.Toast(), "disk full") {
-		t.Fatalf("toast should show save error, got %q", mm.Toast())
+	// Errors open the floating error panel (esc to close) instead of the
+	// footer toast — a raw error can be long and unreadable as one line.
+	if !mm.IsMessagePanelVisible() {
+		t.Fatal("save error should open the error panel")
+	}
+	if !strings.Contains(mm.MessagePanelText(), "disk full") {
+		t.Fatalf("error panel should show save error, got %q", mm.MessagePanelText())
 	}
 }
 
@@ -330,6 +335,9 @@ type fakeClient struct {
 	haltCalled    bool
 	haltReason    string
 	haltErr       error
+	haltAllCalled bool
+	haltAllReason string
+	haltAllErr    error
 	resumeCalled  bool
 	resumeErr     error
 	switchModel   string
@@ -372,6 +380,11 @@ func (f *fakeClient) HaltSession(sessionID, reason string) error {
 	f.haltCalled = true
 	f.haltReason = reason
 	return f.haltErr
+}
+func (f *fakeClient) HaltAll(reason string) error {
+	f.haltAllCalled = true
+	f.haltAllReason = reason
+	return f.haltAllErr
 }
 func (f *fakeClient) ResumeSession(sessionID string) error {
 	f.resumeCalled = true

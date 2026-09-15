@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/lipgloss/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
@@ -55,6 +56,22 @@ func TestM2_RailOnOffDistinct(t *testing.T) {
 	// rail off should be wider transcript (no rail border) but still have title/separator
 	if !strings.Contains(off, "forge") {
 		t.Fatal("rail off should still have title bar")
+	}
+}
+
+// TestRailVisible_InputSpansFullWidth confirms the input box always spans
+// the full frame width, matching the separator/footer above and below it —
+// not the rail-narrowed transcript width. Regression test: the input used
+// to get sized via effectiveTranscriptWidth() (same narrower width as the
+// transcript column beside the rail), leaving ~33 columns of the input row
+// unrepainted at a typical 80-col terminal — the rail's own background
+// color visibly bled into that gap since nothing else overwrote it.
+func TestRailVisible_InputSpansFullWidth(t *testing.T) {
+	m := newTestModel()
+	m.SetSize(80, 24)
+	m.showSidebar = true
+	if got := lipgloss.Width(m.input.View()); got != m.width {
+		t.Fatalf("input width = %d, want %d (full frame width) with the rail shown", got, m.width)
 	}
 }
 
@@ -106,11 +123,13 @@ func TestFooterHeight_NoClippingAtSmallHeight(t *testing.T) {
 		t.Fatalf("footer height %d too small", fh)
 	}
 	// Mirror SetSize accounting: title box + separator + input + measured
-	// footer + 1 toast-appearance headroom (no toast shown). No pending
-	// headroom: the spinner lives inside the footer bar.
-	transH := 20 - titleHeightRows - fh - 1 - 4 - 1
-	if transH < 5 {
-		transH = 5
+	// footer for the CURRENT toast state (no toast-appearance headroom —
+	// View() self-heals this sizing every render, see SetSize's doc
+	// comment). No pending headroom either: the spinner lives inside the
+	// footer bar.
+	transH := 20 - titleHeightRows - fh - 1 - inputAreaHeight
+	if transH < 3 {
+		transH = 3
 	}
 	if m.viewport.Height() != transH {
 		t.Fatalf("transcript height %d want %d (footer %d)", m.viewport.Height(), transH, fh)
@@ -385,7 +404,7 @@ func TestFooterClickOpensDropdownAndModelPanel(t *testing.T) {
 	m.configPath = cfgPath
 	m.rebuildTranscript()
 	footerH := m.measureFooterHeight(80)
-	footerTop := titleHeightRows + m.viewport.Height() + 1 + 4
+	footerTop := titleHeightRows + m.viewport.Height() + 1 + inputAreaHeight
 	// Click session hotspot (session zone below the copy zone)
 	mouseSession := tea.Mouse{X: 60, Y: footerTop + 1}
 	m.handleMouseClick(mouseSession)
@@ -499,6 +518,51 @@ func TestWorkingMarker_ShowsLiveElapsed(t *testing.T) {
 	}
 }
 
+// TestWorkingMarker_ShowsLiveTokenEstimate confirms the Working marker adds
+// an estimated token count ("7,0s · Nk tokens") once a streaming preview
+// has accumulated some text, and stays elapsed-only when there's no
+// streaming content to estimate from (matches the example in the request:
+// "◌ Working… (7,0s · 1,4k tokens)"). Asserted against the entry's Meta
+// directly rather than the rendered (scroll-windowed) view, which the long
+// streaming content used here would push out of frame.
+func TestWorkingMarker_ShowsLiveTokenEstimate(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-tokens"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Now())
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	workingMeta := func(mm Model) string {
+		for _, e := range mm.Entries() {
+			if e.Role == "user" && strings.HasPrefix(e.Meta, workingMarker) {
+				return e.Meta
+			}
+		}
+		return ""
+	}
+
+	// No streaming content yet: elapsed alone, same as before this feature.
+	fc.Advance(7000 * time.Millisecond)
+	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
+	mm = model.(Model)
+	if got := workingMeta(mm); got != workingMarker+" (7,0s)" {
+		t.Fatalf("no streaming content yet: meta = %q, want %q", got, workingMarker+" (7,0s)")
+	}
+
+	// A streaming preview lands with some accumulated text.
+	mm.entries = append(mm.entries, components.Entry{Role: "assistant", Content: strings.Repeat("hola ", 100), Streaming: true})
+	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
+	mm = model.(Model)
+	got := workingMeta(mm)
+	if !strings.HasPrefix(got, workingMarker+" (7,0s · ") || !strings.HasSuffix(got, "tokens)") {
+		t.Fatalf("streaming content present: meta = %q, want an estimated token count next to elapsed", got)
+	}
+}
+
 // ---------- 8. Retest-4: title bar box, selection default, Working marker ----------
 
 func TestTitleBarBoxedLikeFooter(t *testing.T) {
@@ -543,7 +607,9 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 		t.Fatal("view should show Working marker next to the sent message")
 	}
 	// Turn completes after 33,5s with 1345 tokens: the user message keeps
-	// "33,5s :: 1,345 tokens" instead of the marker.
+	// "33,5s · 1,345 tokens" instead of the marker; the final assistant
+	// reply carries the turn summary "elapsed · N tokens" (no model here —
+	// m.currentModel is unset in this test).
 	fc.Advance(33500 * time.Millisecond)
 	res := &daemon.ExecuteTurnResult{
 		Messages: []daemon.MessageResult{
@@ -555,19 +621,26 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
 	mm = model.(Model)
 	foundStats := false
+	foundSummary := false
 	for _, e := range mm.Entries() {
 		if e.Meta == workingMarker {
 			t.Fatalf("Working marker should be finalized after turn, entries = %+v", mm.Entries())
 		}
-		if e.Role == "user" && e.Meta == "33,5s :: 1,345 tokens" {
+		if e.Role == "user" && e.Meta == "33,5s · 1,345 tokens" {
 			foundStats = true
 		}
-		if e.Role == "assistant" && e.Meta == "tokens 1345 · 33,5s" && !e.Summary {
-			t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
+		if e.Role == "assistant" && e.Meta == "33.5s · 1,3k tokens" {
+			if !e.Summary {
+				t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
+			}
+			foundSummary = true
 		}
 	}
 	if !foundStats {
 		t.Fatalf("user message should keep turn stats, entries = %+v", mm.Entries())
+	}
+	if !foundSummary {
+		t.Fatalf("assistant reply should carry the turn summary, entries = %+v", mm.Entries())
 	}
 }
 
@@ -647,14 +720,19 @@ func TestWatchdog_HaltsGhostTurn(t *testing.T) {
 	m.turnStart = fclk.Now()
 	m.lastDaemonMsg = fclk.Now()
 	m.entries = []components.Entry{{Role: "user", Content: "hi"}}
-	fclk.Advance(241 * time.Second)
+	fclk.Advance(watchdogSilence + time.Second)
 	model, cmd := m.Update(spinner.TickMsg{Time: fclk.Now(), ID: m.spinnerModel.ID()})
 	mm := model.(Model)
 	if cmd == nil {
-		t.Fatal("watchdog should fire ghost protocol after 4m of silence")
+		t.Fatal("watchdog should fire ghost protocol after watchdogSilence")
 	}
-	if !strings.Contains(mm.Toast(), "ghost") {
-		t.Fatalf("toast should name the ghost turn, got %q", mm.Toast())
+	// A real ghost-turn halt opens the message panel (item 11), not a
+	// toast that can be missed below the input.
+	if !mm.IsMessagePanelVisible() || mm.MessagePanelKind() != "error" {
+		t.Fatalf("expected an error message panel naming the ghost turn, visible=%v kind=%q", mm.IsMessagePanelVisible(), mm.MessagePanelKind())
+	}
+	if !strings.Contains(mm.MessagePanelText(), "ghost") {
+		t.Fatalf("message panel should name the ghost turn, got %q", mm.MessagePanelText())
 	}
 	// Execute the protocol like tea does: halt + refetch, then feed back.
 	var runCmd func(c tea.Cmd)
@@ -697,11 +775,13 @@ func TestWatchdog_SuppressedWhileToolRuns(t *testing.T) {
 	m.turnStart = fclk.Now()
 	m.lastDaemonMsg = fclk.Now()
 	m.pendingTools["call-1"] = pendingTool{name: "shell_exec"}
-	fclk.Advance(600 * time.Second)
+	// Well past watchdogSilence: proves suppression actually matters here,
+	// not just that this much time happens to be under the threshold.
+	fclk.Advance(watchdogSilence * 2)
 	model, _ := m.Update(spinner.TickMsg{Time: fclk.Now(), ID: m.spinnerModel.ID()})
 	mm := model.(Model)
-	if strings.Contains(mm.Toast(), "ghost") {
-		t.Fatalf("watchdog must not halt a turn with a running tool, toast %q", mm.Toast())
+	if mm.IsMessagePanelVisible() {
+		t.Fatalf("watchdog must not halt a turn with a running tool, message panel text %q", mm.MessagePanelText())
 	}
 	if !mm.IsSpinner() {
 		t.Fatal("spinner must survive while a tool runs")
@@ -850,7 +930,7 @@ func TestFooterClickCopy(t *testing.T) {
 	old := copyText
 	copyText = func(s string) error { got = s; return nil }
 	defer func() { copyText = old }()
-	footerTop := titleHeightRows + m.viewport.Height() + 1 + 4
+	footerTop := titleHeightRows + m.viewport.Height() + 1 + inputAreaHeight
 	m.handleMouseClick(tea.Mouse{X: 75, Y: footerTop + 1})
 	if got != "copy me" {
 		t.Fatalf("footer [copiar] click should copy last response, got %q", got)
@@ -900,7 +980,10 @@ func TestOverlay_SessionsDropdownInFrame(t *testing.T) {
 func TestOverlay_ModelPanelInFrame(t *testing.T) {
 	m := newTestModel()
 	m.SetSize(80, 24)
-	m.modelPanelList = []string{"m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"}
+	m.modelPanelList = []modelPanelEntry{
+		{Provider: "p", Model: "m1"}, {Provider: "p", Model: "m2"}, {Provider: "p", Model: "m3"}, {Provider: "p", Model: "m4"},
+		{Provider: "p", Model: "m5"}, {Provider: "p", Model: "m6"}, {Provider: "p", Model: "m7"}, {Provider: "p", Model: "m8"},
+	}
 	m.modelPanelIdx = 7
 	m.modelPanelVisible = true
 	m.rebuildTranscript()

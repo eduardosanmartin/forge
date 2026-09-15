@@ -286,17 +286,30 @@ func TestModelPanel_OpenListFromConfigNavigateSelect(t *testing.T) {
 	if !mm.IsModelPanelVisible() {
 		t.Fatal("/model should open model panel")
 	}
+	// Entries are grouped by provider (sorted by name) and always carry
+	// their provider — "ollama" < "remote" alphabetically, so ollama's
+	// models (in their declared config order) come first, then remote's.
+	// No more "current model pinned to index 0": every entry already
+	// names its own provider, which is what actually prevents ambiguity
+	// (items 13/14/15), not list position.
 	list := mm.ModelPanelList()
-	if len(list) < 3 {
-		t.Fatalf("model list should contain at least 3 models from config, got %v", list)
+	want := []string{"ollama/qwen2.5-coder:7b", "ollama/llama3:8b", "remote/gpt-4", "remote/gpt-3.5"}
+	if len(list) != len(want) {
+		t.Fatalf("model list = %v, want %v", list, want)
 	}
-	if list[0] != "qwen2.5-coder:7b" {
-		t.Fatalf("current model should be first in list, got %v", list)
+	for i, w := range want {
+		if list[i] != w {
+			t.Fatalf("model list[%d] = %q, want %q (full list %v)", i, list[i], w, list)
+		}
 	}
-	// Check view contains model panel and deferred note
+	// Check view contains model panel, provider group headers, and the
+	// deferred note.
 	view := mm.View().Content
 	if !strings.Contains(view, "Select Model") {
 		t.Fatalf("view should contain model panel")
+	}
+	if !strings.Contains(view, "ollama") || !strings.Contains(view, "remote") {
+		t.Fatal("view should show both provider group headers")
 	}
 	if !strings.Contains(view, "plugin-providers not listed") {
 		t.Fatalf("panel should document plugin-providers deferred")
@@ -306,6 +319,12 @@ func TestModelPanel_OpenListFromConfigNavigateSelect(t *testing.T) {
 	mm = model.(Model)
 	if mm.ModelPanelIdx() != 1 {
 		t.Fatalf("down should go to 1, got %d", mm.ModelPanelIdx())
+	}
+	// The cursor has moved off index 0 (the current model): its "●"
+	// marker should now render unselected instead of being overwritten by
+	// the "▶" cursor styling that showed there at open time.
+	if !strings.Contains(mm.View().Content, "●") {
+		t.Fatal("the current model should be marked in its group once the cursor moves off it")
 	}
 	model, _ = mm.Update(keyPress("down"))
 	mm = model.(Model)
@@ -371,7 +390,10 @@ func TestModelPanel_OpenListFromConfigNavigateSelect(t *testing.T) {
 }
 
 func TestModelPanel_ListFromConfigTempFixture(t *testing.T) {
-	// Verify list reading honors currentModel first
+	// A single provider's models keep their declared config order (no
+	// reordering to put the current model first — every entry already
+	// carries its own provider, qualified on selection, so list position
+	// no longer matters for disambiguation).
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.json")
 	content := `{"providers":{"p1":{"kind":"openai-compatible","base_url":"http://a/v1","models":["m1","m2"]}}}`
@@ -384,10 +406,57 @@ func TestModelPanel_ListFromConfigTempFixture(t *testing.T) {
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
 	list := mm.ModelPanelList()
-	if len(list) == 0 || list[0] != "m2" {
-		t.Fatalf("current model first, got %v", list)
+	want := []string{"p1/m1", "p1/m2"}
+	if len(list) != len(want) || list[0] != want[0] || list[1] != want[1] {
+		t.Fatalf("model list = %v, want %v", list, want)
 	}
 	// Ensure marshaled config is valid JSON with unknown keys preserved? Not needed
 	_ = json.RawMessage{}
 	_ = fmt.Sprintf
+}
+
+// TestModelPanel_SelectingAmbiguousModelNameSubmitsQualifiedForm
+// reproduces the live report exactly: "minimax-m3" declared under both
+// "go" and "zen". The bare name is genuinely ambiguous (the daemon can't
+// guess which provider), but the panel lists both as SEPARATE, qualified
+// entries — so selecting either one, from the list, must submit
+// "go/minimax-m3" or "zen/minimax-m3", never the bare "minimax-m3" that
+// would trigger the daemon's ambiguity error.
+func TestModelPanel_SelectingAmbiguousModelNameSubmitsQualifiedForm(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	content := `{"providers":{"go":{"kind":"openai-compatible","base_url":"http://a/v1","models":["minimax-m3","glm-5.3"]},"zen":{"kind":"openai-compatible","base_url":"http://b/v1","models":["minimax-m3"]}}}`
+	_ = os.WriteFile(p, []byte(content), 0644)
+	m := newTestModel()
+	m.configPath = p
+	m.sessionID = "sess-xyz"
+	fc := &fakeClient{}
+	m.SetClient(fc)
+	m.SetSize(80, 24)
+	m.input.SetValue("/model")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	list := mm.ModelPanelList()
+	want := []string{"go/minimax-m3", "go/glm-5.3", "zen/minimax-m3"}
+	if len(list) != len(want) {
+		t.Fatalf("model list = %v, want %v", list, want)
+	}
+	for i, w := range want {
+		if list[i] != w {
+			t.Fatalf("model list[%d] = %q, want %q (full list %v)", i, list[i], w, list)
+		}
+	}
+
+	// Select the SECOND "minimax-m3" (zen's, index 2) and confirm the
+	// qualified form is what actually gets submitted.
+	mm.modelPanelIdx = 2
+	_, cmd := mm.Update(keyPress("enter"))
+	if cmd == nil {
+		t.Fatal("enter should return a switch-model command")
+	}
+	cmd()
+	if fc.switchModel != "zen/minimax-m3" {
+		t.Fatalf("switchModel = %q, want the qualified \"zen/minimax-m3\" (never the bare, ambiguous name)", fc.switchModel)
+	}
 }
