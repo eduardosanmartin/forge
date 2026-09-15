@@ -45,6 +45,14 @@ type fallbackEntry struct {
 	model    string
 }
 
+// defaultCooldown is how long a provider/model stays skipped by
+// ResolveAttempts after a retryable failure when the failure carried no
+// Retry-After header. Deliberately short: the point is to stop hammering a
+// model that just failed on every single turn, not to lock it out for an
+// operator-visible amount of time — 30s covers a typical rate-limit blip
+// without meaningfully delaying recovery once the provider is healthy again.
+const defaultCooldown = 30 * time.Second
+
 // Registry manages multiple LLM providers and supports hot-swapping the default model.
 type Registry struct {
 	providers       map[string]Provider
@@ -62,6 +70,16 @@ type Registry struct {
 	// Config.Validate() is the strict gate; a config that somehow reached
 	// here without validation degrades gracefully instead of panicking.
 	fallbackChain []fallbackEntry
+	// cooldowns holds "provider/model" -> until, for entries ResolveAttempts
+	// should skip because they failed retryably too recently (see
+	// RecordFailure). Read/written under mu like everything else here;
+	// lazily checked on each call, never swept by a background timer, so an
+	// entry that's expired just stops affecting anything the next time
+	// ResolveAttempts reads it.
+	cooldowns map[string]time.Time
+	// clock is time.Now by default; overridable in tests so cooldown
+	// expiry can be exercised deterministically without a real sleep.
+	clock func() time.Time
 }
 
 // New creates a new Registry from configuration.
@@ -82,6 +100,8 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 		defaultModel:    "",
 		allowedHosts:    allowedHosts,
 		logger:          logger,
+		cooldowns:       make(map[string]time.Time),
+		clock:           time.Now,
 	}
 
 	// Build providers
@@ -413,14 +433,120 @@ func (r *Registry) Close() error {
 	return errors.Join(errs...)
 }
 
-// ChatWithFallback sends req against the default provider/model exactly like
-// Chat; on a RetryableError (rate limit, transient upstream outage, network
-// timeout — see IsRetryable) it walks config.FallbackChain in order, one
-// attempt per entry, until one succeeds or the chain runs out. A
-// non-retryable failure — from the default OR from any chain entry — stops
-// immediately without trying what's left: swapping models can't fix a
-// malformed request or an auth failure, so continuing would just burn
-// attempts on a copy of the same broken call.
+// FallbackTarget is one resolved candidate a failover-aware call may try —
+// the live provider instance plus its name and model. Exposed (via
+// ResolveAttempts) for callers that must walk candidates themselves rather
+// than through ChatWithFallback: the streaming path
+// (agent.Agent.callLLMStreamWithFailover) can only tell a safe-to-retry
+// failure (nothing streamed to the caller yet) from a mid-stream one by
+// consuming the channel itself, something Registry has no part in, so it
+// hands over the resolved candidates and lets the caller report outcomes
+// back via RecordSuccess/RecordFailure.
+type FallbackTarget struct {
+	Provider     Provider
+	ProviderName string
+	Model        string
+}
+
+func attemptKey(providerName, model string) string {
+	return providerName + "/" + model
+}
+
+// ResolveAttempts returns the ordered candidates a failover-aware call
+// should try: the current default first, then each fallback_chain entry in
+// its configured order (skipping any whose provider is no longer
+// registered). An entry currently in cooldown from a recent retryable
+// failure (see RecordFailure) is skipped — UNLESS every candidate is
+// cooling, in which case cooldowns are ignored for this call entirely: a
+// single wrong or over-long Retry-After must never wedge every model, so
+// the fallback degrades to "try in order" rather than "have nothing left to
+// try." The default is whatever RecordSuccess last promoted (sticky), not
+// necessarily config.DefaultProvider — a successful fallback makes the
+// model that worked the new default for subsequent calls.
+func (r *Registry) ResolveAttempts() []FallbackTarget {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := make(map[string]bool, 1+len(r.fallbackChain))
+	all := make([]FallbackTarget, 0, 1+len(r.fallbackChain))
+	if p, ok := r.providers[r.defaultProvider]; ok && p != nil {
+		all = append(all, FallbackTarget{Provider: p, ProviderName: r.defaultProvider, Model: r.defaultModel})
+		seen[attemptKey(r.defaultProvider, r.defaultModel)] = true
+	}
+	for _, e := range r.fallbackChain {
+		// A sticky promotion (RecordSuccess) can turn a chain entry into the
+		// current default; skip it here rather than list it twice — the
+		// entry above already covers it.
+		key := attemptKey(e.provider, e.model)
+		if seen[key] {
+			continue
+		}
+		if p, ok := r.providers[e.provider]; ok {
+			all = append(all, FallbackTarget{Provider: p, ProviderName: e.provider, Model: e.model})
+			seen[key] = true
+		}
+	}
+
+	now := r.clock()
+	fresh := make([]FallbackTarget, 0, len(all))
+	for _, t := range all {
+		until, cooling := r.cooldowns[attemptKey(t.ProviderName, t.Model)]
+		if !cooling || !now.Before(until) {
+			fresh = append(fresh, t)
+		}
+	}
+	if len(fresh) == 0 {
+		return all
+	}
+	return fresh
+}
+
+// RecordSuccess marks providerName/model as the sticky default: later calls
+// go straight to it instead of re-trying whatever failed first. A no-op
+// beyond clearing its cooldown when it's already the default. Called after
+// every successful attempt in ChatWithFallback/callLLMStreamWithFailover,
+// including the very first one, so a plain, always-succeeding default just
+// keeps re-confirming itself at negligible cost (a map delete and two
+// string comparisons under the existing lock).
+func (r *Registry) RecordSuccess(providerName, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cooldowns, attemptKey(providerName, model))
+	if r.defaultProvider == providerName && r.defaultModel == model {
+		return
+	}
+	r.defaultProvider = providerName
+	r.defaultModel = model
+	r.logger.Warn("fallback promoted to sticky default", "provider", providerName, "model", model)
+}
+
+// RecordFailure puts providerName/model into cooldown after a retryable
+// failure, so ResolveAttempts skips it for a while instead of offering it
+// again on every subsequent call. Uses the failure's Retry-After when the
+// provider sent one (RetryAfterOf), otherwise defaultCooldown. Callers must
+// only call this for a failure that IsRetryable — a non-retryable one
+// (bad request, auth) isn't transient, so cooling down wouldn't help and
+// would just needlessly hide the model from ResolveAttempts.
+func (r *Registry) RecordFailure(providerName, model string, err error) {
+	d := RetryAfterOf(err)
+	if d <= 0 {
+		d = defaultCooldown
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cooldowns[attemptKey(providerName, model)] = r.clock().Add(d)
+}
+
+// ChatWithFallback sends req against ResolveAttempts' first candidate
+// (normally the default, sticky-adjusted); on a RetryableError (rate limit,
+// transient upstream outage, network timeout — see IsRetryable) it walks
+// the remaining candidates in order, one attempt per entry, until one
+// succeeds or they run out. A non-retryable failure — from the first
+// candidate OR from any later one — stops immediately without trying
+// what's left: swapping models can't fix a malformed request or an auth
+// failure, so continuing would just burn attempts on a copy of the same
+// broken call. A successful attempt is recorded via RecordSuccess (sticky
+// promotion); a retryable failure via RecordFailure (cooldown).
 //
 // With no fallback_chain configured (the default — this method is opt-in
 // exactly like the config field), a single failure returns immediately,
@@ -430,87 +556,43 @@ func (r *Registry) Close() error {
 // so the daemon log shows the whole chain that was tried, not just the last
 // failure.
 func (r *Registry) ChatWithFallback(ctx context.Context, req ChatRequest) (ChatResponse, error) {
-	r.mu.RLock()
-	defaultProvider := r.providers[r.defaultProvider]
-	defaultProviderName := r.defaultProvider
-	defaultModel := r.defaultModel
-	chain := r.fallbackChain
-	r.mu.RUnlock()
-
-	if defaultProvider == nil {
+	attempts := r.ResolveAttempts()
+	if len(attempts) == 0 {
 		return ChatResponse{}, errors.New("no default provider available")
 	}
 
+	first := attempts[0]
 	firstReq := req
-	if firstReq.Model == "" {
-		firstReq.Model = defaultModel
-	}
-	resp, err := defaultProvider.Chat(ctx, firstReq)
+	firstReq.Model = first.Model
+	resp, err := first.Provider.Chat(ctx, firstReq)
 	if err == nil {
+		r.RecordSuccess(first.ProviderName, first.Model)
 		return resp, nil
 	}
-	if !IsRetryable(err) || len(chain) == 0 {
+	if !IsRetryable(err) || len(attempts) == 1 {
 		return resp, err
 	}
+	r.RecordFailure(first.ProviderName, first.Model, err)
 
-	errs := []error{fmt.Errorf("%s/%s: %w", defaultProviderName, firstReq.Model, err)}
-	for _, entry := range chain {
-		r.mu.RLock()
-		p := r.providers[entry.provider]
-		r.mu.RUnlock()
-		if p == nil {
-			// Registered after construction time then removed, or a race
-			// with RegisterProvider — skip rather than fail the whole chain.
-			errs = append(errs, fmt.Errorf("%s/%s: provider no longer registered", entry.provider, entry.model))
-			continue
-		}
-
+	errs := []error{fmt.Errorf("%s/%s: %w", first.ProviderName, first.Model, err)}
+	for _, target := range attempts[1:] {
 		fbReq := req
-		fbReq.Model = entry.model
-		fbResp, fbErr := p.Chat(ctx, fbReq)
+		fbReq.Model = target.Model
+		fbResp, fbErr := target.Provider.Chat(ctx, fbReq)
 		if fbErr == nil {
+			r.RecordSuccess(target.ProviderName, target.Model)
 			r.logger.Warn("fell back to next model in fallback_chain",
-				"from_provider", defaultProviderName, "from_model", firstReq.Model,
-				"to_provider", entry.provider, "to_model", entry.model)
+				"from_provider", first.ProviderName, "from_model", first.Model,
+				"to_provider", target.ProviderName, "to_model", target.Model)
 			return fbResp, nil
 		}
-		errs = append(errs, fmt.Errorf("%s/%s: %w", entry.provider, entry.model, fbErr))
+		errs = append(errs, fmt.Errorf("%s/%s: %w", target.ProviderName, target.Model, fbErr))
 		if !IsRetryable(fbErr) {
 			break
 		}
+		r.RecordFailure(target.ProviderName, target.Model, fbErr)
 	}
 	return ChatResponse{}, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
-}
-
-// FallbackTarget is one resolved step of the configured fallback_chain — the
-// live provider instance plus its name and model. Exposed for callers that
-// must walk the chain themselves rather than through ChatWithFallback: the
-// streaming path (agent.Agent.callLLMStreamWithFailover) can only tell a
-// safe-to-retry failure (nothing streamed to the caller yet) from a
-// mid-stream one by consuming the channel itself, something Registry has no
-// part in, so it hands over the resolved targets instead of the decision.
-type FallbackTarget struct {
-	Provider     Provider
-	ProviderName string
-	Model        string
-}
-
-// FallbackChain returns the resolved provider/model steps of the configured
-// fallback_chain, in order, skipping any entry whose provider is no longer
-// registered. Empty when no fallback_chain is configured or every entry was
-// dropped at construction (malformed, or names an unconfigured provider).
-func (r *Registry) FallbackChain() []FallbackTarget {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]FallbackTarget, 0, len(r.fallbackChain))
-	for _, e := range r.fallbackChain {
-		p, ok := r.providers[e.provider]
-		if !ok {
-			continue
-		}
-		out = append(out, FallbackTarget{Provider: p, ProviderName: e.provider, Model: e.model})
-	}
-	return out
 }
 
 // Chat sends a chat request using the default provider and model.

@@ -66,16 +66,20 @@ type chatFailover interface {
 	ChatWithFallback(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
 }
 
-// fallbackChainSource matches LLM registries that expose the resolved
-// fallback_chain (llm.Registry via llm.Registry.FallbackChain) for the
-// streaming path to walk directly — see callLLMStreamWithFailover. Streaming
-// can't use chatFailover/ChatWithFallback itself: that method only sees a
-// synchronous request/response, but a streaming failure must be classified
-// as pre-first-token (safe to retry) or mid-stream (already shown to the
+// fallbackAttemptsSource matches LLM registries that expose sticky+cooldown
+// failover bookkeeping (llm.Registry, via ResolveAttempts/RecordSuccess/
+// RecordFailure) for the streaming path to drive directly — see
+// callLLMStreamWithFailover. Streaming can't use chatFailover/
+// ChatWithFallback itself: that method only sees a synchronous
+// request/response, but a streaming failure must be classified as
+// pre-first-token (safe to retry) or mid-stream (already shown to the
 // caller, must not retry) by consuming the channel, which only the caller
-// of ChatStream can do.
-type fallbackChainSource interface {
-	FallbackChain() []llm.FallbackTarget
+// of ChatStream can do — so the streaming path walks the same resolved
+// candidates and reports its own outcomes back into the registry.
+type fallbackAttemptsSource interface {
+	ResolveAttempts() []llm.FallbackTarget
+	RecordSuccess(providerName, model string)
+	RecordFailure(providerName, model string, err error)
 }
 
 // TurnOptions controls optional per-turn behavior (additive, backward compatible).
@@ -611,7 +615,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	return result, result.Error
 }
 
-// callLLMStreamWithFailover wraps callLLMStream with the same fallback_chain
+// callLLMStreamWithFailover wraps callLLMStream with the same sticky+cooldown
 // walk as Registry.ChatWithFallback, restricted to failures that happen
 // before any token reaches the caller (ttftMs == 0): once onDelta has fired
 // once, the caller has already been shown partial output, and silently
@@ -619,10 +623,13 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 // so a mid-stream failure (ttftMs > 0) always stops here, exactly like plain
 // callLLMStream. A pre-first-token failure is indistinguishable in effect
 // from a non-streaming failure (nothing shown yet), so it's retried the same
-// way: only on IsRetryable, one chain entry at a time, stopping immediately
-// on a non-retryable error or once the chain is exhausted. Requires the
-// registry to implement fallbackChainSource; without it this degrades to a
-// single callLLMStream attempt (mirrors chatFailover's degrade behavior).
+// way: only on IsRetryable, one candidate at a time (from ResolveAttempts,
+// so cooldown/sticky state is shared with the non-streaming path), stopping
+// immediately on a non-retryable error or once candidates are exhausted.
+// Requires the registry to implement fallbackAttemptsSource; without it (or
+// with no candidates resolved) this degrades to a single callLLMStream
+// attempt against the caller-supplied default (mirrors chatFailover's
+// degrade behavior).
 func (a *Agent) callLLMStreamWithFailover(ctx context.Context, defaultProvider llm.Provider, defaultModel string, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
 	attempt := func(provider llm.Provider, model string) (llm.ChatResponse, int64, error) {
 		attemptReq := req
@@ -637,21 +644,33 @@ func (a *Agent) callLLMStreamWithFailover(ctx context.Context, defaultProvider l
 		return resp, ttftMs, err
 	}
 
-	resp, ttftMs, err := attempt(defaultProvider, defaultModel)
-	if err == nil || ttftMs > 0 || !llm.IsRetryable(err) {
-		return resp, ttftMs, err
-	}
-	chainSrc, ok := a.llmReg.(fallbackChainSource)
+	src, ok := a.llmReg.(fallbackAttemptsSource)
 	if !ok {
-		return resp, ttftMs, err
+		return attempt(defaultProvider, defaultModel)
+	}
+	attempts := src.ResolveAttempts()
+	if len(attempts) == 0 {
+		return attempt(defaultProvider, defaultModel)
 	}
 
-	errs := []error{fmt.Errorf("default/%s: %w", defaultModel, err)}
-	for _, target := range chainSrc.FallbackChain() {
+	first := attempts[0]
+	resp, ttftMs, err := attempt(first.Provider, first.Model)
+	if err == nil {
+		src.RecordSuccess(first.ProviderName, first.Model)
+		return resp, ttftMs, nil
+	}
+	if ttftMs > 0 || !llm.IsRetryable(err) || len(attempts) == 1 {
+		return resp, ttftMs, err
+	}
+	src.RecordFailure(first.ProviderName, first.Model, err)
+
+	errs := []error{fmt.Errorf("%s/%s: %w", first.ProviderName, first.Model, err)}
+	for _, target := range attempts[1:] {
 		fbResp, fbTTFT, fbErr := attempt(target.Provider, target.Model)
 		if fbErr == nil {
+			src.RecordSuccess(target.ProviderName, target.Model)
 			a.logger.Warn("fell back to next model in fallback_chain (streaming)",
-				"from_model", defaultModel,
+				"from_provider", first.ProviderName, "from_model", first.Model,
 				"to_provider", target.ProviderName, "to_model", target.Model)
 			return fbResp, fbTTFT, nil
 		}
@@ -659,6 +678,7 @@ func (a *Agent) callLLMStreamWithFailover(ctx context.Context, defaultProvider l
 		if fbTTFT > 0 || !llm.IsRetryable(fbErr) {
 			return llm.ChatResponse{}, fbTTFT, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
 		}
+		src.RecordFailure(target.ProviderName, target.Model, fbErr)
 	}
 	return llm.ChatResponse{}, 0, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
 }

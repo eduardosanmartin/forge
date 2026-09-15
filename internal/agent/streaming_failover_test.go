@@ -32,12 +32,21 @@ func (p *preChannelFailProvider) ListModels() ([]string, error) { return nil, ni
 func (p *preChannelFailProvider) Close() error                  { return nil }
 
 // streamFailoverRegistry implements LLMRegistryInterface plus
-// fallbackChainSource so ExecuteTurn's streaming path can exercise
+// fallbackAttemptsSource so ExecuteTurn's streaming path can exercise
 // callLLMStreamWithFailover end to end, the way llm.Registry does for real.
+// It doesn't model cooldown (that's covered at the llm.Registry level by
+// internal/llm's own tests) — just records what ResolveAttempts/
+// RecordSuccess/RecordFailure were called with, so a test can assert the
+// streaming path drives the same sticky-promotion contract as non-streaming.
 type streamFailoverRegistry struct {
-	defaultProvider llm.Provider
-	defaultModel    string
-	chain           []llm.FallbackTarget
+	defaultProvider     llm.Provider
+	defaultProviderName string
+	defaultModel        string
+	chain               []llm.FallbackTarget
+
+	promotedProvider string
+	promotedModel    string
+	failedKeys       []string
 }
 
 func (r *streamFailoverRegistry) GetDefault() (llm.Provider, string) {
@@ -46,7 +55,17 @@ func (r *streamFailoverRegistry) GetDefault() (llm.Provider, string) {
 func (r *streamFailoverRegistry) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	return r.defaultProvider.Chat(ctx, req)
 }
-func (r *streamFailoverRegistry) FallbackChain() []llm.FallbackTarget { return r.chain }
+func (r *streamFailoverRegistry) ResolveAttempts() []llm.FallbackTarget {
+	all := make([]llm.FallbackTarget, 0, 1+len(r.chain))
+	all = append(all, llm.FallbackTarget{Provider: r.defaultProvider, ProviderName: r.defaultProviderName, Model: r.defaultModel})
+	return append(all, r.chain...)
+}
+func (r *streamFailoverRegistry) RecordSuccess(providerName, model string) {
+	r.promotedProvider, r.promotedModel = providerName, model
+}
+func (r *streamFailoverRegistry) RecordFailure(providerName, model string, err error) {
+	r.failedKeys = append(r.failedKeys, providerName+"/"+model)
+}
 
 // TestExecuteTurn_StreamingFailsOverBeforeFirstToken reproduces the exact
 // live-daemon scenario that motivated this test: the default provider's
@@ -66,8 +85,9 @@ func TestExecuteTurn_StreamingFailsOverBeforeFirstToken(t *testing.T) {
 	good := &streamingMockProvider{content: "hi from backup", finish: "stop"}
 
 	reg := &streamFailoverRegistry{
-		defaultProvider: broken,
-		defaultModel:    "broken-model",
+		defaultProvider:     broken,
+		defaultProviderName: "default",
+		defaultModel:        "broken-model",
 		chain: []llm.FallbackTarget{
 			{Provider: good, ProviderName: "backup", Model: "good-model"},
 		},
@@ -89,10 +109,16 @@ func TestExecuteTurn_StreamingFailsOverBeforeFirstToken(t *testing.T) {
 	if final != "hi from backup" {
 		t.Errorf("final content = %q, want \"hi from backup\"", final)
 	}
+	if len(reg.failedKeys) != 1 || reg.failedKeys[0] != "default/broken-model" {
+		t.Errorf("failedKeys = %v, want [\"default/broken-model\"] (RecordFailure on the broken default)", reg.failedKeys)
+	}
+	if reg.promotedProvider != "backup" || reg.promotedModel != "good-model" {
+		t.Errorf("promoted = %s/%s, want backup/good-model (RecordSuccess sticky promotion on the streaming path)", reg.promotedProvider, reg.promotedModel)
+	}
 }
 
 // TestExecuteTurn_StreamingNoFailoverWithoutChainSource confirms a registry
-// that only implements ChatStream (no fallbackChainSource) degrades to a
+// that only implements ChatStream (no fallbackAttemptsSource) degrades to a
 // single attempt — the pre-existing behavior for every registry built before
 // this feature.
 func TestExecuteTurn_StreamingNoFailoverWithoutChainSource(t *testing.T) {

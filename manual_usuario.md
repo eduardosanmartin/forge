@@ -31,6 +31,7 @@ Forge lee configuración en capas: **proyecto (`.forge/config.json`) > global (`
 {
   "schema_version": 3,
   "default_provider": "ollama",
+  "fallback_chain": ["openrouter/some-model"],
   "providers": {
     "ollama": {
       "kind": "openai-compatible",
@@ -71,6 +72,7 @@ Forge lee configuración en capas: **proyecto (`.forge/config.json`) > global (`
 - **`project.sensitivity`**: `general` | `regulado` | `datos-sensibles`. Es un techo (ceiling) que limita qué tan autónomo puede ser un run con manifiesto (RF-11) y activa el audit log tamper-evident (§13) cuando es `regulado` o `datos-sensibles`.
 - **`agent.max_turn_seconds`**: default 300s (5 min). Si tu modelo es local y lento, subilo.
 - **`providers.<name>.request_timeout_seconds`**: timeout HTTP para una llamada de chat completion a ese proveedor puntual. `0`/ausente cae al default de 900s (15 min) — el mismo valor fijo que antes se aplicaba a todos los proveedores por igual. Configuralo bajo (120-180) en un modelo local que sabés que responde rápido para que un turno colgado corte pronto en vez de bloquear la GUI en silencio 15 minutos; dejalo alto (o en el default) para un modelo remoto grande legítimamente lento.
+- **`fallback_chain`**: opt-in, lista ordenada de `"provider/model"` a la que un turno recurre si el default falla por una razón transitoria (rate limit, outage, timeout de red). Ver §11.3 para el detalle completo.
 
 ---
 
@@ -331,6 +333,33 @@ forge daemon set-provider go --model kimi-k3           # cambia el default, aunq
 ### 11.2 Routing por rol (`model_roles`)
 
 Con `--routing` (flag v1), el paso de generación principal de un turno normal puede resolver su modelo vía `providers.<name>.model_roles.generation` en vez del default fijo. Por separado, un `Task.model_hint` en un manifiesto (§10) resuelve `providers.<name>.model_roles.<hint>` y fija el modelo de esa tarea puntual — ambos caminos comparten la misma config `model_roles`. La infraestructura de routing (`internal/routing`) define además steps `classify`/`retrieve`/`summarize`/`validate`/`reason` para automatizar la elección de rol — hoy esos steps no hacen ninguna llamada a modelo (retrieval/compactación son determinísticos), así que no hay nada que enrutar ahí todavía; el rol de cada tarea sigue siendo una decisión explícita (a mano o del descomponedor de `--decompose`), no automática.
+
+### 11.3 Failover automático de modelo (`fallback_chain`)
+
+Por defecto, si el `default_provider`/modelo falla (rate limit, el proveedor está caído, timeout de red), el turno entero falla — el error llega tal cual al usuario. `fallback_chain` (opt-in, ausente por defecto) le da a forge una lista de respaldo a la que recurrir en ese caso, sin intervención manual:
+
+```json
+{
+  "default_provider": "go",
+  "fallback_chain": ["go/minimax-m3", "ollama/qwen2.5-coder:7b"]
+}
+```
+
+**Qué cuenta como "falla transitoria" (reintentable):** 429 (rate limit), 502/503/504 (outage del lado del proveedor), timeout de red o conexión rechazada. Todo lo demás — 400/401/403/404/500, un request malformado, una API key inválida — se considera permanente: cambiar de modelo no lo arregla, así que el turno falla inmediato sin gastar intentos en el resto de la cadena. Esta clasificación es automática (`internal/llm/retryable.go`), no configurable.
+
+**Orden de intentos:** primero el default actual, después cada entrada de `fallback_chain` en el orden declarado. Se prueba una por una; en cuanto una responde, ese es el resultado del turno. Cubre tanto turnos normales como streaming (`llm.streaming: true`) — un fallo *antes* de que llegue el primer token se trata igual que un fallo no-streaming (seguro reintentar); un fallo a mitad de stream (con texto parcial ya mostrado) nunca reintenta, para no mezclar dos respuestas a medias.
+
+**Sticky + cooldown (comportamiento automático, sin flags):**
+- Si un modelo de respaldo responde con éxito, se **promueve a default** — los turnos siguientes van directo ahí, sin volver a pagar el timeout/rechazo del que falló primero. Se ve en el log del daemon como `"fallback promoted to sticky default"`.
+- Un modelo que acaba de fallar de forma reintentable entra en **cooldown** (no se lo vuelve a ofrecer por un rato) — usa el `Retry-After` que mande el proveedor si vino, si no un default fijo de 30s. Si en algún momento *todos* los candidatos están en cooldown a la vez, forge ignora los cooldowns para ese intento en vez de fallar sin probar nada (un `Retry-After` mal calculado nunca debe dejar el turno sin ninguna opción).
+
+**Qué mirar en el log** (`daemon.log` o stdout de `forge serve`, nivel `WARN`):
+```
+fell back to next model in fallback_chain             from_provider=go from_model=minimax-m3 to_provider=ollama to_model=qwen2.5-coder:7b
+fallback promoted to sticky default                   provider=ollama model=qwen2.5-coder:7b
+```
+
+**Cuándo NO aplica:** un modelo pineado explícitamente — `spawn_subagent` con `provider`/`model`, un `Task.model_hint` de manifiesto, un modelo elegido por `--routing` — nunca usa `fallback_chain`: es una elección deliberada de esa llamada puntual, y sustituirla en silencio por otra cosa escondería el error en vez de respetar la intención. Solo el turno "plano" (sin override ni routing activo) usa failover.
 
 ---
 
