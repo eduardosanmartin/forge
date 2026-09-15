@@ -24,6 +24,7 @@ func newDaemonCommand() *cobra.Command {
 		Short: "Manage daemon settings",
 	}
 	cmd.AddCommand(newSetPasswordCommand())
+	cmd.AddCommand(newSetProviderCommand())
 	return cmd
 }
 

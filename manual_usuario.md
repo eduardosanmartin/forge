@@ -309,9 +309,26 @@ El turno de descomposición corre **sin acceso a tools** (a propósito: en una p
 
 ---
 
-## 11. Modelos, cambio en caliente y routing por costo (v1)
+## 11. Modelos, cambio de proveedor y routing por costo (v1)
 
-`session.switch_model` (o `/model <nombre>` en el REPL) cambia el modelo **default del daemon**, no solo el de la sesión actual — es una limitación conocida, no un bug: forge no trackea "proveedor por sesión", solo un string `model` en la metadata.
+`session.switch_model` (o `/model <nombre>` en el REPL) cambia el modelo **default del daemon**, no solo el de la sesión actual — es una limitación conocida, no un bug: forge no trackea "proveedor por sesión", solo un string `model` (y ahora `provider`) en la metadata.
+
+### 11.1 Cambiar de proveedor
+
+`/model` acepta dos formas:
+- **Nombre pelado** (`/model kimi-k3`): busca primero en el proveedor default actual (comportamiento de siempre); si no está ahí, busca en el catálogo cacheado de **todos** los demás proveedores (`ListAll`) — si aparece en exactamente uno, cambia provider+modelo juntos automáticamente; si aparece en más de uno, error explícito nombrando cada proveedor (usá la forma explícita para desambiguar); si no aparece en ninguno, el error de siempre.
+- **`provider/model` explícito** (`/model go/kimi-k3`, misma sintaxis que ya usa `forge fanout --models`): cambia ambos de una, sin ambigüedad posible, ganando siempre sobre la búsqueda automática.
+
+Para ver **todos los modelos que un proveedor realmente tiene** (no solo los declarados en `providers.<name>.models`) y elegir uno:
+- **REPL**: `/provider <name>` refresca en vivo el catálogo real del proveedor (pega contra su propio endpoint `/models`) y lista los modelos numerados; contestá con un número o el nombre para cambiar. `/provider` sin argumento lista los proveedores configurados.
+- **CLI no interactiva**: `forge daemon set-provider <name>` sin `--model` imprime el catálogo real y no cambia nada (para descubrir); con `--model` cambia el default del daemon directo, sin necesidad de sesión — afecta a toda sesión nueva a partir de ahí.
+
+```bash
+forge daemon set-provider go                          # lista el catálogo real (puede tener más modelos que los declarados en config)
+forge daemon set-provider go --model kimi-k3           # cambia el default, aunque kimi-k3 no esté en providers.go.models
+```
+
+### 11.2 Routing por rol (`model_roles`)
 
 Con `--routing` (flag v1), el paso de generación principal de un turno normal puede resolver su modelo vía `providers.<name>.model_roles.generation` en vez del default fijo. Por separado, un `Task.model_hint` en un manifiesto (§10) resuelve `providers.<name>.model_roles.<hint>` y fija el modelo de esa tarea puntual — ambos caminos comparten la misma config `model_roles`. La infraestructura de routing (`internal/routing`) define además steps `classify`/`retrieve`/`summarize`/`validate`/`reason` para automatizar la elección de rol — hoy esos steps no hacen ninguna llamada a modelo (retrieval/compactación son determinísticos), así que no hay nada que enrutar ahí todavía; el rol de cada tarea sigue siendo una decisión explícita (a mano o del descomponedor de `--decompose`), no automática.
 

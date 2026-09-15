@@ -69,6 +69,12 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleStatus(ctx, req)
 	case MethodSwitchModel:
 		return h.handleSwitchModel(ctx, req)
+	case MethodProviderList:
+		return h.handleProviderList(ctx, req)
+	case MethodProviderListModels:
+		return h.handleProviderListModels(ctx, req)
+	case MethodProviderSwitch:
+		return h.handleProviderSwitch(ctx, req)
 	case MethodSessionMarkSuccess:
 		return h.handleMarkSuccess(ctx, req)
 	case MethodPluginList:
@@ -584,6 +590,63 @@ func (h *Handler) handleSwitchModel(ctx context.Context, req *JSONRPCRequest) *J
 	}
 
 	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "model": params.Model})
+}
+
+func (h *Handler) handleProviderList(_ context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	providers, err := h.mgr.ListProviders()
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "list providers failed", err.Error())
+	}
+	out := make([]ProviderResult, len(providers))
+	for i, p := range providers {
+		out[i] = ProviderResult{Name: p.Name, Kind: p.Kind}
+	}
+	return h.resultResponse(req.ID, ProviderListResult{Providers: out})
+}
+
+func (h *Handler) handleProviderListModels(_ context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params ProviderListModelsParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Provider == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "provider is required", nil)
+	}
+	models, err := h.mgr.ListProviderModels(params.Provider)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "list provider models failed", err.Error())
+	}
+	return h.resultResponse(req.ID, ProviderListModelsResult{Provider: params.Provider, Models: models})
+}
+
+func (h *Handler) handleProviderSwitch(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params ProviderSwitchParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	// Unlike session.switch_model, session_id is OPTIONAL here: a caller
+	// with no session in play at all (forge daemon set-provider) still
+	// switches the daemon's default provider+model — it just skips
+	// recording the choice into any particular session's metadata.
+	if params.Provider == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "provider is required", nil)
+	}
+	if params.Model == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "model is required (use provider.list_models to discover one first)", nil)
+	}
+
+	spec := params.Provider + "/" + params.Model
+	if err := h.mgr.SwitchModel(ctx, params.SessionID, spec); err != nil {
+		switch {
+		case errors.Is(err, store.ErrSessionNotFound):
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+		case errors.As(err, new(*ModelUnavailableError)):
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, "model unavailable", err.Error())
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, "switch provider failed", err.Error())
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "provider": params.Provider, "model": params.Model})
 }
 
 func (h *Handler) handleMarkSuccess(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {

@@ -51,6 +51,33 @@ type ModelForStepSelector interface {
 	GetModelForStep(step routing.StepType) string
 }
 
+// chatFailover matches LLM registries that support automatic failover on a
+// retryable failure (llm.Registry implements it via its config-driven
+// fallback_chain — see llm.Registry.ChatWithFallback). Type-asserted rather
+// than added to LLMRegistryInterface so a registry without failover support
+// (test doubles, a future provider kind) just uses the plain resolved
+// provider directly, unchanged. Only applied on the plain-default
+// resolution path (see usingDefault in ExecuteTurnWithOptions) — an
+// explicit override (spawn_subagent provider/model, a manifest task's
+// model_hint, a routed step model) names one exact model on purpose, and
+// silently substituting a different one on failure would ignore that
+// choice instead of surfacing the error.
+type chatFailover interface {
+	ChatWithFallback(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
+}
+
+// fallbackChainSource matches LLM registries that expose the resolved
+// fallback_chain (llm.Registry via llm.Registry.FallbackChain) for the
+// streaming path to walk directly — see callLLMStreamWithFailover. Streaming
+// can't use chatFailover/ChatWithFallback itself: that method only sees a
+// synchronous request/response, but a streaming failure must be classified
+// as pre-first-token (safe to retry) or mid-stream (already shown to the
+// caller, must not retry) by consuming the channel, which only the caller
+// of ChatStream can do.
+type fallbackChainSource interface {
+	FallbackChain() []llm.FallbackTarget
+}
+
 // TurnOptions controls optional per-turn behavior (additive, backward compatible).
 //
 // StreamingEnabled enables the streaming path (ChatStream) when true. When false
@@ -290,8 +317,18 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		// override is user-directed and routes nothing further. Overrides
 		// are applied before the nil-provider check so a child pinned to a
 		// named provider still runs when the registry has no usable default.
+		// usingDefault tracks whether model resolution fell all the way
+		// through to "the registry's plain default" with no override or
+		// routing decision along the way — that's the ONLY case
+		// ChatWithFallback applies to below. An explicit pin (spawn_subagent
+		// provider/model, a manifest task's model_hint, or a routed step
+		// model) is deliberate caller intent: it names one exact model, and
+		// falling back to something else on failure would silently ignore
+		// that choice instead of surfacing the error.
+		usingDefault := true
 		if a.overrideProvider != nil {
 			provider = a.overrideProvider
+			usingDefault = false
 		}
 		if provider == nil {
 			result.Error = errors.New("no LLM provider available")
@@ -301,8 +338,10 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 		if opts.OverrideModel != "" {
 			model = opts.OverrideModel
+			usingDefault = false
 		} else if a.overrideModel != "" {
 			model = a.overrideModel
+			usingDefault = false
 		} else if routingEnabled {
 			// v1 routing: when the session flag is on and the registry can
 			// resolve step models, the main generation call uses the router's
@@ -316,6 +355,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			if sel, ok := a.llmReg.(ModelForStepSelector); ok {
 				if routed := sel.GetModelForStep(routing.StepGenerate); routed != "" {
 					model = routed
+					usingDefault = false
 				}
 			}
 		}
@@ -331,17 +371,37 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		var resp llm.ChatResponse
 		if opts.StreamingEnabled {
 			var ttftMs int64
-			resp, ttftMs, err = a.callLLMStream(ctx, provider, req, opts.OnDelta, llmStartTime)
-			if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
-				// Provider does not support streaming: exact Chat fallback (WU3).
-				// Only this sentinel may fallback; mid-stream failures (stream error) must fail the turn.
-				resp, err = provider.Chat(ctx, req)
-				ttftMs = 0
-			} else if ttftMs > 0 && firstTTFTMs == 0 {
+			if usingDefault {
+				// Same failover eligibility as the non-streaming path
+				// (usingDefault — see its comment above), but walked here
+				// rather than via chatFailover: only callLLMStreamWithFailover
+				// can tell a pre-first-token failure (safe to retry) from a
+				// mid-stream one (already shown to the caller, must not retry).
+				resp, ttftMs, err = a.callLLMStreamWithFailover(ctx, provider, model, req, opts.OnDelta, llmStartTime)
+			} else {
+				resp, ttftMs, err = a.callLLMStream(ctx, provider, req, opts.OnDelta, llmStartTime)
+				if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
+					// Provider does not support streaming: exact Chat fallback (WU3).
+					// Only this sentinel may fallback; mid-stream failures (stream error) must fail the turn.
+					resp, err = provider.Chat(ctx, req)
+					ttftMs = 0
+				}
+			}
+			if ttftMs > 0 && firstTTFTMs == 0 {
 				firstTTFTMs = ttftMs
 				RecordTTFT(ttftMs)
 				// Log TTFT for observability (best-effort).
 				a.logger.Debug("stream ttft", "session_id", sessionID, "ttft_ms", ttftMs, "iteration", iterationCount)
+			}
+		} else if usingDefault {
+			// Only the plain-default path gets failover — see usingDefault's
+			// comment above. A registry without ChatWithFallback support
+			// (e.g. a test double) falls through to the exact same call as
+			// before this feature existed.
+			if fo, ok := a.llmReg.(chatFailover); ok {
+				resp, err = fo.ChatWithFallback(ctx, req)
+			} else {
+				resp, err = provider.Chat(ctx, req)
 			}
 		} else {
 			resp, err = provider.Chat(ctx, req)
@@ -551,10 +611,64 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	return result, result.Error
 }
 
+// callLLMStreamWithFailover wraps callLLMStream with the same fallback_chain
+// walk as Registry.ChatWithFallback, restricted to failures that happen
+// before any token reaches the caller (ttftMs == 0): once onDelta has fired
+// once, the caller has already been shown partial output, and silently
+// restarting on a different model would splice two half-answers together —
+// so a mid-stream failure (ttftMs > 0) always stops here, exactly like plain
+// callLLMStream. A pre-first-token failure is indistinguishable in effect
+// from a non-streaming failure (nothing shown yet), so it's retried the same
+// way: only on IsRetryable, one chain entry at a time, stopping immediately
+// on a non-retryable error or once the chain is exhausted. Requires the
+// registry to implement fallbackChainSource; without it this degrades to a
+// single callLLMStream attempt (mirrors chatFailover's degrade behavior).
+func (a *Agent) callLLMStreamWithFailover(ctx context.Context, defaultProvider llm.Provider, defaultModel string, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
+	attempt := func(provider llm.Provider, model string) (llm.ChatResponse, int64, error) {
+		attemptReq := req
+		attemptReq.Model = model
+		resp, ttftMs, err := a.callLLMStream(ctx, provider, attemptReq, onDelta, startTime)
+		if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
+			// Provider does not support streaming: exact Chat fallback (WU3),
+			// same as the non-failover streaming path.
+			resp, err = provider.Chat(ctx, attemptReq)
+			ttftMs = 0
+		}
+		return resp, ttftMs, err
+	}
+
+	resp, ttftMs, err := attempt(defaultProvider, defaultModel)
+	if err == nil || ttftMs > 0 || !llm.IsRetryable(err) {
+		return resp, ttftMs, err
+	}
+	chainSrc, ok := a.llmReg.(fallbackChainSource)
+	if !ok {
+		return resp, ttftMs, err
+	}
+
+	errs := []error{fmt.Errorf("default/%s: %w", defaultModel, err)}
+	for _, target := range chainSrc.FallbackChain() {
+		fbResp, fbTTFT, fbErr := attempt(target.Provider, target.Model)
+		if fbErr == nil {
+			a.logger.Warn("fell back to next model in fallback_chain (streaming)",
+				"from_model", defaultModel,
+				"to_provider", target.ProviderName, "to_model", target.Model)
+			return fbResp, fbTTFT, nil
+		}
+		errs = append(errs, fmt.Errorf("%s/%s: %w", target.ProviderName, target.Model, fbErr))
+		if fbTTFT > 0 || !llm.IsRetryable(fbErr) {
+			return llm.ChatResponse{}, fbTTFT, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
+		}
+	}
+	return llm.ChatResponse{}, 0, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
+}
+
 // callLLMStream attempts streaming and assembles a ChatResponse.
 // On any mid-stream failure it returns an error and the caller must fail the turn
 // (documented contract: no fallback within the same turn; the next turn may be non-streaming).
-// Only ErrStreamingNotSupported before first token may fallback to Chat.
+// Only ErrStreamingNotSupported before first token may fallback to Chat — or, when called
+// through callLLMStreamWithFailover, a pre-first-token retryable failure may fall
+// to the next fallback_chain entry instead.
 // It returns TTFT (time-to-first-token) in milliseconds, 0 if no token was emitted.
 func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
 	streamer, ok := provider.(ChatStreamer)

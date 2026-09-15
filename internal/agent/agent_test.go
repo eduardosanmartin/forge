@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"sync"
 	"testing"
@@ -591,5 +592,5 @@ func (m *mockPermsEngine) Check(req perms.Request) perms.Decision {
 }
 
 func newTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(nil, nil))
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

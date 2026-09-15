@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -629,6 +631,26 @@ type routerProvider interface {
 	GetRouter() *routing.ModelRouter
 }
 
+// providerSwitcher matches registries that support hot-swapping the default
+// provider and model together (*llm.Registry does).
+type providerSwitcher interface {
+	SwitchProviderAndModel(provider, model string) error
+}
+
+// allModelsLister matches registries that can enumerate every model across
+// every configured provider — used by SwitchModel's bare-name fallback to
+// find which OTHER provider (if any) has a model not in the current one.
+type allModelsLister interface {
+	ListAll() []llm.ModelInfo
+}
+
+// providerLister matches registries that support discovering configured
+// providers and, per provider, a live (freshly refreshed) model catalog.
+type providerLister interface {
+	ListProviders() []llm.ProviderInfo
+	ListProviderModels(name string) ([]string, error)
+}
+
 // MarkSuccess marks a session as human-verified successful (RF-4.4 input gate).
 // It sets session metadata "success"=true via the store's merge semantics.
 func (m *SessionManager) MarkSuccess(ctx context.Context, sessionID string) error {
@@ -641,24 +663,134 @@ func (m *SessionManager) MarkSuccess(ctx context.Context, sessionID string) erro
 	return nil
 }
 
-// SwitchModel hot-swaps the daemon's default model and records the choice in
-// the session metadata under the "model" key. It fails if the session does
-// not exist or the registry rejects the model.
-func (m *SessionManager) SwitchModel(ctx context.Context, sessionID, model string) error {
-	if _, err := m.store.GetSession(ctx, sessionID); err != nil {
-		return fmt.Errorf("switch model: %w", err)
+// SwitchModel hot-swaps the daemon's default model and, when sessionID is
+// non-empty, records the choice in that session's metadata under the
+// "model" key (and "provider" when a provider switch happened too). An
+// empty sessionID skips both the session-existence check and the metadata
+// write — the registry-level switch (the part that actually matters: every
+// future session picks up the new default) still happens, for callers with
+// no session in play at all (forge daemon set-provider). A non-empty
+// sessionID that doesn't exist still fails, exactly as before.
+//
+// modelSpec accepts two forms:
+//   - "provider/model" (matching forge fanout --models' own syntax) switches
+//     BOTH the default provider and model atomically, validated against that
+//     provider's live catalog (llm.Registry.SwitchProviderAndModel) — this
+//     works even for a model that isn't declared in providers.<name>.models,
+//     since the live catalog comes from the provider's own /models endpoint.
+//   - a bare "model" name first tries the current default provider
+//     (unchanged pre-existing behavior). If not found there, every OTHER
+//     configured provider's cached catalog (llm.Registry.ListAll) is
+//     searched: exactly one match elsewhere switches provider+model
+//     automatically; more than one is reported as an ambiguity error naming
+//     every provider that has it (use "provider/model" to disambiguate);
+//     zero matches returns the original not-found error unchanged.
+func (m *SessionManager) SwitchModel(ctx context.Context, sessionID, modelSpec string) error {
+	if sessionID != "" {
+		if _, err := m.store.GetSession(ctx, sessionID); err != nil {
+			return fmt.Errorf("switch model: %w", err)
+		}
 	}
 
-	setter, ok := m.llmReg.(modelSetter)
-	if !ok {
-		return &ModelUnavailableError{Model: model, Err: errors.New("llm registry does not support model switching")}
-	}
-	if err := setter.SetDefault(model); err != nil {
-		return &ModelUnavailableError{Model: model, Err: err}
+	provider, model := "", modelSpec
+	if p, mdl, ok := strings.Cut(modelSpec, "/"); ok {
+		provider, model = p, mdl
 	}
 
-	if err := m.store.UpdateSessionMetadata(ctx, sessionID, map[string]any{"model": model}); err != nil {
+	if provider != "" {
+		switcher, ok := m.llmReg.(providerSwitcher)
+		if !ok {
+			return &ModelUnavailableError{Model: modelSpec, Err: errors.New("llm registry does not support provider switching")}
+		}
+		if err := switcher.SwitchProviderAndModel(provider, model); err != nil {
+			return &ModelUnavailableError{Model: modelSpec, Err: err}
+		}
+	} else {
+		setter, ok := m.llmReg.(modelSetter)
+		if !ok {
+			return &ModelUnavailableError{Model: model, Err: errors.New("llm registry does not support model switching")}
+		}
+		if err := setter.SetDefault(model); err != nil {
+			resolved, rerr := m.resolveModelAcrossProviders(model, err)
+			if rerr != nil {
+				return rerr
+			}
+			provider = resolved
+		}
+	}
+
+	if sessionID == "" {
+		return nil
+	}
+	meta := map[string]any{"model": model}
+	if provider != "" {
+		meta["provider"] = provider
+	}
+	if err := m.store.UpdateSessionMetadata(ctx, sessionID, meta); err != nil {
 		return fmt.Errorf("persist model choice: %w", err)
 	}
 	return nil
+}
+
+// resolveModelAcrossProviders is SwitchModel's fallback when a bare model
+// name isn't in the current default provider (setErr): search every other
+// provider's cached catalog for it. Returns the single provider name that
+// has it (already switched via SwitchProviderAndModel) on a unique match,
+// or an error — the original setErr unchanged on zero matches, a named
+// ambiguity error on more than one.
+func (m *SessionManager) resolveModelAcrossProviders(model string, setErr error) (string, error) {
+	lister, lok := m.llmReg.(allModelsLister)
+	switcher, sok := m.llmReg.(providerSwitcher)
+	if !lok || !sok {
+		return "", &ModelUnavailableError{Model: model, Err: setErr}
+	}
+	matches := make(map[string]bool)
+	for _, mi := range lister.ListAll() {
+		if mi.Name == model {
+			matches[mi.Provider] = true
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", &ModelUnavailableError{Model: model, Err: setErr}
+	case 1:
+		var providerName string
+		for p := range matches {
+			providerName = p
+		}
+		if err := switcher.SwitchProviderAndModel(providerName, model); err != nil {
+			return "", &ModelUnavailableError{Model: model, Err: err}
+		}
+		return providerName, nil
+	default:
+		names := make([]string, 0, len(matches))
+		for p := range matches {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		return "", &ModelUnavailableError{Model: model, Err: fmt.Errorf(
+			"model %q exists in multiple providers (%s) — use %q to disambiguate",
+			model, strings.Join(names, ", "), fmt.Sprintf("%s/%s", names[0], model))}
+	}
+}
+
+// ListProviders returns every configured provider's name and kind.
+func (m *SessionManager) ListProviders() ([]llm.ProviderInfo, error) {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return nil, errors.New("llm registry does not support provider listing")
+	}
+	return lister.ListProviders(), nil
+}
+
+// ListProviderModels returns the live model catalog for one named provider —
+// see llm.Registry.ListProviderModels: this forces a fresh fetch rather than
+// serving whatever was cached at daemon startup, so it surfaces every model
+// the provider actually has right now, declared in config or not.
+func (m *SessionManager) ListProviderModels(name string) ([]string, error) {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return nil, errors.New("llm registry does not support provider listing")
+	}
+	return lister.ListProviderModels(name)
 }

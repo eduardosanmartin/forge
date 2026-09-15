@@ -391,6 +391,16 @@ type Config struct {
 	Agent           AgentConfig         `json:"agent"`
 	Project         ProjectConfig       `json:"project"`
 	Daemon          DaemonConfig        `json:"daemon"`
+	// FallbackChain is an ordered list of "provider/model" entries (same
+	// syntax as forge fanout --models) tried in order on a RETRYABLE
+	// failure — rate limit (429), transient upstream outage (502/503/504),
+	// or a network timeout/connection error (see llm.RetryableError). A
+	// non-retryable failure (bad request, auth, model not found) stops the
+	// chain immediately: swapping models can't fix a malformed request.
+	// Empty/absent (the default) disables failover entirely — behavior is
+	// unchanged from before this field existed. See internal/llm's registry
+	// for where the chain is actually walked.
+	FallbackChain []string `json:"fallback_chain,omitempty"`
 }
 
 // Defaults returns the built-in baseline configuration. Callers may treat the
@@ -505,6 +515,11 @@ type fileConfig struct {
 	Agent           *fileAgent          `json:"agent"`
 	Project         *ProjectConfig      `json:"project"`
 	Daemon          *DaemonConfig       `json:"daemon"`
+	// FallbackChain: no pointer needed — nil (key absent from this layer)
+	// vs non-nil (key present, even as "[]" to explicitly clear a lower
+	// layer's chain) is already exactly what json.Unmarshal gives a plain
+	// slice field, same as Providers above.
+	FallbackChain []string `json:"fallback_chain"`
 }
 
 // Load builds a Config from defaults overlaid with the given files in order:
@@ -630,6 +645,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	for name, p := range fc.Providers {
 		dst.Providers[name] = p
+	}
+	if fc.FallbackChain != nil {
+		dst.FallbackChain = fc.FallbackChain
 	}
 	if fc.Storage != nil {
 		dst.Storage = *fc.Storage
@@ -916,6 +934,25 @@ func (c *Config) Validate() error {
 			violations = append(violations, fmt.Errorf(
 				"%s: request_timeout_seconds must be >= 0, got %d", label, p.RequestTimeoutSeconds))
 		}
+	}
+
+	for i, entry := range c.FallbackChain {
+		providerName, model, ok := strings.Cut(entry, "/")
+		if !ok || strings.TrimSpace(providerName) == "" || strings.TrimSpace(model) == "" {
+			violations = append(violations, fmt.Errorf(
+				"fallback_chain[%d] %q must be \"provider/model\"", i, entry))
+			continue
+		}
+		if _, ok := c.Providers[providerName]; !ok {
+			violations = append(violations, fmt.Errorf(
+				"fallback_chain[%d] %q: provider %q does not match any entry in providers", i, entry, providerName))
+		}
+		// The model half is intentionally NOT validated against
+		// providers.<name>.models or any live catalog: forge daemon
+		// set-provider and /provider already proved a provider's real
+		// catalog routinely has models never declared there (see
+		// manual_usuario.md §11), and validating live here would mean
+		// Config.Validate makes network calls, which it must not.
 	}
 
 	if strings.TrimSpace(c.Storage.Path) == "" {

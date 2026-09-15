@@ -98,6 +98,71 @@ func TestLoadPrecedenceProjectOverGlobalOverDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadFallbackChainLayering(t *testing.T) {
+	dir := t.TempDir()
+	globalPath := filepath.Join(dir, "global.json")
+	projectPath := filepath.Join(dir, "project.json")
+
+	baseProviders := `"providers": {
+		"ollama": {"kind": "openai-compatible", "base_url": "https://global.example/v1", "models": ["g1"]},
+		"openrouter": {"kind": "openai-compatible", "base_url": "https://openrouter.example/v1", "models": ["o1"]}
+	}`
+
+	t.Run("project chain replaces global chain wholesale", func(t *testing.T) {
+		writeConfigFile(t, globalPath, `{`+baseProviders+`, "fallback_chain": ["ollama/g1"]}`)
+		writeConfigFile(t, projectPath, `{`+baseProviders+`, "fallback_chain": ["openrouter/o1", "ollama/g1"]}`)
+
+		got, err := Load(globalPath, projectPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := []string{"openrouter/o1", "ollama/g1"}
+		if !reflect.DeepEqual(got.FallbackChain, want) {
+			t.Errorf("FallbackChain = %v, want %v (project layer replaces global wholesale)", got.FallbackChain, want)
+		}
+	})
+
+	t.Run("project omitting the key keeps the global chain", func(t *testing.T) {
+		writeConfigFile(t, globalPath, `{`+baseProviders+`, "fallback_chain": ["ollama/g1"]}`)
+		writeConfigFile(t, projectPath, `{`+baseProviders+`}`) // no fallback_chain key at all
+
+		got, err := Load(globalPath, projectPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := []string{"ollama/g1"}
+		if !reflect.DeepEqual(got.FallbackChain, want) {
+			t.Errorf("FallbackChain = %v, want %v (global survives when project doesn't mention the key)", got.FallbackChain, want)
+		}
+	})
+
+	t.Run("project explicitly clearing with an empty array wins", func(t *testing.T) {
+		writeConfigFile(t, globalPath, `{`+baseProviders+`, "fallback_chain": ["ollama/g1"]}`)
+		writeConfigFile(t, projectPath, `{`+baseProviders+`, "fallback_chain": []}`)
+
+		got, err := Load(globalPath, projectPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(got.FallbackChain) != 0 {
+			t.Errorf("FallbackChain = %v, want empty (project explicitly cleared it)", got.FallbackChain)
+		}
+	})
+
+	t.Run("absent everywhere defaults to nil (feature off)", func(t *testing.T) {
+		writeConfigFile(t, globalPath, `{`+baseProviders+`}`)
+		writeConfigFile(t, projectPath, `{`+baseProviders+`}`)
+
+		got, err := Load(globalPath, projectPath)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if len(got.FallbackChain) != 0 {
+			t.Errorf("FallbackChain = %v, want empty when never declared", got.FallbackChain)
+		}
+	})
+}
+
 func TestLoadUnknownFieldRejected(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
@@ -357,6 +422,41 @@ func TestValidateViolations(t *testing.T) {
 				p.RequestTimeoutSeconds = 0
 				c.Providers["ollama"] = p
 			}),
+			wantOK: true,
+		},
+		{
+			name:    "fallback_chain entry missing slash",
+			cfg:     mutate(func(c *Config) { c.FallbackChain = []string{"ollama-qwen2.5-coder"} }),
+			wantErr: "fallback_chain[0]",
+		},
+		{
+			name:    "fallback_chain entry empty provider half",
+			cfg:     mutate(func(c *Config) { c.FallbackChain = []string{"/some-model"} }),
+			wantErr: "fallback_chain[0]",
+		},
+		{
+			name:    "fallback_chain entry empty model half",
+			cfg:     mutate(func(c *Config) { c.FallbackChain = []string{"ollama/"} }),
+			wantErr: "fallback_chain[0]",
+		},
+		{
+			name:    "fallback_chain entry references unknown provider",
+			cfg:     mutate(func(c *Config) { c.FallbackChain = []string{"nonexistent/some-model"} }),
+			wantErr: "does not match any entry in providers",
+		},
+		{
+			name:    "fallback_chain second entry invalid reports its own index",
+			cfg:     mutate(func(c *Config) { c.FallbackChain = []string{"ollama/qwen2.5-coder:7b", "bad-entry"} }),
+			wantErr: "fallback_chain[1]",
+		},
+		{
+			name:   "fallback_chain valid entries pass",
+			cfg:    mutate(func(c *Config) { c.FallbackChain = []string{"ollama/qwen2.5-coder:7b", "ollama/some-undeclared-model"} }),
+			wantOK: true,
+		},
+		{
+			name:   "fallback_chain absent is valid (opt-in feature)",
+			cfg:    mutate(func(c *Config) { c.FallbackChain = nil }),
 			wantOK: true,
 		},
 		{

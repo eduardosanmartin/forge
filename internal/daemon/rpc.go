@@ -148,6 +148,14 @@ const (
 	// RNF-6.3: estimated cost metrics.
 	MethodSessionCost = "session.cost"
 	MethodCostSummary = "cost.summary"
+	// Provider discovery and switching: list configured providers, list one
+	// provider's LIVE model catalog (forces a refresh — includes models not
+	// declared in providers.<name>.models), and switch the default
+	// provider+model together. MethodSwitchModel (session.switch_model)
+	// already accepts "provider/model" as an alternative to these two.
+	MethodProviderList       = "provider.list"
+	MethodProviderListModels = "provider.list_models"
+	MethodProviderSwitch     = "provider.switch"
 )
 
 // CreateSessionParams for session.create.
@@ -213,9 +221,47 @@ type ResumeSessionParams struct {
 	SessionID string `json:"session_id"`
 }
 
-// SwitchModelParams for session.switch_model.
+// SwitchModelParams for session.switch_model. Model accepts a bare name
+// (searched in the current provider, then every other one) or an explicit
+// "provider/model" — see SessionManager.SwitchModel.
 type SwitchModelParams struct {
 	SessionID string `json:"session_id"` // session whose metadata records the choice
+	Model     string `json:"model"`
+}
+
+// ProviderListResult for provider.list.
+type ProviderListResult struct {
+	Providers []ProviderResult `json:"providers"`
+}
+
+// ProviderResult is one configured provider's name and kind.
+type ProviderResult struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// ProviderListModelsParams for provider.list_models.
+type ProviderListModelsParams struct {
+	Provider string `json:"provider"`
+}
+
+// ProviderListModelsResult for provider.list_models. Models is the
+// provider's LIVE catalog (freshly refreshed from its own /models endpoint),
+// not just what's declared in providers.<name>.models.
+type ProviderListModelsResult struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
+// ProviderSwitchParams for provider.switch. Provider and Model are both
+// required — listing without switching is provider.list_models, not this
+// method with an empty model. SessionID is optional: when given, that
+// session's metadata records the choice; a sessionless caller (forge daemon
+// set-provider) still switches the daemon's default, it just isn't tied to
+// any particular session.
+type ProviderSwitchParams struct {
+	SessionID string `json:"session_id,omitempty"`
+	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 }
 

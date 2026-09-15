@@ -28,11 +28,11 @@ import (
 var ErrStreamingNotSupported = errors.New("streaming not supported: use Chat")
 
 const (
-	defaultAnthropicBaseURL       = "https://api.anthropic.com"
-	anthropicVersion              = "2023-06-01"
-	anthropicDefaultMaxTokens     = 4096
-	defaultGeminiBaseURL          = "https://generativelanguage.googleapis.com"
-	geminiDefaultMaxTokensUnused  = 0 // Gemini max tokens is not required; placeholder for parity.
+	defaultAnthropicBaseURL      = "https://api.anthropic.com"
+	anthropicVersion             = "2023-06-01"
+	anthropicDefaultMaxTokens    = 4096
+	defaultGeminiBaseURL         = "https://generativelanguage.googleapis.com"
+	geminiDefaultMaxTokensUnused = 0 // Gemini max tokens is not required; placeholder for parity.
 )
 
 // AnthropicProvider implements Provider for the Anthropic Messages API.
@@ -84,7 +84,7 @@ func NewAnthropicProvider(baseURL, apiKey string, allowedHosts []string, logger 
 		httpClient: client,
 		logger:     logger,
 	}
-	if err := p.refreshModels(); err != nil {
+	if err := p.RefreshModels(); err != nil {
 		logger.Warn("failed to fetch anthropic models at startup", "error", err)
 	}
 	return p, nil
@@ -98,7 +98,10 @@ func (p *AnthropicProvider) SetRequestTimeout(d time.Duration) {
 	}
 }
 
-func (p *AnthropicProvider) refreshModels() error {
+// RefreshModels re-fetches the live model list, exported so a provider
+// switch (daemon.switch_provider) can force a fresh catalog instead of
+// serving whatever was cached at daemon startup.
+func (p *AnthropicProvider) RefreshModels() error {
 	models, err := p.fetchModels()
 	if err != nil {
 		p.logger.Debug("anthropic fetch models failed", "error", err)
@@ -298,7 +301,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (ChatResp
 	}
 	p.logger.Debug("anthropic chat response", "status", resp.StatusCode, "body", logging.Redact(string(respBody)))
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody)
+		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 	// Decode Anthropic response.
 	var ar anthropicResponse
@@ -309,23 +312,23 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (ChatResp
 }
 
 type anthropicResponse struct {
-	ID         string                   `json:"id"`
-	Type       string                   `json:"type"`
-	Role       string                   `json:"role"`
-	Model      string                   `json:"model"`
-	Content    []anthropicContentBlock  `json:"content"`
-	StopReason *string                  `json:"stop_reason"`
-	Usage      anthropicUsage           `json:"usage"`
+	ID         string                  `json:"id"`
+	Type       string                  `json:"type"`
+	Role       string                  `json:"role"`
+	Model      string                  `json:"model"`
+	Content    []anthropicContentBlock `json:"content"`
+	StopReason *string                 `json:"stop_reason"`
+	Usage      anthropicUsage          `json:"usage"`
 }
 
 type anthropicContentBlock struct {
-	Type      string         `json:"type"`
-	Text      string         `json:"text,omitempty"`
-	ID        string         `json:"id,omitempty"`
-	Name      string         `json:"name,omitempty"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string         `json:"tool_use_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
 }
 
 type anthropicUsage struct {
@@ -457,7 +460,7 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+		return nil, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	ch := make(chan StreamChunk, 16)
@@ -467,10 +470,10 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-
 		defer resp.Body.Close()
 
 		var (
-			messageID   string
-			model       string
-			toolAccums  = make(map[int]*anthropicToolAccum)
-			usage       *Usage
+			messageID    string
+			model        string
+			toolAccums   = make(map[int]*anthropicToolAccum)
+			usage        *Usage
 			finishReason string
 			// anthropicUsage stores input/output for eventual Usage.
 			inputTokens int
@@ -784,27 +787,35 @@ func (p *AnthropicProvider) Close() error {
 	return nil
 }
 
+// mapError maps network/transport errors to typed errors — see
+// OpenAICompatibleProvider.mapError's doc comment (identical rationale).
 func (p *AnthropicProvider) mapError(err error) error {
 	var netErr *url.Error
 	if errors.As(err, &netErr) {
 		if netErr.Timeout() {
-			return fmt.Errorf("request timeout: %w", err)
+			return &RetryableError{Err: fmt.Errorf("request timeout: %w", err)}
 		}
-		return fmt.Errorf("connection error: %w", err)
+		return &RetryableError{Err: fmt.Errorf("connection error: %w", err)}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("request deadline exceeded: %w", err)
+		return &RetryableError{Err: fmt.Errorf("request deadline exceeded: %w", err)}
 	}
 	return fmt.Errorf("request failed: %w", err)
 }
 
-func (p *AnthropicProvider) mapHTTPError(statusCode int, body []byte) error {
+// mapHTTPError maps HTTP error status codes to typed errors — see
+// OpenAICompatibleProvider.mapHTTPError's doc comment (identical rationale).
+func (p *AnthropicProvider) mapHTTPError(statusCode int, body []byte, headers http.Header) error {
 	bodyStr := logging.Redact(string(body))
 	switch statusCode {
 	case http.StatusNotFound:
 		return fmt.Errorf("model not found (404): %s", bodyStr)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("rate limited (429): %s", bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("rate limited (429): %s", bodyStr),
+		}
 	case http.StatusUnauthorized:
 		return fmt.Errorf("unauthorized (401): %s", bodyStr)
 	case http.StatusForbidden:
@@ -814,7 +825,11 @@ func (p *AnthropicProvider) mapHTTPError(statusCode int, body []byte) error {
 	case http.StatusInternalServerError:
 		return fmt.Errorf("server error (500): %s", bodyStr)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr),
+		}
 	default:
 		return fmt.Errorf("HTTP %d: %s", statusCode, bodyStr)
 	}

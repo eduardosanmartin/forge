@@ -94,7 +94,7 @@ func NewOpenAICompatibleProvider(baseURL, apiKey string, allowedHosts []string, 
 	}
 
 	// Fetch models at startup
-	if err := p.refreshModels(); err != nil {
+	if err := p.RefreshModels(); err != nil {
 		logger.Warn("failed to fetch models at startup", "error", err)
 		// Don't fail construction; models can be refreshed later
 	}
@@ -148,9 +148,12 @@ func validateAllowlist(baseURL string, allowedHosts []string) error {
 	return fmt.Errorf("network egress denied: host %q not in allowlist %v", hostPort, allowedHosts)
 }
 
-// refreshModels fetches models from /models (OpenAI-compatible endpoint).
-// The baseURL is guaranteed to have /v1 path by the constructor.
-func (p *OpenAICompatibleProvider) refreshModels() error {
+// RefreshModels re-fetches the live model list from /models (OpenAI-compatible
+// endpoint) — not the config's declared list, the provider's own catalog.
+// The baseURL is guaranteed to have /v1 path by the constructor. Exported so
+// a provider switch (daemon.switch_provider) can force a fresh list instead
+// of serving whatever was cached at daemon startup.
+func (p *OpenAICompatibleProvider) RefreshModels() error {
 	models, err := p.fetchModels(p.baseURL + "/models")
 	if err != nil {
 		p.logger.Debug("fetch /models failed", "error", err)
@@ -271,7 +274,7 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (C
 	p.logger.Debug("chat response", "status", resp.StatusCode, "body", logging.Redact(string(respBody)))
 
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody)
+		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	var chatResp ChatResponse
@@ -324,7 +327,7 @@ func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatReque
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+		return nil, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	ch := make(chan StreamChunk, 16)
@@ -468,29 +471,42 @@ func (p *OpenAICompatibleProvider) Close() error {
 	return nil
 }
 
-// mapError maps network/transport errors to typed errors.
+// mapError maps network/transport errors to typed errors. Timeouts and
+// connection failures are wrapped as RetryableError (StatusCode 0 — no HTTP
+// response was ever received): they're exactly the transient case a
+// fallback chain exists for, as opposed to e.g. a malformed request that
+// would fail identically against any other model too.
 func (p *OpenAICompatibleProvider) mapError(err error) error {
 	var netErr *url.Error
 	if errors.As(err, &netErr) {
 		if netErr.Timeout() {
-			return fmt.Errorf("request timeout: %w", err)
+			return &RetryableError{Err: fmt.Errorf("request timeout: %w", err)}
 		}
-		return fmt.Errorf("connection error: %w", err)
+		return &RetryableError{Err: fmt.Errorf("connection error: %w", err)}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("request deadline exceeded: %w", err)
+		return &RetryableError{Err: fmt.Errorf("request deadline exceeded: %w", err)}
 	}
 	return fmt.Errorf("request failed: %w", err)
 }
 
-// mapHTTPError maps HTTP error status codes to typed errors.
-func (p *OpenAICompatibleProvider) mapHTTPError(statusCode int, body []byte) error {
+// mapHTTPError maps HTTP error status codes to typed errors. 429 (rate
+// limited) and 502/503/504 (upstream unavailable) are wrapped as
+// RetryableError — see that type's doc comment for why the rest (400/401/
+// 403/404/500) are deliberately NOT: retrying an unauthorized or malformed
+// request against a different model wastes an attempt on a failure a model
+// swap can't fix.
+func (p *OpenAICompatibleProvider) mapHTTPError(statusCode int, body []byte, headers http.Header) error {
 	bodyStr := logging.Redact(string(body))
 	switch statusCode {
 	case http.StatusNotFound:
 		return fmt.Errorf("model not found (404): %s", bodyStr)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("rate limited (429): %s", bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("rate limited (429): %s", bodyStr),
+		}
 	case http.StatusUnauthorized:
 		return fmt.Errorf("unauthorized (401): %s", bodyStr)
 	case http.StatusForbidden:
@@ -500,7 +516,11 @@ func (p *OpenAICompatibleProvider) mapHTTPError(statusCode int, body []byte) err
 	case http.StatusInternalServerError:
 		return fmt.Errorf("server error (500): %s", bodyStr)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr),
+		}
 	default:
 		return fmt.Errorf("HTTP %d: %s", statusCode, bodyStr)
 	}

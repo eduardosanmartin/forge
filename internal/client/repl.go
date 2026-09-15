@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,10 @@ type REPL struct {
 	out          io.Writer
 	in           io.Reader
 	v1Enabled    REPLOptions
+	// scanner reads lines from `in`. A struct field (not a Run-local var) so
+	// a command handler like cmdProvider can block for one more line of
+	// input (a menu selection) without restructuring the main loop.
+	scanner *bufio.Scanner
 
 	writeMu sync.Mutex // serializes banner/turn output vs async event lines
 }
@@ -68,19 +73,19 @@ func (r *REPL) Run(ctx context.Context) error {
 		r.v1Enabled.EnableRetrieval, r.v1Enabled.EnableCompaction, r.v1Enabled.EnableAnchoring, r.v1Enabled.EnableRouting, r.v1Enabled.EnableSkills)
 	r.writef("Type a message, /help for commands, /exit or Ctrl-D to quit.\n")
 
-	scanner := bufio.NewScanner(r.in)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	r.scanner = bufio.NewScanner(r.in)
+	r.scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for {
 		r.write("> ")
-		if !scanner.Scan() {
+		if !r.scanner.Scan() {
 			// EOF (Ctrl-D) or reader error ends the session gracefully.
-			if serr := scanner.Err(); serr != nil && serr != io.EOF {
+			if serr := r.scanner.Err(); serr != nil && serr != io.EOF {
 				return fmt.Errorf("read input: %w", serr)
 			}
 			return ctx.Err()
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(r.scanner.Text())
 		if line == "" {
 			continue
 		}
@@ -96,6 +101,8 @@ func (r *REPL) Run(ctx context.Context) error {
 			r.printHelp()
 		case strings.HasPrefix(line, "/model"):
 			r.cmdModel(ctx, line)
+		case strings.HasPrefix(line, "/provider"):
+			r.cmdProvider(ctx, line)
 		case strings.HasPrefix(line, "/sessions"):
 			r.cmdSessions(ctx)
 		case strings.HasPrefix(line, "/new"):
@@ -162,7 +169,10 @@ func (r *REPL) drainEvents(ch <-chan daemon.JSONRPCNotification) {
 
 func (r *REPL) printHelp() {
 	r.writeln("Commands:")
-	r.writeln("  /model <name>   hot-swap the default LLM model")
+	r.writeln("  /model <name>   hot-swap the default model — bare name (searched across every")
+	r.writeln("                  provider if not in the current one) or explicit \"provider/model\"")
+	r.writeln("  /provider <name>  list that provider's LIVE models and pick one interactively")
+	r.writeln("                    (bare /provider lists configured provider names)")
 	r.writeln("  /sessions       list sessions (branch parent shown)")
 	r.writeln("  /new            start a new session")
 	r.writeln("  /attach <id>    switch to an existing session (replays last messages)")
@@ -198,6 +208,76 @@ func (r *REPL) cmdModel(ctx context.Context, line string) {
 		return
 	}
 	r.writef("model switched to %s\n", arg)
+}
+
+// cmdProvider lists a provider's LIVE model catalog (forces a fresh fetch —
+// see provider.list_models — so it shows every model the provider actually
+// has, declared in config or not) and blocks for one more line as an
+// interactive selection (a number from the printed list, or a model name
+// typed directly), then switches to it. Bare "/provider" (no name) lists
+// configured provider names instead, as a hint for what to type.
+func (r *REPL) cmdProvider(ctx context.Context, line string) {
+	arg, ok := splitCommandArg(line)
+	if !ok {
+		r.listProviders(ctx)
+		return
+	}
+
+	var res daemon.ProviderListModelsResult
+	if err := r.client.Call(ctx, daemon.MethodProviderListModels,
+		daemon.ProviderListModelsParams{Provider: arg}, &res); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	if len(res.Models) == 0 {
+		r.writef("provider %q has no models available\n", arg)
+		return
+	}
+	r.writef("models available on %q:\n", arg)
+	for i, m := range res.Models {
+		r.writef("  %2d) %s\n", i+1, m)
+	}
+	r.write("select a model (number or name), or Enter to cancel: ")
+	if !r.scanner.Scan() {
+		return
+	}
+	sel := strings.TrimSpace(r.scanner.Text())
+	if sel == "" {
+		r.writeln("cancelled")
+		return
+	}
+	model := sel
+	if n, err := strconv.Atoi(sel); err == nil {
+		if n < 1 || n > len(res.Models) {
+			r.writef("no such option %d\n", n)
+			return
+		}
+		model = res.Models[n-1]
+	}
+
+	var switchRes struct {
+		SessionID string `json:"session_id"`
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+	}
+	if err := r.client.Call(ctx, daemon.MethodProviderSwitch,
+		daemon.ProviderSwitchParams{SessionID: r.sessionID, Provider: arg, Model: model}, &switchRes); err != nil {
+		r.writef("error: %v\n", err)
+		return
+	}
+	r.writef("switched to %s/%s\n", arg, model)
+}
+
+func (r *REPL) listProviders(ctx context.Context) {
+	var res daemon.ProviderListResult
+	if err := r.client.Call(ctx, daemon.MethodProviderList, nil, &res); err != nil {
+		r.writeln("usage: /provider <name>")
+		return
+	}
+	r.writeln("usage: /provider <name> — configured providers:")
+	for _, p := range res.Providers {
+		r.writef("  %s (%s)\n", p.Name, p.Kind)
+	}
 }
 
 func (r *REPL) cmdSessions(ctx context.Context) {
