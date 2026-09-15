@@ -80,6 +80,14 @@ func NewGeminiProvider(baseURL, apiKey string, allowedHosts []string, logger *sl
 	return p, nil
 }
 
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0.
+func (p *GeminiProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
+}
+
 func (p *GeminiProvider) refreshModels() error {
 	models, err := p.fetchModels()
 	if err != nil {

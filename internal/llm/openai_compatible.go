@@ -102,6 +102,18 @@ func NewOpenAICompatibleProvider(baseURL, apiKey string, allowedHosts []string, 
 	return p, nil
 }
 
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0 — the registry
+// calls this once, right after construction and before any request, with
+// config.Provider.RequestTimeoutSeconds (previously every provider was
+// stuck with the same fixed 15-minute timeout regardless of whether it
+// fronted a fast local model or a legitimately slow remote one).
+func (p *OpenAICompatibleProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
+}
+
 // validateAllowlist checks if the baseURL host is in the allowedHosts list.
 // Empty allowlist denies all (RNF-4.9). Matching rules:
 //   - an entry WITH a port ("127.0.0.1:11434") requires an exact host:port match;

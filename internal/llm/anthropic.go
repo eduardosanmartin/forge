@@ -90,6 +90,14 @@ func NewAnthropicProvider(baseURL, apiKey string, allowedHosts []string, logger 
 	return p, nil
 }
 
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0.
+func (p *AnthropicProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
+}
+
 func (p *AnthropicProvider) refreshModels() error {
 	models, err := p.fetchModels()
 	if err != nil {

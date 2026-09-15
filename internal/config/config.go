@@ -60,7 +60,20 @@ type Provider struct {
 	// entirely rather than reporting a misleading $0.
 	PricePerMillionInputTokens  float64 `json:"price_per_million_input_tokens,omitempty"`
 	PricePerMillionOutputTokens float64 `json:"price_per_million_output_tokens,omitempty"`
+	// RequestTimeoutSeconds bounds one chat completion HTTP call to this
+	// provider. 0/unset falls back to DefaultRequestTimeoutSeconds (15 min)
+	// — previously this was a single hardcoded 15-minute constant shared by
+	// every provider regardless of profile, which meant a hung local model
+	// blocked a turn for the same 15 minutes as a legitimately slow remote
+	// one. Set this low (e.g. 120-180) for a local model known to be fast,
+	// or raise it for a large remote model under real load.
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
 }
+
+// DefaultRequestTimeoutSeconds is the fallback per-request HTTP timeout when
+// a provider does not set request_timeout_seconds (900s = 15 minutes, the
+// value every provider used unconditionally before this field existed).
+const DefaultRequestTimeoutSeconds = 900
 
 // StorageConfig locates forge's local database.
 type StorageConfig struct {
@@ -84,6 +97,12 @@ type LoggingConfig struct {
 // non-loopback address is refused unless BOTH are set — see the bind-address
 // check in internal/daemon.
 type DaemonConfig struct {
+	// Addr is the default listen address (host:port) `forge serve` binds to
+	// when --addr isn't passed explicitly on the command line. Empty falls
+	// back to the CLI flag's own default (127.0.0.1:0, an ephemeral port).
+	// Setting this lets a project pin a stable local port instead of getting
+	// a new one on every restart.
+	Addr string `json:"addr,omitempty"`
 	// AuthTokenHash is SHA-256(token) as lowercase hex. The raw token is
 	// never persisted — `forge daemon set-password` writes only this hash.
 	// Empty means auth is disabled (only valid for a loopback bind).
@@ -892,6 +911,10 @@ func (c *Config) Validate() error {
 		if len(p.Models) < 1 {
 			violations = append(violations, fmt.Errorf(
 				"%s: must declare at least one model", label))
+		}
+		if p.RequestTimeoutSeconds < 0 {
+			violations = append(violations, fmt.Errorf(
+				"%s: request_timeout_seconds must be >= 0, got %d", label, p.RequestTimeoutSeconds))
 		}
 	}
 
