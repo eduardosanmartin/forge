@@ -13,7 +13,7 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 5
 
 // runMigrations executes all pending migrations in order.
 func runMigrations(ctx context.Context, db *sql.DB) error {
@@ -112,6 +112,27 @@ func runMigration(ctx context.Context, db *sql.DB, version int) error {
 		}
 		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
 			return fmt.Errorf("execute migration: %w", err)
+		}
+	case 5:
+		// ALTER TABLE ADD COLUMN isn't idempotent like the CREATE TABLE IF
+		// NOT EXISTS migrations above; guard each column so re-running this
+		// migration (e.g. SetSchemaVersionForTesting resetting to 0 on an
+		// already-migrated DB) doesn't fail with "duplicate column name".
+		for _, col := range []struct{ name, ddl string }{
+			{"model", `ALTER TABLE messages ADD COLUMN model TEXT`},
+			{"duration_ms", `ALTER TABLE messages ADD COLUMN duration_ms INTEGER`},
+		} {
+			var count int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?`, col.name,
+			).Scan(&count); err != nil {
+				return fmt.Errorf("check %s column: %w", col.name, err)
+			}
+			if count == 0 {
+				if _, err := tx.ExecContext(ctx, col.ddl); err != nil {
+					return fmt.Errorf("add %s column: %w", col.name, err)
+				}
+			}
 		}
 	default:
 		filename := fmt.Sprintf("migrations/%03d.sql", version)

@@ -546,11 +546,11 @@ func (s *Store) AppendMessage(ctx context.Context, msg *Message) (int, int64, er
 
 	// Insert message
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, name, usage, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, name, usage, model, duration_ms, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.SessionID, seq, msg.Role, msg.Content,
 		nullString(toolCallsJSON), nullString(msg.ToolCallID), nullString(msg.Name),
-		nullString(usageJSON), now)
+		nullString(usageJSON), nullString(msg.Model), nullInt64(msg.DurationMs), now)
 	if err != nil {
 		return 0, 0, fmt.Errorf("insert message: %w", err)
 	}
@@ -588,7 +588,7 @@ func (s *Store) GetMessages(ctx context.Context, sessionID string, limit, offset
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, session_id, seq, role, content, tool_calls, tool_call_id, name, usage, created_at
+		`SELECT id, session_id, seq, role, content, tool_calls, tool_call_id, name, usage, model, duration_ms, created_at
 		 FROM messages WHERE session_id = ? ORDER BY seq DESC LIMIT ? OFFSET ?`,
 		sessionID, limit, offset)
 	if err != nil {
@@ -614,7 +614,7 @@ func (s *Store) GetMessages(ctx context.Context, sessionID string, limit, offset
 // GetMessagesSince returns messages for a session with seq > sinceSeq, oldest first.
 func (s *Store) GetMessagesSince(ctx context.Context, sessionID string, sinceSeq int) ([]Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, session_id, seq, role, content, tool_calls, tool_call_id, name, usage, created_at
+		`SELECT id, session_id, seq, role, content, tool_calls, tool_call_id, name, usage, model, duration_ms, created_at
 		 FROM messages WHERE session_id = ? AND seq > ? ORDER BY seq ASC`,
 		sessionID, sinceSeq)
 	if err != nil {
@@ -642,13 +642,20 @@ func scanMessage(scanner interface {
 	Scan(dest ...any) error
 }) (Message, error) {
 	var msg Message
-	var toolCallsJSON, toolCallID, name, usageJSON sql.NullString
+	var toolCallsJSON, toolCallID, name, usageJSON, model sql.NullString
+	var durationMs sql.NullInt64
 
 	err := scanner.Scan(
 		&msg.ID, &msg.SessionID, &msg.Seq, &msg.Role, &msg.Content,
-		&toolCallsJSON, &toolCallID, &name, &usageJSON, &msg.CreatedAt)
+		&toolCallsJSON, &toolCallID, &name, &usageJSON, &model, &durationMs, &msg.CreatedAt)
 	if err != nil {
 		return Message{}, fmt.Errorf("scan message: %w", err)
+	}
+	if model.Valid {
+		msg.Model = model.String
+	}
+	if durationMs.Valid {
+		msg.DurationMs = durationMs.Int64
 	}
 
 	if toolCallsJSON.Valid && toolCallsJSON.String != "" {
@@ -679,6 +686,16 @@ func nullString(s string) sql.NullString {
 		return sql.NullString{Valid: false}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// nullInt64 returns a sql.NullInt64 from an int64 (NULL if zero — 0ms is
+// indistinguishable from "not recorded" for our purposes, e.g. user/tool
+// messages that never call an LLM).
+func nullInt64(v int64) sql.NullInt64 {
+	if v == 0 {
+		return sql.NullInt64{Valid: false}
+	}
+	return sql.NullInt64{Int64: v, Valid: true}
 }
 
 // Maintenance

@@ -136,7 +136,11 @@ func (t *Transport) requireAuth(next http.Handler) http.Handler {
 // handleAuthStatus lets a client (chiefly the GUI, before it has any
 // credentials at all) discover whether it needs to authenticate. It is
 // intentionally unauthenticated itself — knowing "yes/no" leaks nothing.
+// Explicitly uncacheable: a browser that cached a stale "required":true from
+// before an operator cleared the token would otherwise keep showing the
+// login form long after the daemon stopped requiring one.
 func (t *Transport) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"required": t.authRequired()})
 }

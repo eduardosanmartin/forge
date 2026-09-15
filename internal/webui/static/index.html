@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>forge</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Public+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -16,23 +17,101 @@
       <div id="login-error" class="login-error" hidden></div>
     </form>
   </div>
+
   <div id="app">
-    <header>
-      <span class="brand">forge</span>
-      <span id="status" class="status disconnected">connecting…</span>
-    </header>
-    <nav id="sidebar">
-      <div id="sidebar-toolbar">
-        <button id="new-session-btn" type="button">+ New session</button>
+    <div id="topbar">
+      <div class="topbar-left">
+        <button id="rail-toggle" class="iconbtn" type="button" title="Toggle sessions (&#8984;B)" aria-label="Toggle session list">
+          <svg class="icon"><use href="#i-panel"/></svg>
+        </button>
+        <div class="topbar-title">
+          <div class="t" id="session-title">Select a session</div>
+          <div class="s"><span id="status-dot" class="live-dot"></span><span id="status-text">connecting&#8230;</span></div>
+        </div>
       </div>
-      <div id="session-list">
-        <div class="empty">Loading sessions…</div>
+      <div class="topbar-actions">
+        <button id="halt-btn" class="iconbtn danger" type="button" title="Emergency halt all sessions">
+          <svg class="icon"><use href="#i-stop"/></svg>Halt all
+        </button>
+        <button id="resources-toggle" class="iconbtn" type="button" title="Toggle resources (&#8984;R)">
+          <svg class="icon"><use href="#i-resources"/></svg>Resources
+        </button>
       </div>
-    </nav>
-    <main id="main">
-      <div class="empty-state">Select a session on the left.</div>
-    </main>
+    </div>
+
+    <div id="body">
+      <nav id="rail">
+        <div id="rail-top">
+          <div class="brand"><span class="dot"></span>forge</div>
+          <div class="searchbox">
+            <svg class="icon"><use href="#i-search"/></svg>
+            <input id="session-search" placeholder="Search sessions&#8230;">
+          </div>
+          <button id="new-session-btn" class="newbtn" type="button"><svg class="icon"><use href="#i-plus"/></svg>New session</button>
+        </div>
+        <div id="session-list"><div class="empty">Loading sessions&#8230;</div></div>
+      </nav>
+
+      <main id="main">
+        <div id="thread-scroll">
+          <div id="thread"><div class="empty-state">Select a session on the left, or start a new one.</div></div>
+        </div>
+        <div id="composer-wrap" hidden>
+          <div class="composer">
+            <div class="compose-pill">
+              <textarea id="compose-input" rows="1" placeholder="Message this session&#8230; (&#8984;&#8629; to send)"></textarea>
+              <button id="compose-send" class="sendbtn" type="button" title="Send"><svg class="icon"><use href="#i-send"/></svg></button>
+            </div>
+            <div id="compose-error" class="compose-error" hidden></div>
+            <div class="compose-foot">
+              <span id="footer-model">daemon default</span>
+              <span id="footer-tokens" class="accent"></span>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <aside id="resources">
+        <div class="res-head">
+          <div class="res-tabs" id="res-tabs">
+            <button class="res-tab" data-tab="compare">Compare</button>
+            <button class="res-tab" data-tab="cost">Cost</button>
+            <button class="res-tab" data-tab="memory">Memory</button>
+            <button class="res-tab" data-tab="plugins">Plugins</button>
+            <button class="res-tab" data-tab="skills">Skills</button>
+            <button class="res-tab" data-tab="jobs">Jobs</button>
+            <button class="res-tab" data-tab="daemon">Daemon</button>
+          </div>
+          <button id="res-close" class="iconbtn" type="button" aria-label="Close resources"><svg class="icon"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="res-body" id="res-body"></div>
+      </aside>
+    </div>
   </div>
+
+  <svg style="display:none" aria-hidden="true">
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/></symbol>
+    <symbol id="i-resources" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.2"/><rect x="13" y="4" width="7" height="7" rx="1.2"/><rect x="4" y="13" width="7" height="7" rx="1.2"/><rect x="13" y="13" width="7" height="7" rx="1.2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.2" cy="10.2" r="6.4"/><line x1="14.8" y1="14.8" x2="20" y2="20"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><line x1="12" y1="19" x2="12" y2="6"/><path d="M6 11 L12 5 L18 11"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3 H14 L18 7 V21 H6 Z"/><path d="M14 3 V7 H18"/></symbol>
+    <symbol id="i-term" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9 L11 12 L7 15"/><line x1="13" y1="15" x2="17" y2="15"/></symbol>
+    <symbol id="i-git" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><line x1="6" y1="7" x2="6" y2="17"/><path d="M6 12 C 9 12, 12 12, 15.5 9.3"/></symbol>
+    <symbol id="i-pkg" viewBox="0 0 24 24"><path d="M12 3 L20 7.5 V16.5 L12 21 L4 16.5 V7.5 Z"/><path d="M4 7.5 L12 12 L20 7.5"/><line x1="12" y1="12" x2="12" y2="21"/></symbol>
+    <symbol id="i-compare" viewBox="0 0 24 24"><rect x="3" y="5" width="8" height="14" rx="1.5"/><rect x="13" y="5" width="8" height="14" rx="1.5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5 V16.5 M9.3 9.4 c0-1.2 1.2-2 2.7-2 1.7 0 2.7.9 2.7 2 0 2.6-5.4 1.4-5.4 4 0 1.1 1 2 2.7 2 1.5 0 2.7-.8 2.7-2"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><line x1="12" y1="12" x2="12" y2="7"/><line x1="12" y1="12" x2="16" y2="14"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11 V7 a4 4 0 0 1 8 0 V11"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><line x1="12" y1="3" x2="12" y2="11"/><path d="M7 6.5 a8 8 0 1 0 10 0"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7 H19"/><path d="M8 7 V4.5 A1.5 1.5 0 0 1 9.5 3 H14.5 A1.5 1.5 0 0 1 16 4.5 V7"/><path d="M7 7 L7.7 20 A1.5 1.5 0 0 0 9.2 21.4 H14.8 A1.5 1.5 0 0 0 16.3 20 L17 7"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M4 12 a8 8 0 0 1 13.7-5.7 L20 8"/><path d="M20 4 V8 H16"/><path d="M20 12 a8 8 0 0 1 -13.7 5.7 L4 16"/><path d="M4 20 V16 H8"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2.5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 13 L10 18 L19 7"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20 L4.6 16.3 L15.3 5.6 a2 2 0 0 1 2.8 0 L18.4 6 a2 2 0 0 1 0 2.8 L7.7 19.4 Z"/><line x1="14" y1="7" x2="17" y2="10"/></symbol>
+  </svg>
+
   <script src="app.js"></script>
 </body>
 </html>

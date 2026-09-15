@@ -63,6 +63,9 @@ func newServeCommand() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("app not initialized")
 			}
+			if !cmd.Flags().Changed("addr") && app.Config.Daemon.Addr != "" {
+				addr = app.Config.Daemon.Addr
+			}
 			if tlsCert != "" || tlsKey != "" {
 				if tlsCert == "" || tlsKey == "" {
 					return &UsageError{Err: fmt.Errorf("--tls-cert and --tls-key must be given together")}
@@ -89,7 +92,7 @@ func newServeCommand() *cobra.Command {
 			return runServe(cmd.Context(), app, addr, approveExternal)
 		},
 	}
-	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (host:port)")
+	cmd.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (host:port); defaults to daemon.addr in config if set, else an ephemeral port")
 	cmd.Flags().BoolVar(&approveExternal, "approve-external-plugins", false, "allow external plugins/skills without per-plugin approved.flag (global override)")
 	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "PEM certificate file (required with --tls-key for remote access)")
 	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "PEM private key file (required with --tls-cert for remote access)")
@@ -160,6 +163,8 @@ func newStatusCommand() *cobra.Command {
 }
 
 func runServe(ctx context.Context, app *App, addr string, approveExternal bool) error {
+	printBanner()
+
 	// v0 workspace semantics: forge operates on the directory the daemon was
 	// launched from. Relative permission patterns ("./**") and tool paths
 	// resolve against this root. Storage.Path is the database location, not
@@ -315,7 +320,9 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	return d.Start(ctx)
+	err = d.Start(ctx)
+	printBanner()
+	return err
 }
 
 func runAttach(ctx context.Context, sessionID string) error {
