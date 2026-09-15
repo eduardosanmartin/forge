@@ -175,10 +175,20 @@ func TestBenchV1PromptTokensBounded(t *testing.T) {
 // TestBenchTinyScenarioMessageCounts asserts the exact message structure of a
 // tiny 3-turn scenario, computed by hand from Build's layout:
 //
-//	system(1) + tool defs(10: five base OS tools + four RF-10.1 git
-//	worktree/branch-per-task tools + one RF-10.3 github tool) + history(2t-1, including the
-//	just-persisted user message) + current user(1), plus one anchored-facts
-//	message and one retrieval message in the v1 arm when active.
+//	system(1) + history(2t-1, including the just-persisted current user
+//	message, appended exactly once) plus one anchored-facts message and one
+//	retrieval message in the v1 arm when active.
+//
+// Tool definitions are NOT counted here: they travel only via ChatRequest.Tools
+// (ToolDefs()), not as extra system messages in Build's output — Build used
+// to also inject one "TOOL: name - description" system message per tool,
+// duplicating the structured schema, until that was removed as pure waste
+// (confirmed ~1.5-2K wasted prompt tokens/turn with the default registry).
+// Likewise the current user message used to be appended a second time on top
+// of the history window that already ended with it; that duplicate append
+// was also removed. Both fixes are why this test's expected counts are
+// smaller than they were before (previously 11 fixed + a duplicated current
+// user message).
 //
 // This pins the token arithmetic against structural expectations instead of
 // trusting the runner to sum something reasonable.
@@ -194,7 +204,7 @@ func TestBenchTinyScenarioMessageCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runArm(naive): %v", err)
 	}
-	wantNaive := []int{13, 15, 17} // 11 fixed (1 system + 10 tool defs) + (2t-1) history + 1 current user
+	wantNaive := []int{2, 4, 6} // 1 fixed (system only) + (2t-1) history, current user included once
 	if !reflect.DeepEqual(naive.perTurnMessages, wantNaive) {
 		t.Errorf("naive per-turn messages = %v, want %v", naive.perTurnMessages, wantNaive)
 	}
@@ -203,7 +213,7 @@ func TestBenchTinyScenarioMessageCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runArm(v1): %v", err)
 	}
-	wantV1 := []int{14, 17, 19} // naive + 1 anchored-facts message; +1 retrieval from turn 2
+	wantV1 := []int{3, 6, 8} // naive + 1 anchored-facts message; +1 retrieval from turn 2
 	if !reflect.DeepEqual(v1.perTurnMessages, wantV1) {
 		t.Errorf("v1 per-turn messages = %v, want %v", v1.perTurnMessages, wantV1)
 	}

@@ -94,14 +94,14 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		Content: systemPrompt,
 	})
 
-	// 2. Tool definitions (fixed order: fs_read, fs_write, fs_list, shell_exec, git)
-	toolDefs := c.toolsReg.List()
-	for _, t := range toolDefs {
-		messages = append(messages, llm.Message{
-			Role:    "system",
-			Content: fmt.Sprintf("TOOL: %s - %s", t.Name(), t.Description()),
-		})
-	}
+	// 2. Tool definitions travel ONLY via ChatRequest.Tools (see ToolDefs
+	// below), which OpenAI-compatible providers consume natively as
+	// structured function schemas. This used to ALSO inject one
+	// "TOOL: name - description" system message per tool here, restating
+	// the same name+description the structured schema already carries —
+	// pure duplication (confirmed: ~1.5-2K wasted prompt tokens per turn
+	// with the default 16-tool registry), and especially costly for small
+	// local models already fighting a tight context window.
 
 	// 3. Session-scoped context: v0 anchored facts plus the v1 feature
 	// injections (anchoring, retrieval, compaction), all gated by the
@@ -236,11 +236,24 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		}
 	}
 
-	// 5. Current user message
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: userMessage,
-	})
+	// 5. Current user message. Callers (the agent loop) persist the user
+	// message to the store BEFORE calling Build, so step 4's history window
+	// already ends with it — appending it again here would duplicate it in
+	// every request (confirmed in production: the same user text appeared
+	// twice in one LLM call). Skip the append when the last message already
+	// assembled is that exact user turn; on tool-result continuation
+	// iterations userMessage is "" and nothing is appended here at all (the
+	// continuation's own history window, ending in tool results, is enough).
+	if userMessage != "" {
+		last := len(messages) - 1
+		alreadyPresent := last >= 0 && messages[last].Role == "user" && messages[last].Content == userMessage
+		if !alreadyPresent {
+			messages = append(messages, llm.Message{
+				Role:    "user",
+				Content: userMessage,
+			})
+		}
+	}
 
 	return messages, nil
 }

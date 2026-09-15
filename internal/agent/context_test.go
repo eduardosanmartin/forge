@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -35,7 +34,12 @@ func TestContextAssembler_Build_SystemPromptFirst(t *testing.T) {
 	}
 }
 
-func TestContextAssembler_Build_ToolDefinitionsInFixedOrder(t *testing.T) {
+// Tool definitions travel exclusively via ToolDefs() (ChatRequest.Tools),
+// checked for fixed order in TestContextAssembler_ToolDefs_FixedOrder below.
+// Build used to ALSO inject one "TOOL: name - description" system message
+// per tool, duplicating the same name+description already in the structured
+// schema — this guards against that regressing back in.
+func TestContextAssembler_Build_NoDuplicateToolSystemMessages(t *testing.T) {
 	ctx := context.Background()
 	toolsReg := tools.NewDefaultRegistry(nil, "", nil)
 	store := &contextMockStore{}
@@ -46,27 +50,9 @@ func TestContextAssembler_Build_ToolDefinitionsInFixedOrder(t *testing.T) {
 		t.Fatalf("Build failed: %v", err)
 	}
 
-	// Find tool definition messages (they have role="system" and content starting with "TOOL:")
-	toolMsgs := []llm.Message{}
 	for _, m := range messages {
 		if m.Role == "system" && len(m.Content) > 6 && m.Content[:6] == "TOOL: " {
-			toolMsgs = append(toolMsgs, m)
-		}
-	}
-
-	if len(toolMsgs) != 10 {
-		t.Errorf("expected 10 tool definitions, got %d", len(toolMsgs))
-	}
-
-	expectedOrder := []string{"fs_read", "fs_write", "fs_list", "shell_exec", "git", "git_worktree_add", "git_worktree_list", "git_worktree_remove", "git_branch_task", "github"}
-	for i, expected := range expectedOrder {
-		if i >= len(toolMsgs) {
-			t.Errorf("missing tool at index %d: %s", i, expected)
-			continue
-		}
-		// Check that the tool name appears in the message
-		if !containsToolName(toolMsgs[i].Content, expected) {
-			t.Errorf("tool at index %d: expected %q, got %q", i, expected, toolMsgs[i].Content)
+			t.Errorf("found duplicated plain-text tool description in Build() output: %q", m.Content)
 		}
 	}
 }
@@ -229,11 +215,6 @@ func findSubstring(s, substr string) bool {
 		}
 	}
 	return false
-}
-
-func containsToolName(content, toolName string) bool {
-	// content format: "TOOL: fs_read - ..."
-	return findSubstring(content, "TOOL: "+toolName+" -")
 }
 
 func TestContextAssembler_Build_GetSessionNotFoundProceeds(t *testing.T) {

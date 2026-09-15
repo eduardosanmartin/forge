@@ -176,8 +176,22 @@ func TestParallelToolCalls_DispatchViaLoop(t *testing.T) {
 			atomic.AddInt32(&cur, -1)
 			return llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "child:" + lastUser}}}}, nil
 		}
-		// Parent first call returns two spawn tools
-		if lastUser == "do both" {
+		// Parent's first call returns two spawn tools. Detect "already
+		// dispatched" by checking for a tool result matching c1/c2 in
+		// history (rather than the trailing user message, which no longer
+		// gets an artificial empty re-append between continuation
+		// iterations now that Build() doesn't duplicate/pad it) — otherwise
+		// this mock would keep re-issuing the same spawn pair forever, since
+		// the real "do both" user message legitimately stays the most
+		// recent user-role entry across every continuation iteration.
+		alreadyDispatched := false
+		for _, m := range req.Messages {
+			if m.Role == "tool" && (m.ToolCallID == "c1" || m.ToolCallID == "c2") {
+				alreadyDispatched = true
+				break
+			}
+		}
+		if lastUser == "do both" && !alreadyDispatched {
 			return llm.ChatResponse{
 				Choices: []llm.Choice{{Message: llm.Message{
 					Role:    "assistant",
