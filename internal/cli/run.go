@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/config"
@@ -135,7 +137,13 @@ func newRunCommand() *cobra.Command {
 				if verifyAudit {
 					return runVerifyAudit(cmd.OutOrStdout(), manifestPath, stateDir, jsonOut)
 				}
-				return runManifest(cmd.Context(), manifestPath, jsonOut, autoYes, stateDir, resume, decompose)
+				// runManifest silences cmd's error print itself, but only once
+				// it actually has a Report to have printed guidance for — an
+				// early failure (no daemon, bad manifest, sensitivity
+				// rejection...) never reaches that point and must still get
+				// cobra's normal "Error: %s" (e.g. the "run forge serve" hint),
+				// exactly as before this change.
+				return runManifest(cmd, manifestPath, jsonOut, autoYes, stateDir, resume, decompose)
 			}
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
 				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
@@ -247,7 +255,121 @@ func previewToolArgs(args json.RawMessage) string {
 	return client.FormatToolArgs(args)
 }
 
-func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool, stateDir string, resume, decompose bool) error {
+// pollSubagentsInterval is how often pollSubagents polls session.list.
+// Deliberately not tighter than a few seconds: it is a real RPC round trip,
+// and subagent trees change slowly relative to LLM turn latency.
+const pollSubagentsInterval = 4 * time.Second
+
+// pollSubagents polls session.list every pollSubagentsInterval until ctx is
+// done, printing a summary whenever the set of direct subagents parented at
+// sessionID changes (a new one appears, or an existing one's message count
+// moves) — the same metadata `forge subagents list` already reads
+// (session.Metadata["subagent"]/["subagent_parent"]), just watched live
+// instead of queried once on demand. A poll failure is swallowed (best
+// effort, must never interrupt or spam the run over a transient RPC hiccup).
+func pollSubagents(ctx context.Context, cl *client.Client, sessionID string, out io.Writer) {
+	ticker := time.NewTicker(pollSubagentsInterval)
+	defer ticker.Stop()
+	seen := map[string]int{}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		res, err := cl.ListSessions(ctx, 200, 0)
+		if err != nil {
+			continue
+		}
+		current := subagentSnapshot(res.Sessions, sessionID)
+		if msg, changed := formatSubagentSnapshot(seen, current); changed {
+			fmt.Fprint(out, msg)
+		}
+		seen = current
+	}
+}
+
+// subagentSnapshot extracts, from one session.list response, the direct
+// subagents parented at sessionID — the same metadata `forge subagents
+// list` reads (session.Metadata["subagent"]/["subagent_parent"]) — as
+// childSessionID -> current message count.
+func subagentSnapshot(sessions []daemon.SessionResult, sessionID string) map[string]int {
+	current := map[string]int{}
+	for _, s := range sessions {
+		if s.Metadata == nil {
+			continue
+		}
+		isSub, _ := s.Metadata["subagent"].(bool)
+		if !isSub {
+			continue
+		}
+		parentID, _ := s.Metadata["subagent_parent"].(string)
+		if parentID != sessionID {
+			continue
+		}
+		current[s.ID] = s.MessageCount
+	}
+	return current
+}
+
+// formatSubagentSnapshot compares two consecutive subagentSnapshot results
+// and reports whether anything changed (a subagent appeared/disappeared, or
+// an existing one's message count moved) plus, when it did, the summary
+// line(s) to print. Returns changed=false (and an empty message) for "no
+// subagents at all" so a run with none stays silent instead of repeating
+// "0 activos" every poll interval.
+func formatSubagentSnapshot(prev, current map[string]int) (msg string, changed bool) {
+	if len(current) == 0 {
+		return "", false
+	}
+	changed = len(current) != len(prev)
+	if !changed {
+		for id, msgs := range current {
+			if prev[id] != msgs {
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return "", false
+	}
+	ids := make([]string, 0, len(current))
+	for id := range current {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var b strings.Builder
+	fmt.Fprintf(&b, "[subagentes] %d activo(s) bajo esta corrida:\n", len(current))
+	for _, id := range ids {
+		short := id
+		if len(short) > 8 {
+			short = short[:8]
+		}
+		fmt.Fprintf(&b, "  - %s: %d mensajes\n", short, current[id])
+	}
+	return b.String(), true
+}
+
+// printToolCallTick renders one live daemon.MethodToolCallEvent for a
+// manifest task's turn — the same "-> tool(...)" / "<- ok"/"<- error" shape
+// writeHumanResult prints after the fact for a single-prompt turn, but LIVE
+// while the task's blocking RPC call is still in flight (see
+// client.ManifestExecutor's onToolTick). The event payload carries no
+// argument preview (daemon.ToolCallEventPayload has none), only name/status.
+func printToolCallTick(ev daemon.ToolCallEventPayload) {
+	switch ev.Status {
+	case "started":
+		fmt.Fprintf(os.Stderr, "  -> %s\n", ev.Name)
+	case "finished":
+		fmt.Fprintln(os.Stderr, "  <- ok")
+	case "error":
+		fmt.Fprintf(os.Stderr, "  <- error: %s\n", ev.Error)
+	}
+}
+
+func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool, stateDir string, resume, decompose bool) error {
+	ctx := cmd.Context()
 	app, _ := AppFromContext(ctx)
 	if app == nil || app.Config == nil {
 		return fmt.Errorf("configuration not loaded (internal error)")
@@ -320,13 +442,29 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 
 	var exec run.Executor
 	if mani.Mode != "dry_run" {
-		exec = client.ManifestExecutor(ctx, cl, sessID)
+		var onToolTick func(daemon.ToolCallEventPayload)
+		if !jsonOut {
+			onToolTick = printToolCallTick
+		}
+		exec = client.ManifestExecutor(ctx, cl, sessID, onToolTick)
 	}
 	r := newManifestRunner(mani, cfg, exec, autoYes, stateDir, sessID)
 	if decompose {
 		r.Decompose = true
 		r.Decomposer = client.ManifestDecomposer(cl)
 	}
+
+	// Nivel 2 observability: poll for subagents a task spawns (spawn_subagent
+	// / RF-1.2) while the blocking Run/Resume call is in flight. Purely a
+	// CLI-side session.list poll — no daemon changes, the topology data
+	// already exists (same metadata `forge subagents list` reads). Stopped
+	// via cancel once Run/Resume returns, whatever the outcome.
+	if mani.Mode != "dry_run" && !jsonOut {
+		pollCtx, pollCancel := context.WithCancel(ctx)
+		defer pollCancel()
+		go pollSubagents(pollCtx, cl, sessID, os.Stderr)
+	}
+
 	var rep *run.Report
 	var runErr error
 	if resume {
@@ -339,8 +477,53 @@ func runManifest(ctx context.Context, manifestPath string, jsonOut, autoYes bool
 		if wErr := writeManifestReport(rep, jsonOut); wErr != nil {
 			return wErr
 		}
+		if !jsonOut {
+			printManifestGuidance(os.Stdout, rep, manifestPath)
+		}
+		// We reached a real Report and already printed our own guidance for
+		// it above — cobra's generic "Error: %s" on top would only repeat
+		// (or, for a HITL pause, misrepresent) what writeManifestReport and
+		// printManifestGuidance already said. Every EARLIER failure (no
+		// daemon, bad manifest, sensitivity rejection...) returns before
+		// this point and keeps cobra's normal error printing.
+		cmd.SilenceErrors = true
 	}
 	return runErr
+}
+
+// printManifestGuidance prints the one human-facing line that used to be
+// cobra's generic "Error: %s" (now silenced for manifest mode — see the run
+// command's RunE). A HITL pause awaiting approval is the run working
+// correctly, not a failure, so it gets a distinct, non-alarming message and
+// the exact next command instead of a message indistinguishable from a
+// genuine problem. Killed/failed runs keep their existing report content
+// (already printed via writeManifestReport's deviation/assumption fields) —
+// this only adds the specific next-step guidance for each case.
+func printManifestGuidance(w io.Writer, rep *run.Report, manifestPath string) {
+	switch rep.Status {
+	case run.StatusCompleted:
+		// No error was returned for this case; nothing more to say.
+	case run.StatusPaused:
+		retriesExhausted := false
+		for _, cpID := range rep.PausedCheckpoints {
+			if cpID == "implicit-retries-exhausted" {
+				retriesExhausted = true
+			}
+		}
+		if retriesExhausted {
+			fmt.Fprintf(w, "\n⚠ Una tarea no se completó tras agotar los reintentos — revisá el motivo arriba.\n")
+			fmt.Fprintf(w, "Para reintentarla (por ejemplo tras ajustar config/manifest): forge run --manifest %s --resume\n", manifestPath)
+			fmt.Fprintf(w, "(Ojo: --resume SIN --yes reintenta la tarea; CON --yes en este checkpoint la marca como fallida en forma definitiva, no la reintenta.)\n")
+		} else {
+			fmt.Fprintf(w, "\n✓ Generación exitosa — %d/%d tareas completadas. Pausado en checkpoint %s, a la espera de aprobación (HITL).\n",
+				len(rep.CompletedTasks), rep.TotalTasks, strings.Join(rep.PausedCheckpoints, ", "))
+			fmt.Fprintf(w, "Para aprobar y continuar: forge run --manifest %s --resume --yes\n", manifestPath)
+		}
+	case run.StatusKilled:
+		fmt.Fprintf(w, "\n✗ Corrida detenida por presupuesto agotado (RNF-8) — no es reanudable. Ajustá el presupuesto en el manifiesto y arrancá una corrida nueva.\n")
+	case run.StatusFailed:
+		fmt.Fprintf(w, "\n✗ La corrida terminó en error — ver el detalle arriba.\n")
+	}
 }
 
 func loadManifest(path string) (*run.Manifest, error) {
@@ -381,7 +564,35 @@ func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor
 			return false, nil
 		}
 	}
+	// Progress to stderr, unconditional on --json (same convention as the
+	// HITL lines above: --json only constrains the final stdout result,
+	// stderr stays human-readable). Otherwise the terminal is silent for the
+	// entire duration of a task's turn — a real complaint hit running the
+	// wordstat/chores examples ("no se ve actividad, solo el cursor
+	// parpadeando"), and the only way to check progress was polling
+	// `forge sessions` from a second terminal.
+	r.OnProgress = func(ev run.ProgressEvent) { printManifestProgress(os.Stderr, ev) }
 	return r
+}
+
+// printManifestProgress renders one run.ProgressEvent as a single line.
+// TokensUsed/IterationsUsed are the run's cumulative totals (not per-task)
+// so this line doubles as a running budget readout — the same numbers a
+// hard-wall kill (RNF-8) would report.
+func printManifestProgress(w io.Writer, ev run.ProgressEvent) {
+	switch ev.Phase {
+	case run.ProgressTaskStart:
+		fmt.Fprintf(w, "[%d/%d] %s: iniciando...\n", ev.TaskIndex, ev.TotalTasks, ev.TaskID)
+	case run.ProgressTaskRetry:
+		fmt.Fprintf(w, "[%d/%d] %s: intento %d/%d (falló: %v)\n",
+			ev.TaskIndex, ev.TotalTasks, ev.TaskID, ev.Attempt+1, ev.MaxRetries+1, ev.Err)
+	case run.ProgressTaskDone:
+		fmt.Fprintf(w, "[%d/%d] %s: listo (presupuesto acumulado: %d tokens, %d iteraciones)\n",
+			ev.TaskIndex, ev.TotalTasks, ev.TaskID, ev.TokensUsed, ev.IterationsUsed)
+	case run.ProgressTaskFailed:
+		fmt.Fprintf(w, "[%d/%d] %s: falló tras %d intentos: %v\n",
+			ev.TaskIndex, ev.TotalTasks, ev.TaskID, ev.MaxRetries+1, ev.Err)
+	}
 }
 
 func writeManifestReport(rep *run.Report, jsonOut bool) error {

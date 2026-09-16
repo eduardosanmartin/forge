@@ -62,6 +62,30 @@ func TestRunResumeWithoutPriorStateFailsClearly(t *testing.T) {
 	}
 }
 
+// TestRunManifestMissingDaemonStillReportsError is a regression lock: an
+// earlier version of the "don't let a HITL pause print as Error:" fix
+// (see run_manifest_guidance_test.go) silenced cobra's error print for
+// EVERY manifest-mode outcome unconditionally, including failures that
+// happen before runManifest ever produces a Report — such as no daemon
+// running. That swallowed the error entirely (silent exit 1, no message at
+// all), which is strictly worse than the "Error:" wording it replaced.
+// SilenceErrors must only engage once a Report was actually printed.
+func TestRunManifestMissingDaemonStillReportsError(t *testing.T) {
+	path := writeTestManifest(t, "checkpoint")
+	// --resume=false is explicit, not just the default, because execRoot
+	// reuses the shared RootCommand singleton across tests in this package —
+	// pflag does not reset a bound bool variable to false when a later
+	// Parse() simply omits the flag, so an earlier test's --resume can leak
+	// in as a stale true here otherwise.
+	err := execRoot(t, "run", "--manifest", path, "--resume=false")
+	if err == nil {
+		t.Fatal("expected an error with no daemon running")
+	}
+	if !strings.Contains(err.Error(), "forge serve") {
+		t.Errorf("expected the daemon-not-running hint naming 'forge serve', got %v", err)
+	}
+}
+
 func TestRunCommandRegistersResumeFlag(t *testing.T) {
 	cmd := newRunCommand()
 	f := cmd.Flags().Lookup("resume")

@@ -124,6 +124,16 @@ type TurnOptions struct {
 	// model name alone doesn't imply which provider's client understands it.
 	// Nil means "no override for this call".
 	OverrideProvider llm.Provider
+	// OnToolEvent, when set, is called synchronously around each tool
+	// invocation: once with status "started" right before execution, once
+	// more with "finished" or "error" right after. Purely observational
+	// (never affects control flow or the persisted transcript) — wired by
+	// SessionManager to broadcast daemon.MethodToolCallEvent regardless of
+	// whether text-delta streaming is enabled, since manifest-driven task
+	// turns (client.ManifestExecutor) never enable streaming but still
+	// benefit from live tool-call visibility. errMsg is "" except on
+	// status "error".
+	OnToolEvent func(toolCallID, name, status, errMsg string)
 }
 
 // ChatStreamer matches providers/registries that support streaming.
@@ -500,11 +510,30 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 					result.Halted = true
 				}
 				if !result.Halted {
+					// executeToolCallsParallel has no per-child progress hook of
+					// its own, so "started" fires for the whole batch up front
+					// here rather than as each child actually begins.
+					if opts.OnToolEvent != nil {
+						for _, tc := range choice.Message.ToolCalls {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
+						}
+					}
 					// Bounded parallel dispatch lives in scheduler.go
 					// (executeToolCallsParallel); tool results are appended
 					// serially here, after the join.
 					for _, out := range a.executeToolCallsParallel(ctx, sessionID, choice.Message.ToolCalls) {
 						totalToolCallCount++
+						if opts.OnToolEvent != nil {
+							// executeToolCallsParallel folds a tool error into
+							// result.Content ("ERROR: ...") rather than a
+							// separate error value — same convention the
+							// serial path below follows.
+							if strings.HasPrefix(out.result.Content, "ERROR: ") {
+								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "error", out.result.Content)
+							} else {
+								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "finished", "")
+							}
+						}
 						toolResultMsg := &store.Message{
 							SessionID:  sessionID,
 							Role:       "tool",
@@ -544,11 +573,28 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 					// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
 					// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
+					if opts.OnToolEvent != nil {
+						opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
+					}
 					toolCtx := tools.WithSessionID(ctx, sessionID)
 					toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
 					if err != nil {
 						toolResult = tools.Result{
 							Content: "ERROR: " + err.Error(),
+						}
+					}
+					if opts.OnToolEvent != nil {
+						// Execute reports most failures (unknown tool, bad
+						// args, permission denial) as Result{Content: "ERROR:
+						// ..."} with a NIL error — err != nil is the rarer
+						// case. Check both so a live progress display sees
+						// "error" for both.
+						if err != nil {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", err.Error())
+						} else if strings.HasPrefix(toolResult.Content, "ERROR: ") {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", toolResult.Content)
+						} else {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "finished", "")
 						}
 					}
 					totalToolCallCount++

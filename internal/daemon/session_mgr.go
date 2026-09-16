@@ -467,6 +467,24 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 	// the manager publishes text deltas via MessageDelta notifications so TUI clients
 	// receive live updates. Tool calls still execute as before; Chat remains canonical
 	// when streaming is disabled or provider lacks support.
+	// Tool-call events (RF: live progress) broadcast unconditionally —
+	// unlike OnDelta above, NOT gated behind streamingEnabled, since
+	// manifest-driven task turns (client.ManifestExecutor) never enable
+	// text-delta streaming but still benefit from live tool-call ticks
+	// (forge run subscribes to these while its blocking RPC call waits).
+	onToolEvent := func(toolCallID, name, status, errMsg string) {
+		m.mu.RLock()
+		pub := m.deltaPublisher
+		m.mu.RUnlock()
+		if pub == nil {
+			return
+		}
+		payload := ToolCallEventPayload{SessionID: sessionID, ToolCallID: toolCallID, Name: name, Status: status, Error: errMsg}
+		if notif, nErr := NewNotification(MethodToolCallEvent, payload); nErr == nil {
+			pub(sessionID, notif)
+		}
+	}
+
 	var result agent.TurnResult
 	streamingEnabled := m.cfg != nil && m.cfg.LLM.Streaming.IsEnabled()
 	if streamingEnabled && m.deltaPublisher != nil {
@@ -477,6 +495,7 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 			NoTools:          noTools,
 			OverrideModel:    overrideModel,
 			OverrideProvider: overrideProvider,
+			OnToolEvent:      onToolEvent,
 			OnDelta: func(delta string) {
 				// Publish per-delta notification (additive, best-effort, non-blocking).
 				// TTFT is emitted on first delta for observability.
@@ -503,11 +522,9 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
 		}
 	} else if streamingEnabled {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider})
-	} else if noTools || overrideModel != "" {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider, OnToolEvent: onToolEvent})
 	} else {
-		result, turnErr = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider, OnToolEvent: onToolEvent})
 	}
 	if turnErr != nil {
 		return result.Messages, turnErr

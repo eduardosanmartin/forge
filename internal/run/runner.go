@@ -42,13 +42,49 @@ type Decomposer func(ctx context.Context, goal, spec string) ([]Task, error)
 // auto-approve; for interactive CLI it prompts on stdin.
 type Checkpointer func(cp Checkpoint, state *RunState) (bool, error)
 
+// ProgressPhase names a moment in the task loop that Runner.OnProgress, when
+// set, is notified about. Purely observational — never affects control flow,
+// and a nil/slow OnProgress must never block the run (callers are expected
+// to make it non-blocking, e.g. a buffered channel send or a direct print).
+type ProgressPhase string
+
+const (
+	ProgressTaskStart  ProgressPhase = "task_start"
+	ProgressTaskRetry  ProgressPhase = "task_retry"
+	ProgressTaskDone   ProgressPhase = "task_done"
+	ProgressTaskFailed ProgressPhase = "task_failed"
+)
+
+// ProgressEvent is one notification to Runner.OnProgress. TaskIndex is
+// 1-based. Attempt is 0 on a task's first try, 1+ on each retry. Err is set
+// only for ProgressTaskRetry (the failure that triggered the retry) and
+// ProgressTaskFailed (the final failure after retries were exhausted).
+// TokensUsed/IterationsUsed are the RUN'S cumulative totals at the moment of
+// the event, not per-task — the same numbers budget.Check compares against
+// the manifest's ceilings.
+type ProgressEvent struct {
+	Phase          ProgressPhase
+	TaskID         string
+	TaskIndex      int
+	TotalTasks     int
+	Attempt        int
+	MaxRetries     int
+	TokensUsed     int
+	IterationsUsed int
+	Err            error
+}
+
 // Runner orchestrates the manifest task loop with budgets and HITL pauses.
 type Runner struct {
 	Manifest     *Manifest
 	Config       *config.Config
 	Executor     Executor
 	OnCheckpoint Checkpointer
-	Clock        func() time.Time // nil = time.Now
+	// OnProgress, when non-nil, is called synchronously at task-loop
+	// boundaries (start/retry/done/failed) — see ProgressEvent. Nil is the
+	// default and costs nothing (a single non-nil check per event site).
+	OnProgress func(ProgressEvent)
+	Clock      func() time.Time // nil = time.Now
 	StateDir     string           // dir for .forge/runs/<run_id> persistence; "" = no persistence
 	// SessionID is the daemon session backing Executor's turns (see
 	// client.ManifestExecutor). Run persists it into RunState so a later
@@ -78,6 +114,15 @@ type Runner struct {
 	// when the project file has not changed (cheap stat vs full parse).
 	sensitivityLastMod  time.Time
 	sensitivityLastSize int64
+}
+
+// emitProgress calls r.OnProgress if set. Never blocks the run on a slow or
+// nil callback — CLI wiring is expected to keep it cheap (a print or a
+// buffered send), see internal/cli/run.go.
+func (r *Runner) emitProgress(ev ProgressEvent) {
+	if r.OnProgress != nil {
+		r.OnProgress(ev)
+	}
 }
 
 // budgetCtxKey is the context key for sharing the live BudgetState with
@@ -588,6 +633,10 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 
 		// Execute with bounded retries (RF-11.4 circuit breaker).
 		maxRetries := r.Manifest.Budget.MaxRetriesPerTask
+		r.emitProgress(ProgressEvent{
+			Phase: ProgressTaskStart, TaskID: task.ID, TaskIndex: idx + 1, TotalTasks: len(tasks),
+			MaxRetries: maxRetries, TokensUsed: r.budget.TokensUsed, IterationsUsed: r.budget.IterationsUsed,
+		})
 		var lastErr error
 		var lastExecRes ExecResult
 		succeeded := false
@@ -627,6 +676,10 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			if tErr == nil {
 				succeeded = true
 				lastErr = nil
+				r.emitProgress(ProgressEvent{
+					Phase: ProgressTaskDone, TaskID: task.ID, TaskIndex: idx + 1, TotalTasks: len(tasks),
+					Attempt: attempt, MaxRetries: maxRetries, TokensUsed: r.budget.TokensUsed, IterationsUsed: r.budget.IterationsUsed,
+				})
 				break
 			}
 			lastErr = tErr
@@ -640,8 +693,16 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			if attempt == maxRetries {
 				break
 			}
+			r.emitProgress(ProgressEvent{
+				Phase: ProgressTaskRetry, TaskID: task.ID, TaskIndex: idx + 1, TotalTasks: len(tasks),
+				Attempt: attempt + 1, MaxRetries: maxRetries, TokensUsed: r.budget.TokensUsed, IterationsUsed: r.budget.IterationsUsed, Err: lastErr,
+			})
 		}
 		if !succeeded {
+			r.emitProgress(ProgressEvent{
+				Phase: ProgressTaskFailed, TaskID: task.ID, TaskIndex: idx + 1, TotalTasks: len(tasks),
+				Attempt: maxRetries, MaxRetries: maxRetries, TokensUsed: r.budget.TokensUsed, IterationsUsed: r.budget.IterationsUsed, Err: lastErr,
+			})
 			// RF-11.5: retries exhausted is an implicit HITL checkpoint, not a silent skip.
 			implicit := Checkpoint{ID: "implicit-retries-exhausted", Trigger: TriggerAfterTask, Required: true}
 			approved, _ := r.handleCheckpoint(ctx, implicit, fmt.Sprintf("task %s retries exhausted: %v", task.ID, lastErr))

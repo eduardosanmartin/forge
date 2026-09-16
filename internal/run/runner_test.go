@@ -78,6 +78,87 @@ func TestRunnerCompletesAllTasks(t *testing.T) {
 	}
 }
 
+// TestRunnerOnProgressEmitsTaskLifecycle verifies OnProgress fires exactly
+// the expected sequence of events for a run where every task succeeds first
+// try: task_start then task_done for each task, in order, with correct
+// 1-based TaskIndex/TotalTasks — the CLI progress bar (internal/cli/run.go)
+// depends on this shape to render "task N/M" correctly.
+func TestRunnerOnProgressEmitsTaskLifecycle(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	cfg := config.Defaults()
+	var events []ProgressEvent
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     okExecutor(10, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+		OnProgress:   func(ev ProgressEvent) { events = append(events, ev) },
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []struct {
+		phase     ProgressPhase
+		taskID    string
+		taskIndex int
+	}{
+		{ProgressTaskStart, "t1", 1},
+		{ProgressTaskDone, "t1", 1},
+		{ProgressTaskStart, "t2", 2},
+		{ProgressTaskDone, "t2", 2},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("got %d events, want %d: %+v", len(events), len(want), events)
+	}
+	for i, w := range want {
+		ev := events[i]
+		if ev.Phase != w.phase || ev.TaskID != w.taskID || ev.TaskIndex != w.taskIndex || ev.TotalTasks != 2 {
+			t.Errorf("event[%d] = %+v, want phase=%s task=%s index=%d/2", i, ev, w.phase, w.taskID, w.taskIndex)
+		}
+	}
+}
+
+// TestRunnerOnProgressEmitsRetryAndFailed verifies a task that fails every
+// attempt emits one task_retry per retry (carrying the failure that
+// triggered it) followed by exactly one task_failed once retries are
+// exhausted — not a task_done, and not silently nothing.
+func TestRunnerOnProgressEmitsRetryAndFailed(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Tasks = []Task{{ID: "t1", Goal: "task one"}}
+	m.Budget.MaxRetriesPerTask = 2
+	cfg := config.Defaults()
+	var events []ProgressEvent
+	r := &Runner{
+		Manifest:     m,
+		Config:       cfg,
+		Executor:     failingExecutor(errors.New("boom")),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return false, nil },
+		OnProgress:   func(ev ProgressEvent) { events = append(events, ev) },
+	}
+	if _, err := r.Run(context.Background()); err == nil {
+		t.Fatal("expected pause error after retries exhausted")
+	}
+
+	var phases []ProgressPhase
+	for _, ev := range events {
+		phases = append(phases, ev.Phase)
+	}
+	want := []ProgressPhase{ProgressTaskStart, ProgressTaskRetry, ProgressTaskRetry, ProgressTaskFailed}
+	if len(phases) != len(want) {
+		t.Fatalf("got phases %v, want %v", phases, want)
+	}
+	for i := range want {
+		if phases[i] != want[i] {
+			t.Errorf("phase[%d] = %s, want %s", i, phases[i], want[i])
+		}
+	}
+	last := events[len(events)-1]
+	if last.Err == nil || last.Err.Error() != "boom" {
+		t.Errorf("task_failed event should carry the failure, got %v", last.Err)
+	}
+}
+
 func TestRunnerBudgetKillWallClock(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
 	m.Budget.MaxWallClock = "1ms"

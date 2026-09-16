@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/eduardosanmartin/forge/internal/daemon"
@@ -17,8 +18,46 @@ import (
 // registry's ModelRouter into a concrete per-turn model override
 // (sugerenciasDeClaude.md §5.6) — this is the piece that was missing before:
 // the field existed on Task but nothing consumed it.
-func ManifestExecutor(ctx context.Context, cl *Client, sessionID string) run.Executor {
+//
+// onToolTick, when non-nil, is called for every daemon.MethodToolCallEvent
+// notification this session receives while the task's turn is in flight —
+// live per-tool-call progress for a blocking call that can otherwise run
+// silently for minutes. Nil disables the subscription entirely (no
+// overhead). Delivery is best-effort: cl.Events() never subscribes this
+// connection to anything (Transport.Subscribe has no caller anywhere in the
+// daemon — confirmed dead code), which means an unsubscribed connection
+// receives every broadcast notification by default (see
+// Transport.dispatchNotification's `len(cc.subscriptions) == 0` branch) —
+// so no explicit subscribe step is needed here, just session-ID filtering
+// on the receiving end.
+func ManifestExecutor(ctx context.Context, cl *Client, sessionID string, onToolTick func(daemon.ToolCallEventPayload)) run.Executor {
 	return func(ctx context.Context, task run.Task) (run.ExecResult, error) {
+		if onToolTick != nil {
+			evCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if events, evErr := cl.Events(evCtx); evErr == nil {
+				go func() {
+					for {
+						select {
+						case <-evCtx.Done():
+							return
+						case notif, ok := <-events:
+							if !ok {
+								return
+							}
+							if notif.Method != daemon.MethodToolCallEvent {
+								continue
+							}
+							var payload daemon.ToolCallEventPayload
+							if json.Unmarshal(notif.Params, &payload) != nil || payload.SessionID != sessionID {
+								continue
+							}
+							onToolTick(payload)
+						}
+					}
+				}()
+			}
+		}
 		var res daemon.ExecuteTurnResult
 		if err := cl.Call(ctx, daemon.MethodExecuteTurn, daemon.ExecuteTurnParams{
 			SessionID:   sessionID,
