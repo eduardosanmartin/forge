@@ -73,6 +73,17 @@ Forge lee configuración en capas: **proyecto (`.forge/config.json`) > global (`
 - **`agent.max_turn_seconds`**: default 300s (5 min). Si tu modelo es local y lento, subilo.
 - **`providers.<name>.request_timeout_seconds`**: timeout HTTP para una llamada de chat completion a ese proveedor puntual. `0`/ausente cae al default de 900s (15 min) — el mismo valor fijo que antes se aplicaba a todos los proveedores por igual. Configuralo bajo (120-180) en un modelo local que sabés que responde rápido para que un turno colgado corte pronto en vez de bloquear la GUI en silencio 15 minutos; dejalo alto (o en el default) para un modelo remoto grande legítimamente lento.
 - **`fallback_chain`**: opt-in, lista ordenada de `"provider/model"` a la que un turno recurre si el default falla por una razón transitoria (rate limit, outage, timeout de red). Ver §11.3 para el detalle completo.
+- **`agent.max_iterations`** (default 10): cuántas rondas de llamadas a herramienta puede hacer el modelo **dentro de un solo turno** antes de que el agente lo corte con error (`"turn aborted: agent reached max_iterations..."`). Es *distinto* de `budget.max_iterations` de un manifiesto (RF-11, §10), que es el total acumulado de **toda la corrida**, no de un turno. El default (10) alcanza para una tarea chica; una tarea que explora bastante el filesystem o el modelo (sobre todo remoto) lo agota rápido — subilo (40-80) si ves ese error.
+- **`agent.max_parallel_children`** (default 2, rango 2-4): tamaño del pool de subagentes concurrentes que `spawn_subagent` puede usar (RF-1.2, ver §9). Las llamadas LLM corren en paralelo; las escrituras a SQLite se serializan igual (una sola conexión + WAL), así que subir este número no paraleliza el disco, solo las llamadas de red/inferencia.
+- **`llm.cores`** (default 0 = automático, `max(1, núcleos-2)`): cupo de núcleos lógicos que el motor de inferencia local puede usar (RNF-1.6). Limitación real, no cosmética: forge es *cliente* del servidor de inferencia, no quien lo lanza — el `openai-compatible` estándar no tiene un knob de threads por request (a diferencia de la API nativa de Ollama). El valor efectivo queda solo en el log estructurado al arrancar el daemon; sos vos quien lo traslada a la config del propio motor (ej. `OMP_NUM_THREADS` de Ollama) si lo necesitás forzado de verdad.
+- **`llm.streaming.mode`**: `"off"` (default, nunca streamea) | `"on"` (siempre intenta streaming; si el proveedor no lo soporta, sí falla el turno en vez de degradar) | `"auto"` (intenta streaming, degrada a no-streaming solo si el proveedor no lo soporta *antes* del primer token — una falla a mitad de stream nunca reintenta). También acepta el booleano legado `true`/`false` (`true` equivale a `"on"`).
+- **`permissions.github`**: allowlist de subcomandos de solo lectura de la tool `github` (RF-10.3) — únicamente `issue-list`, `issue-view`, `pr-list`, `pr-view` son válidos. Vacía por defecto (deny-by-default, igual que `git`/`shell`), porque esta tool sale a la red vía el CLI `gh`.
+- **`permissions.custom`** (`deny`/`allow`): arbitra las tools internas de forge de tipo "custom" por nombre. `deny` apaga cualquiera, mutante o no; `allow` sirve específicamente para **reactivar** `anchoring_store`/`anchoring_delete` (mutan memoria persistente), que el motor deniega por piso de seguridad aunque el resto de `custom` esté abierto — un anchor propuesto por el modelo nunca se ancla solo (RNF-4.12). Un nombre presente en ambas listas a la vez resuelve **DENY** (fail-closed).
+- **`tui.layout`**: `"hybrid"` (default) | `"session"` | `"minimal"` — layouts alternativos de la TUI. **`tui.palette`**: hoy solo existe `"ember"` (cualquier otro valor cae a ese default). **`tui.sidebar`**: muestra/oculta el rail de sesiones al arrancar (togglable en caliente igual, ⌘/Ctrl+B).
+- **`limits.plugin_wasm_max_bytes`** (default 2 MiB) / **`limits.skill_file_max_bytes`** (default 1 MiB): tope de tamaño al instalar un plugin `.wasm` o cualquier archivo dentro de un skill — un valor ≤0 en el archivo de config es inválido y cae al default, no a "sin límite".
+- **`project.spec_path`**: ruta (relativa al workspace) del spec formal del proyecto (RF-8.4) — usada por `forge spec validate/log/diff` (§18) cuando no pasás `--path`, y es el default que resuelve `spec_ref` de un manifiesto si el manifiesto no lo especifica explícitamente (§10). Vacío = prueba los nombres default del workspace.
+- **`providers.<name>.price_per_million_input_tokens`/`_output_tokens`**: habilitan el cálculo de costo real en `forge cost summary` (§15) para ese proveedor; sin configurar, el uso se reporta igual pero marcado explícitamente "not priced".
+- **`daemon.auth_token_hash` / `tls_cert_file` / `tls_key_file`**: piso de seguridad para acceso remoto — ver §3.3 para el flujo completo (`forge daemon set-password` + TLS obligatorio para bindear fuera de loopback).
 
 ---
 
@@ -132,7 +143,25 @@ Todas hablan el mismo JSON-RPC — elegí la que te convenga según el contexto.
 forge chat
 ```
 
-Comandos dentro del REPL: `/model <nombre>` (hot-swap del modelo default del daemon — ver limitación en §11), `/sessions`, `/attach <id>`, `/new`, `/halt [id]`, `/resume <id>`, `/exit`.
+Comandos dentro del REPL (`internal/client/repl.go`):
+
+| Comando | Qué hace |
+|---|---|
+| `/model <nombre>` | Hot-swap del modelo default del daemon — nombre pelado (busca en todos los proveedores si no está en el actual) o `"provider/modelo"` explícito (ver limitación en §11) |
+| `/provider [nombre]` | Sin argumento, lista los proveedores configurados; con nombre, lista sus modelos **en vivo** y elegís uno interactivamente |
+| `/sessions` | Lista sesiones (muestra el padre de branch si aplica) |
+| `/new` | Arranca una sesión nueva |
+| `/attach <id>` | Cambia a una sesión existente (repite los últimos mensajes) |
+| `/branch [seq]` | Ramifica la sesión actual (opcionalmente hasta un `seq` puntual) |
+| `/merge <branch> [target]` | Fusiona la cola de una rama en otra sesión (default: la actual) |
+| `/switch <id>` | Cambia a una rama/sesión puntual |
+| `/success` | Marca la sesión actual como exitosa — el gate humano de §19 (Firma de aprobaciones) |
+| `/halt [id]` | Parada de emergencia de la sesión actual o la indicada |
+| `/resume <id>` | Reanuda una sesión detenida |
+| `/help` | Muestra esta lista |
+| `/exit` | Sale (Ctrl-D también funciona) |
+
+Los flags v1 (`--retrieval`, `--compaction`, `--anchoring`, `--routing`, `--skills`) se pasan al arrancar `forge chat`, no como comando dentro del REPL — ver §12.
 
 ### 4.2 Ejecución no interactiva (scripts / CI)
 
@@ -267,7 +296,7 @@ forge session compare <parent> <child>      # divergencia lado a lado
 
 ```bash
 forge run --manifest run.json [--yes] [--state-dir .]
-forge run --manifest run.json --decompose   # sin "tasks": pide al modelo que las genere (ver 10.1)
+forge run --manifest run.json --decompose   # sin "tasks": pide al modelo que las genere (ver 10.3)
 forge run --manifest run.json --resume      # reanuda un run interrumpido
 forge run --verify-audit                    # verifica el hash chain del audit log
 ```
@@ -295,7 +324,52 @@ Cada `task` tiene:
 - **`file_budget`**: declarativo — documenta qué archivos toca la tarea; hoy nada lo aplica automáticamente.
 - **`model_hint`**: `cheap`/`generation`/`reasoning` — se resuelve contra `providers.<name>.model_roles` (§2.2) y **fija el modelo de esa tarea puntual**, distinto al modelo default de la sesión. Sin `model_roles` configurado para el proveedor, o sin `model_hint` en la tarea, corre con el modelo default de siempre — no rompe nada existente.
 
-### 10.1 Descomposición automática (`--decompose`)
+**`spec` / `spec_ref`** (a nivel del manifiesto, no por tarea): el texto del spec formal que guía la corrida — se le pasa al modelo junto con `goal`, y es lo que usa `--decompose` para proponer tareas. `spec_ref` apunta a un archivo (ruta relativa al propio manifiesto); su contenido se vuelca en `spec` al parsear. Es **un único archivo**, no una lista ni un directorio — la lectura es literal (`os.ReadFile`), sin concatenar nada ni escanear una carpeta.
+
+Para referenciar más de un documento (un mockup HTML, un schema, una guía de estilo) sin que haga falta cargarlos todos de antemano: alcanza con **nombrar sus rutas dentro del spec** (o del `goal` de una tarea puntual) — el modelo las lee por su cuenta con `fs_read` (tool base, siempre disponible) cuando la tarea lo necesita, en vez de traer todo a cada turno. Ejemplo dentro de `SPEC.md`:
+
+```markdown
+## Referencias
+- Mockup de la UI: `design/mockup.html`
+- Esquema de datos: `api/schema.json`
+- Convenciones de estilo: `docs/style-guide.md`
+```
+
+Esto también sirve para dar contexto distinto por tarea: cada `goal` puede nombrar solo los archivos que le tocan a esa tarea en particular, en vez de forzar todo el contexto en un único `spec_ref` global.
+
+Si en cambio necesitás que todo el contenido se cargue de una sola vez, concatenado, antes de arrancar la corrida (no bajo demanda vía `fs_read`): hoy no hay soporte nativo para una lista de `spec_ref`s — hay que concatenar los archivos a mano en uno físico y apuntar `spec_ref` ahí.
+
+### 10.1 Estados finales de una corrida: `completed` / `paused` / `killed` / `failed`
+
+Al terminar (o interrumpirse), `forge run --manifest` deja una de estas 4 marcas en `report.json`/`state.json`, y el mensaje que imprime en la terminal cambia según cuál sea — no todo lo que devuelve un código de salida ≠0 significa que algo salió mal:
+
+- **`completed`**: todas las tareas pasaron, sin nada pendiente. Sin mensaje extra, exit code 0.
+- **`paused`**: se detuvo en un checkpoint HITL esperando aprobación — el caso normal de `mode: checkpoint`. Es **reanudable**. Si el checkpoint es uno declarado por vos (ej. `before_merge`, `budget_threshold`), el mensaje es explícitamente de éxito ("Generación exitosa — N/M tareas completadas..."), con el comando exacto para aprobar (`--resume --yes`). Si en cambio es el checkpoint implícito `implicit-retries-exhausted` (una tarea agotó sus reintentos), el mensaje lo aclara distinto y avisa que `--yes` ahí **no** reintenta la tarea — la marca como fallida en forma definitiva. Para reintentarla de verdad: `--resume` sin `--yes`.
+- **`killed`**: tocó un techo duro de presupuesto (RNF-8: `max_wall_clock`/`max_tokens`/`max_iterations` del manifiesto). **No es reanudable** — `--resume` se niega explícitamente ("resume is not supported for a failed run" es el mensaje real, aunque el estado se llame `killed`). Hay que ajustar el presupuesto en el manifiesto y arrancar una corrida nueva desde cero.
+- **`failed`**: una tarea falló y se le agotaron los reintentos sin que hubiera un checkpoint pendiente de aprobar (o se aprobó como fallo definitivo, ver arriba). Tampoco reanudable.
+
+**`budget_threshold`**, el aviso temprano antes del muro duro: un checkpoint con `"trigger": "budget_threshold", "threshold": 0.8` pausa apenas **cualquiera** de los tres presupuestos (tiempo, tokens, iteraciones) cruza el 80% de su propio techo — no es un promedio de los tres, es el máximo de las tres fracciones. Ojo con dos detalles: (1) necesita `"required": true` — sin eso queda completamente inerte, no pausa nunca; (2) no se "consume" al aprobarlo una vez — si seguís por encima del umbral en el siguiente límite de tarea, vuelve a preguntar (con `--yes` se aprueba solo cada vez, sin que lo notes).
+
+### 10.2 Progreso en vivo
+
+Mientras la llamada bloqueante está en curso, `forge run --manifest` ya no queda mudo — imprime a stderr (funciona con o sin `--json`, igual que los mensajes HITL):
+
+```
+[1/3] t1-storage: iniciando...
+  -> fs_write
+  <- ok
+  -> shell_exec
+  <- error: ERROR: open internal\store\store.go.tmp-123: The system cannot find the path specified.
+  -> fs_write
+  <- ok
+[1/3] t1-storage: listo (presupuesto acumulado: 9626 tokens, 10 iteraciones)
+```
+
+- Una línea `[N/M] tarea: ...` en cada límite de tarea (inicio, reintento, lista, fallida) — el presupuesto mostrado es el acumulado de **toda la corrida**, no de esa tarea sola.
+- Un tick `-> herramienta` / `<- ok`/`<- error: ...` por cada llamada a herramienta, en tiempo real — incluye errores que el modelo termina corrigiendo solo dentro del mismo turno (ver `## 21`), visibles ahora en el momento en que pasan en vez de solo si la tarea entera termina fallando.
+- Si alguna tarea dispara `spawn_subagent`, un bloque `[subagentes] N activo(s) bajo esta corrida: ...` aparece cuando la topología cambia (sondeo cada ~4s a `session.list`, silencioso si no hay ninguno).
+
+### 10.3 Descomposición automática (`--decompose`)
 
 Si el manifiesto no trae `tasks` (o viene vacío), `--decompose` le pide al modelo default del daemon que proponga la lista de tareas a partir de `goal` (+ `spec` si está presente), usando una sesión efímera separada de la sesión real de ejecución. La propuesta:
 - Se valida con las mismas reglas que un manifiesto escrito a mano (IDs únicos, `goal` no vacío).
@@ -333,6 +407,8 @@ forge daemon set-provider go --model kimi-k3           # cambia el default, aunq
 ### 11.2 Routing por rol (`model_roles`)
 
 Con `--routing` (flag v1), el paso de generación principal de un turno normal puede resolver su modelo vía `providers.<name>.model_roles.generation` en vez del default fijo. Por separado, un `Task.model_hint` en un manifiesto (§10) resuelve `providers.<name>.model_roles.<hint>` y fija el modelo de esa tarea puntual — ambos caminos comparten la misma config `model_roles`. La infraestructura de routing (`internal/routing`) define además steps `classify`/`retrieve`/`summarize`/`validate`/`reason` para automatizar la elección de rol — hoy esos steps no hacen ninguna llamada a modelo (retrieval/compactación son determinísticos), así que no hay nada que enrutar ahí todavía; el rol de cada tarea sigue siendo una decisión explícita (a mano o del descomponedor de `--decompose`), no automática.
+
+**Más de un proveedor declarando el mismo rol**: si dos providers en `providers.*` declaran, por ejemplo, `"generation"` con modelos distintos, gana **el `default_provider`** — de forma determinística, no según el orden del archivo. Un rol que solo declara un provider *no-default* sigue resolviendo a ese provider igual (routing de costo legítimo: por ejemplo `"cheap"` servido por un proveedor local mientras el default atiende `"reasoning"`). El proveedor que gana la resolución de un rol es también el que efectivamente recibe la llamada HTTP para esa tarea — no solo el nombre del modelo cambia, cambia el cliente entero.
 
 ### 11.3 Failover automático de modelo (`fallback_chain`)
 
@@ -437,6 +513,8 @@ forge spec validate   # señales mecánicas de divergencia spec↔código (RF-8.
 
 Read-only: invoca `git log/show/diff` sobre el archivo de spec versionado, nunca lo modifica.
 
+**Ojo con `spec validate` en un pipeline/gate automático**: hoy siempre termina con exit code `0`, incluso si el reporte encuentra requisitos sin evidencia o divergencia — el código (`internal/cli/spec_validate.go`) solo devuelve error si no pudo *ejecutar* la validación (spec faltante, etc.), nunca por lo que el reporte dice. Por eso **no sirve hoy** como `done_criteria: "cmd: forge spec validate ..."` de un manifiesto (§10) para bloquear algo automáticamente por divergencia — hay que leer el reporte a mano (`req-without-evidence`, etc.) o esperar a que exista un flag tipo `--strict` que sí devuelva exit code ≠0.
+
 ---
 
 ## 19. Firma de aprobaciones
@@ -461,3 +539,5 @@ JSON estructurado a stderr (+ archivo opcional vía `logging.file`), niveles `de
 - **El puerto de la GUI cambió solo**: si no fijaste `daemon.addr` (§3.2), cada `forge serve` elige un puerto nuevo.
 - **Login pedido aunque no configuraste password**: si ves esto en una build vieja, era un bug de CSS (`[hidden]` sin prioridad suficiente) ya corregido — actualizá el binario.
 - **Puerto ocupado (`bind: Only one usage of each socket address...`)**: ya hay un daemon corriendo en esa dirección — `forge status` o revisá procesos antes de levantar otro con el mismo `--addr`.
+- **`forge run`/`forge fanout`/`forge subagents list` "no encuentran" el daemon que acabás de levantar en otro puerto**: estos comandos no tienen flag `--addr` propio — descubren el daemon leyendo el archivo **global por usuario** `~/.forge/daemon.addr`, que cualquier `forge serve --addr <host:port>` sobrescribe al arrancar. Si tenés más de un `forge serve` corriendo a la vez (distintos proyectos, distintos puertos), todos estos comandos van a conectarse siempre al **último que arrancó**, sin importar desde qué directorio los corras. No hay forma de apuntar un comando puntual a un daemon específico hoy — si necesitás trabajar con dos daemons en paralelo, tenés que reiniciar el que querés usar justo antes de cada tanda de comandos.
+- **Un manifiesto con `git.isolation: "worktree"` escribe directo en tu directorio de trabajo, no en un worktree aislado**: es un no-op en esta versión — confirmado en el comentario del propio código (`internal/run/runner.go`, cerca de `CommitPerTask`): "real git commit is a follow-up via worktree branch integration". El checkpoint `before_merge` sigue siendo un gate de aprobación real, pero no protege tu working tree de cambios a medio terminar como el nombre del campo sugiere — revisá el diff con cuidado antes de aprobar, y no asumas que podés simplemente "descartar" una corrida killeada sin revisar qué archivos quedaron escritos.
