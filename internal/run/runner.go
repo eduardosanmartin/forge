@@ -603,7 +603,22 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			// context (cancellation) and token/iteration via turn-loop check after
 			// each AddTurn so a runaway task is killed promptly, not at the next
 			// task boundary.
-			execRes, tErr := r.callExecutor(ctx, task)
+			//
+			// A retry (attempt > 0) appends the previous attempt's failure to the
+			// goal text instead of resubmitting it verbatim. Without this, a retry
+			// was a BLIND repeat: ManifestExecutor sends only task.Goal (see
+			// internal/client/run_manifest.go), so the model never learned its
+			// code failed go build/go test and — observed in practice — regenerated
+			// the identical bug (same duplicate map key, same line) on every retry,
+			// burning budget without ever converging.
+			execTask := task
+			if attempt > 0 && lastErr != nil {
+				execTask.Goal = fmt.Sprintf(
+					"%s\n\nIMPORTANT: your previous attempt at this task failed this mechanical check:\n%s\n\nFix the exact problem described above — do not repeat the same mistake.",
+					task.Goal, lastErr.Error(),
+				)
+			}
+			execRes, tErr := r.callExecutor(ctx, execTask)
 			r.budget.AddTurn(execRes.Tokens, execRes.Iterations)
 			r.state.Budget = r.budget
 			r.state.UpdatedAt = r.now()

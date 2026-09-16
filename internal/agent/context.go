@@ -222,18 +222,14 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			return nil, fmt.Errorf("get recent messages: %w", err)
 		}
 
-		// Reverse to get chronological order (oldest first)
+		// Reverse to get chronological order (oldest first), then drop any
+		// leading orphaned tool-result message the fixed-size window cut
+		// mid-turn (see dropOrphanedToolPrefix).
+		windowed := make([]llm.Message, 0, len(recentMessages))
 		for i := len(recentMessages) - 1; i >= 0; i-- {
-			msg := recentMessages[i]
-			llmMsg := llm.Message{
-				Role:       msg.Role,
-				Content:    msg.Content,
-				ToolCalls:  msg.ToolCalls,
-				ToolCallID: msg.ToolCallID,
-				Name:       msg.Name,
-			}
-			messages = append(messages, llmMsg)
+			windowed = append(windowed, toLLMMessage(recentMessages[i]))
 		}
+		messages = append(messages, dropOrphanedToolPrefix(windowed)...)
 	}
 
 	// 5. Current user message. Callers (the agent loop) persist the user
@@ -319,16 +315,44 @@ func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID
 	if window > len(transcript) {
 		window = len(transcript)
 	}
+	tail := make([]llm.Message, 0, window)
 	for _, msg := range transcript[len(transcript)-window:] {
-		*messages = append(*messages, llm.Message{
-			Role:       msg.Role,
-			Content:    msg.Content,
-			ToolCalls:  msg.ToolCalls,
-			ToolCallID: msg.ToolCallID,
-			Name:       msg.Name,
-		})
+		tail = append(tail, toLLMMessage(msg))
 	}
+	*messages = append(*messages, dropOrphanedToolPrefix(tail)...)
 	return true
+}
+
+// toLLMMessage converts a persisted store.Message into the llm.Message shape
+// ChatRequest consumes.
+func toLLMMessage(msg store.Message) llm.Message {
+	return llm.Message{
+		Role:       msg.Role,
+		Content:    msg.Content,
+		ToolCalls:  msg.ToolCalls,
+		ToolCallID: msg.ToolCallID,
+		Name:       msg.Name,
+	}
+}
+
+// dropOrphanedToolPrefix removes leading "tool" role messages from a
+// chronologically-ordered (oldest-first) history window. A fixed-size
+// sliding window can cut a turn's assistant message (the one carrying
+// ToolCalls) while keeping a later "tool" message that answers one of those
+// calls, leaving that tool result's ToolCallID with no matching ToolCalls
+// entry anywhere in the request. Providers that validate this pairing
+// strictly (observed against OpenCode Zen's "Console Go": HTTP 400 "tool
+// result's tool id ... not found") reject the whole request; providers that
+// don't validate it accept a malformed conversation silently instead.
+// Dropping the orphan is correct either way — without its originating
+// tool_calls entry in the same request, the model has no way to make sense
+// of a bare tool result.
+func dropOrphanedToolPrefix(msgs []llm.Message) []llm.Message {
+	i := 0
+	for i < len(msgs) && msgs[i].Role == "tool" {
+		i++
+	}
+	return msgs[i:]
 }
 
 // ToolDefs returns the tool definitions in fixed order for ChatRequest.

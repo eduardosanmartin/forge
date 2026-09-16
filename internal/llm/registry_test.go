@@ -781,6 +781,113 @@ func TestRegistry_GetModelForStep_ResolvesModelRolesFromConfig(t *testing.T) {
 	}
 }
 
+// TestRegistry_ProviderForRole_MatchesResolvedModel guards against a bug
+// found running a manifest task with model_hint against a config declaring
+// model_roles on two DIFFERENT providers: buildModelRouter used to merge
+// every provider's model_roles into one flat map with no provider scoping,
+// so which provider "won" a role both declared depended on Go's randomized
+// map iteration order. In production this sent a request to the default
+// provider's endpoint carrying the OTHER provider's model name, which that
+// endpoint rejected (401 "Model ... is not supported"). The fix makes the
+// default provider's declaration always win a role it declares, and exposes
+// ProviderForRole so callers pin the provider the resolved model actually
+// belongs to, not just the model name.
+func TestRegistry_ProviderForRole_MatchesResolvedModel(t *testing.T) {
+	def := NewMockServer()
+	defer def.Close()
+	def.SetDefaultResponse(
+		(&ChatResponseBuilder{ID: "def", Model: "default-gen", Content: "from-default", FinishReason: "stop"}).Build(),
+	)
+
+	other := NewMockServer()
+	defer other.Close()
+	other.SetDefaultResponse(
+		(&ChatResponseBuilder{ID: "other", Model: "other-cheap", Content: "from-other", FinishReason: "stop"}).Build(),
+	)
+
+	cfg := &config.Config{
+		SchemaVersion:   config.CurrentSchemaVersion,
+		DefaultProvider: "def",
+		Providers: map[string]config.Provider{
+			"def": {
+				Kind:    "openai-compatible",
+				BaseURL: def.URL(),
+				Models:  []string{"default-gen"},
+				// Declares "generation" — the OTHER provider below also
+				// declares it with a different model; "def" being the
+				// default provider must always win this collision.
+				ModelRoles: map[string]string{"generation": "default-gen"},
+			},
+			"other": {
+				Kind:    "openai-compatible",
+				BaseURL: other.URL(),
+				Models:  []string{"other-cheap"},
+				// Declares BOTH a colliding role ("generation", must lose to
+				// "def") and a role "def" never declares ("cheap", must
+				// still resolve to "other" — a role isn't default-provider
+				// exclusive, just default-provider-priority on collision).
+				ModelRoles: map[string]string{"generation": "other-gen-should-lose", "cheap": "other-cheap"},
+			},
+		},
+		Network: config.NetworkConfig{
+			AllowedHosts: []string{hostFromURL(def.URL()), hostFromURL(other.URL())},
+		},
+	}
+
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	registry, err := New(cfg, cfg.Network.AllowedHosts, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer registry.Close()
+
+	router := registry.GetRouter()
+	if got := router.ModelForRole(routing.RoleGeneration); got != "default-gen" {
+		t.Fatalf("ModelForRole(generation) = %q, want %q (default provider must win the collision)", got, "default-gen")
+	}
+	if got := router.ModelForRole(routing.RoleCheap); got != "other-cheap" {
+		t.Fatalf("ModelForRole(cheap) = %q, want %q (only \"other\" declares it)", got, "other-cheap")
+	}
+
+	genProvider := registry.ProviderForRole(routing.RoleGeneration)
+	if genProvider == nil {
+		t.Fatal("ProviderForRole(generation) = nil")
+	}
+	cheapProvider := registry.ProviderForRole(routing.RoleCheap)
+	if cheapProvider == nil {
+		t.Fatal("ProviderForRole(cheap) = nil")
+	}
+
+	ctx, cancel := ContextWithTimeout(5 * time.Second)
+	defer cancel()
+
+	// Baseline AFTER New() — the openai-compatible constructor eagerly calls
+	// RefreshModels() once per provider, so each mock already has 1 request
+	// before any Chat call here. Assert deltas, not absolute counts.
+	defBaseline := len(def.Requests())
+	otherBaseline := len(other.Requests())
+
+	// Calling the resolved provider directly must hit the mock server that
+	// actually understands the resolved model — proving ModelForRole and
+	// ProviderForRole agree, not just that each independently looks plausible.
+	if _, err := genProvider.Chat(ctx, ChatRequest{Model: "default-gen", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("generation provider Chat: %v", err)
+	}
+	if len(def.Requests()) != defBaseline+1 {
+		t.Errorf("default provider mock got %d new requests, want 1 (generation must route to it)", len(def.Requests())-defBaseline)
+	}
+	if len(other.Requests()) != otherBaseline {
+		t.Errorf("other provider mock got %d new requests, want 0 (generation must not leak to it)", len(other.Requests())-otherBaseline)
+	}
+
+	if _, err := cheapProvider.Chat(ctx, ChatRequest{Model: "other-cheap", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+		t.Fatalf("cheap provider Chat: %v", err)
+	}
+	if len(other.Requests()) != otherBaseline+1 {
+		t.Errorf("other provider mock got %d new requests, want 1 (cheap must route to it)", len(other.Requests())-otherBaseline)
+	}
+}
+
 func TestRegistry_ChatForStep_UsesStepModel(t *testing.T) {
 	mock := NewMockServer()
 	defer mock.Close()

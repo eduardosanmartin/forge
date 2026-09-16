@@ -115,6 +115,15 @@ type TurnOptions struct {
 	// sugerenciasDeClaude.md §5.6) actually reaches the LLM call instead of
 	// staying a purely declarative field.
 	OverrideModel string
+	// OverrideProvider pins this single turn's LLM calls to a specific
+	// provider client, taking priority over the agent's own overrideProvider
+	// (spawn_subagent children) and the registry's default provider. Wired
+	// alongside OverrideModel from the registry's ModelRouter resolution
+	// (internal/llm.Registry.ProviderForRole) so a role resolved to a model
+	// declared by a NON-default provider actually calls that provider — the
+	// model name alone doesn't imply which provider's client understands it.
+	// Nil means "no override for this call".
+	OverrideProvider llm.Provider
 }
 
 // ChatStreamer matches providers/registries that support streaming.
@@ -330,7 +339,10 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		// falling back to something else on failure would silently ignore
 		// that choice instead of surfacing the error.
 		usingDefault := true
-		if a.overrideProvider != nil {
+		if opts.OverrideProvider != nil {
+			provider = opts.OverrideProvider
+			usingDefault = false
+		} else if a.overrideProvider != nil {
 			provider = a.overrideProvider
 			usingDefault = false
 		}

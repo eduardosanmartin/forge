@@ -383,10 +383,21 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 	// plain ExecuteTurn call, rather than failing the turn over what is
 	// fundamentally a sizing hint, not a hard requirement.
 	overrideModel := ""
+	var overrideProvider llm.Provider
 	if modelHint != "" {
+		role := routing.ModelRole(modelHint)
 		if rp, ok := m.llmReg.(routerProvider); ok {
 			if router := rp.GetRouter(); router != nil {
-				overrideModel = router.ModelForRole(routing.ModelRole(modelHint))
+				overrideModel = router.ModelForRole(role)
+			}
+		}
+		// The resolved model can belong to ANY configured provider (RF-2.4/
+		// 2.5 cost-based routing lets each role point at a different one) —
+		// pin the provider that declared it too, or the call would still go
+		// out over whatever provider the turn defaults to.
+		if overrideModel != "" {
+			if pp, ok := m.llmReg.(roleProviderResolver); ok {
+				overrideProvider = pp.ProviderForRole(role)
 			}
 		}
 	}
@@ -465,6 +476,7 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 			StreamingEnabled: true,
 			NoTools:          noTools,
 			OverrideModel:    overrideModel,
+			OverrideProvider: overrideProvider,
 			OnDelta: func(delta string) {
 				// Publish per-delta notification (additive, best-effort, non-blocking).
 				// TTFT is emitted on first delta for observability.
@@ -491,9 +503,9 @@ func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage
 			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
 		}
 	} else if streamingEnabled {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider})
 	} else if noTools || overrideModel != "" {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider})
 	} else {
 		result, turnErr = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
 	}
@@ -629,6 +641,15 @@ type modelSetter interface {
 // satisfy the interface at all.
 type routerProvider interface {
 	GetRouter() *routing.ModelRouter
+}
+
+// roleProviderResolver is implemented by an LLM registry that can name which
+// configured provider owns a role's resolved model (*llm.Registry does).
+// Type-asserted like routerProvider: a registry without it just resolves no
+// provider override, so a model_hint turn falls back to whatever provider it
+// would have used anyway rather than failing.
+type roleProviderResolver interface {
+	ProviderForRole(role routing.ModelRole) llm.Provider
 }
 
 // providerSwitcher matches registries that support hot-swapping the default

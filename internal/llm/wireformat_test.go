@@ -91,6 +91,68 @@ func TestOpenAICompatibleProvider_Chat_RealWireFormat(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatibleProvider_Chat_OmitsNameOnToolMessage is a regression
+// lock for a bug found running a real manifest task against OpenCode Zen's
+// "Console Go": messagesToAPI sent "name" on every message that had one set
+// (Message.Name is only ever populated on a "tool" role message in
+// practice — the tool's name, kept for storage/audit), which is a leftover
+// of the pre-tool_calls "function" message shape. Console Go rejected it
+// outright with HTTP 400 "messages[2]: \"name\" is not supported by this
+// endpoint"; other backends likely just ignored the extra field.
+func TestOpenAICompatibleProvider_Chat_OmitsNameOnToolMessage(t *testing.T) {
+	mock := NewMockServer()
+	defer mock.Close()
+	mock.SetDefaultResponse(
+		(&ChatResponseBuilder{ID: "x", Model: "m", Content: "ok", FinishReason: "stop"}).Build(),
+	)
+
+	logger, _, _ := logging.New(logging.Config{Level: "error"})
+	provider, err := NewOpenAICompatibleProvider(mock.URL(), "", []string{hostFromURL(mock.URL())}, logger)
+	if err != nil {
+		t.Fatalf("create provider: %v", err)
+	}
+	defer provider.Close()
+
+	ctx, cancel := ContextWithTimeout(5 * time.Second)
+	defer cancel()
+
+	_, err = provider.Chat(ctx, ChatRequest{
+		Model: "m",
+		Messages: []Message{
+			{Role: "user", Content: "read main.go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Type: "function", Function: ToolCallFunction{Name: "fs_read", Arguments: "{}"}}}},
+			{Role: "tool", ToolCallID: "call_1", Name: "fs_read", Content: "package main"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	last := mock.LastRequest()
+	if last == nil {
+		t.Fatal("no request captured")
+	}
+	var sent struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(last.Body, &sent); err != nil {
+		t.Fatalf("unmarshal sent body: %v", err)
+	}
+	if len(sent.Messages) != 3 {
+		t.Fatalf("sent %d messages, want 3", len(sent.Messages))
+	}
+	toolMsg := sent.Messages[2]
+	if toolMsg["role"] != "tool" {
+		t.Fatalf("messages[2].role = %v, want tool", toolMsg["role"])
+	}
+	if _, present := toolMsg["name"]; present {
+		t.Errorf(`messages[2] carries "name" = %v — Console Go rejects this field on a tool message`, toolMsg["name"])
+	}
+	if toolMsg["tool_call_id"] != "call_1" {
+		t.Errorf("messages[2].tool_call_id = %v, want call_1", toolMsg["tool_call_id"])
+	}
+}
+
 // TestValidateAllowlist_PortSemantics locks the allowlist matching rules:
 // portless entries match the hostname on any port; entries WITH a port
 // require exact host:port; empty list denies everything (RNF-4.9).

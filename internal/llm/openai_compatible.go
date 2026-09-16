@@ -409,7 +409,16 @@ func (p *OpenAICompatibleProvider) messagesToAPI(msgs []Message) []map[string]an
 			"role":    m.Role,
 			"content": m.Content,
 		}
-		if m.Name != "" {
+		// "name" is only ever populated on a "tool" role message in practice
+		// (the tool's name, for storage/audit — see internal/agent/loop.go).
+		// It's a leftover of the pre-tool_calls "function" message shape:
+		// the current tool-calling protocol identifies a tool result solely
+		// by tool_call_id, and at least one real backend (OpenCode Zen
+		// "Console Go") rejects "name" on a "tool" message outright ("name"
+		// is not supported by this endpoint). Other backends likely just
+		// ignore the extra field, which is why this went unnoticed until a
+		// stricter validator hit it.
+		if m.Name != "" && m.Role != "tool" {
 			msg["name"] = m.Name
 		}
 		if len(m.ToolCalls) > 0 {

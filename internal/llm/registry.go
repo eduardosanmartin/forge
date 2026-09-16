@@ -60,7 +60,13 @@ type Registry struct {
 	defaultProvider string
 	defaultModel    string
 	router          *routing.ModelRouter
-	allowedHosts    []string
+	// roleProviders holds, for each role the router resolves, which
+	// configured provider declared it — see buildModelRouter. A role's model
+	// name alone isn't enough to know which provider's client should handle
+	// the call: two providers can (legitimately, for cost-based routing, or
+	// by accident) declare the same role with different models.
+	roleProviders map[routing.ModelRole]string
+	allowedHosts  []string
 	logger          *slog.Logger
 	mu              sync.RWMutex
 	// fallbackChain backs ChatWithFallback (RNF: failover on rate limit/
@@ -161,31 +167,75 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 	return r, nil
 }
 
+// buildModelRouter collects providers.<name>.model_roles into one role->model
+// map plus a parallel role->provider map (r.roleProviders). Deterministic
+// precedence: every non-default provider is applied first, in sorted name
+// order, then the default provider last — so the default provider's
+// declaration for a role always wins when it declares one, while a role only
+// some OTHER provider declares still resolves (legitimate cost routing: e.g.
+// a local free provider serves "cheap" while the default handles
+// "reasoning"). Before this ordering, two providers declaring the SAME role
+// resolved to whichever one Go's (randomized) map iteration hit last —
+// observed in practice sending a request to the default provider's endpoint
+// carrying another provider's model name, which that endpoint rejected.
 func (r *Registry) buildModelRouter(cfg *config.Config) *routing.ModelRouter {
 	roleModels := make(map[routing.ModelRole]string)
+	r.roleProviders = make(map[routing.ModelRole]string)
 
-	// Collect model roles from all providers
-	for _, p := range cfg.Providers {
-		for role, model := range p.ModelRoles {
+	apply := func(providerName string) {
+		for role, model := range cfg.Providers[providerName].ModelRoles {
+			var rr routing.ModelRole
 			switch role {
 			case "cheap":
-				roleModels[routing.RoleCheap] = model
+				rr = routing.RoleCheap
 			case "generation":
-				roleModels[routing.RoleGeneration] = model
+				rr = routing.RoleGeneration
 			case "reasoning":
-				roleModels[routing.RoleReasoning] = model
+				rr = routing.RoleReasoning
+			default:
+				continue
 			}
+			roleModels[rr] = model
+			r.roleProviders[rr] = providerName
 		}
 	}
+
+	others := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		if name != r.defaultProvider {
+			others = append(others, name)
+		}
+	}
+	sort.Strings(others)
+	for _, name := range others {
+		apply(name)
+	}
+	apply(r.defaultProvider)
 
 	// Fallback to first model in default provider if no roles configured
 	if len(roleModels) == 0 {
 		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
 			roleModels[routing.RoleGeneration] = cfg.Providers[r.defaultProvider].Models[0]
+			r.roleProviders[routing.RoleGeneration] = r.defaultProvider
 		}
 	}
 
 	return routing.NewModelRouter(roleModels)
+}
+
+// ProviderForRole returns the Provider that declared the model the router
+// resolves for role (see buildModelRouter), or nil if the role has no
+// resolution. Callers that pin a turn's model via ModelForRole must also
+// pin the provider via this method — the model name alone does not imply
+// which provider's client understands it.
+func (r *Registry) ProviderForRole(role routing.ModelRole) Provider {
+	r.mu.RLock()
+	name, ok := r.roleProviders[role]
+	r.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return r.providers[name]
 }
 
 // requestTimeoutSetter is implemented by every provider constructor below;

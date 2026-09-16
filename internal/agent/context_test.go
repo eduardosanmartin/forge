@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -261,6 +262,60 @@ func TestContextAssembler_Build_GetSessionOtherErrorFails(t *testing.T) {
 
 	if _, err := assembler.Build(ctx, "session-1", "hello"); err == nil {
 		t.Fatal("expected error when GetSession returns non-not-found error")
+	}
+}
+
+// TestContextAssembler_Build_WindowNeverOrphansToolMessage guards against a
+// bug found running the wordstat example against OpenCode Zen's "Console
+// Go": the fixed-size sliding window sliced by raw message count, with no
+// awareness that an assistant message carrying ToolCalls and the "tool"
+// messages answering each of those calls form an atomic group. When a task
+// made several PARALLEL tool calls in one turn and the window boundary fell
+// between them, the window kept a later "tool" message while dropping the
+// assistant message that declared its ToolCallID — a request with a tool
+// result whose id no calling assistant message in the same request. Console
+// Go rejected that with HTTP 400 "tool result's tool id ... not found";
+// other providers may accept the malformed conversation silently instead.
+func TestContextAssembler_Build_WindowNeverOrphansToolMessage(t *testing.T) {
+	ctx := context.Background()
+	toolsReg := tools.New(nil, "", nil)
+
+	// Chronological order (oldest -> newest): assistant makes two parallel
+	// tool calls (id1, id2), then the two tool results come back, then a
+	// newer user turn. Stored mock convention is newest-first, so this is
+	// listed newest (index 0) to oldest (index 3) — mirroring exactly what
+	// the real SQLite store's GetMessages returns.
+	messages := []store.Message{
+		{Role: "user", Content: "next turn"},
+		{Role: "tool", ToolCallID: "id2", Content: "result 2"},
+		{Role: "tool", ToolCallID: "id1", Content: "result 1"},
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{
+				{ID: "id1", Type: "function", Function: llm.ToolCallFunction{Name: "f"}},
+				{ID: "id2", Type: "function", Function: llm.ToolCallFunction{Name: "f"}},
+			},
+		},
+	}
+	store := &contextMockStore{messages: messages}
+	// maxHistoryTurns=1 -> window=2 messages, keeping only the newest two
+	// (indices 0 and 1): the user turn and the tool(id2) result — exactly
+	// splitting the assistant+tool_calls group down the middle.
+	assembler := NewContextAssembler(toolsReg, store, 1)
+
+	built, err := assembler.Build(ctx, "session-1", "hello")
+	if err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	declared := map[string]bool{}
+	for _, m := range built {
+		for _, tc := range m.ToolCalls {
+			declared[tc.ID] = true
+		}
+		if m.Role == "tool" && !declared[m.ToolCallID] {
+			t.Fatalf("orphaned tool message: ToolCallID %q has no preceding assistant ToolCalls entry in %+v", m.ToolCallID, built)
+		}
 	}
 }
 

@@ -235,6 +235,53 @@ func TestRunnerRetriesExhaustedPauses(t *testing.T) {
 	}
 }
 
+// TestRunnerRetryFeedsBackPreviousFailure is a regression lock for a gap
+// found running the wordstat example: a retry used to resend task.Goal
+// completely unchanged, so ManifestExecutor (internal/client/run_manifest.go,
+// which forwards only task.Goal to the model) gave the model no signal that
+// its previous attempt failed a mechanical done_criteria check. Observed in
+// practice: the model regenerated the IDENTICAL bug (same duplicate map key,
+// same line) on every retry, burning the whole retry budget without ever
+// converging. The fix appends the previous failure to the goal text on
+// attempt > 0 so a retry is an informed correction, not a blind repeat.
+func TestRunnerRetryFeedsBackPreviousFailure(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Budget.MaxRetriesPerTask = 1
+	m.Tasks = []Task{{ID: "t1", Goal: "write internal/count/topwords.go"}}
+	cfg := config.Defaults()
+
+	var goalsSeen []string
+	callCount := 0
+	r := &Runner{
+		Manifest: m,
+		Config:   cfg,
+		Executor: func(_ context.Context, task Task) (ExecResult, error) {
+			goalsSeen = append(goalsSeen, task.Goal)
+			callCount++
+			if callCount == 1 {
+				return ExecResult{Iterations: 1}, errors.New(`done_criteria check "go build ./..." failed: duplicate key "no" in map literal`)
+			}
+			return ExecResult{Iterations: 1}, nil
+		},
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
+	}
+	if _, err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(goalsSeen) != 2 {
+		t.Fatalf("executor called %d times, want 2 (first attempt + one retry)", len(goalsSeen))
+	}
+	if goalsSeen[0] != "write internal/count/topwords.go" {
+		t.Errorf("first attempt goal was rewritten: %q", goalsSeen[0])
+	}
+	if !strings.Contains(goalsSeen[1], "write internal/count/topwords.go") {
+		t.Errorf("retry goal lost the original task text: %q", goalsSeen[1])
+	}
+	if !strings.Contains(goalsSeen[1], `duplicate key "no" in map literal`) {
+		t.Errorf("retry goal does not mention the previous failure — retry is still blind: %q", goalsSeen[1])
+	}
+}
+
 func TestRunnerDryRunNoExecution(t *testing.T) {
 	m := testManifest(ModeDryRun)
 	cfg := config.Defaults()
