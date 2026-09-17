@@ -301,7 +301,7 @@ func TestSidecar_MergeOnReload(t *testing.T) {
 	for _, e := range mm.Entries() {
 		if e.Seq == 10 && e.Role == "assistant" {
 			found = true
-			if !strings.Contains(e.Meta, "27.6s") && !strings.Contains(e.Meta, "27600ms") {
+			if !strings.Contains(e.Meta, "27,6s") {
 				t.Fatalf("reloaded entry should contain elapsed from sidecar, got Meta %q", e.Meta)
 			}
 		}
@@ -536,9 +536,13 @@ func TestWorkingMarker_ShowsLiveTokenEstimate(t *testing.T) {
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
 
+	// Meta now starts with the send timestamp ("DD/MM HH:MM · ◌ Working…
+	// (7,0s)"), so the marker sits after a prefix instead of at position 0 —
+	// Contains to find the entry, HasSuffix/Contains against the marker
+	// onward instead of an exact/prefix match on the whole Meta.
 	workingMeta := func(mm Model) string {
 		for _, e := range mm.Entries() {
-			if e.Role == "user" && strings.HasPrefix(e.Meta, workingMarker) {
+			if e.Role == "user" && strings.Contains(e.Meta, workingMarker) {
 				return e.Meta
 			}
 		}
@@ -549,8 +553,8 @@ func TestWorkingMarker_ShowsLiveTokenEstimate(t *testing.T) {
 	fc.Advance(7000 * time.Millisecond)
 	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
 	mm = model.(Model)
-	if got := workingMeta(mm); got != workingMarker+" (7,0s)" {
-		t.Fatalf("no streaming content yet: meta = %q, want %q", got, workingMarker+" (7,0s)")
+	if got := workingMeta(mm); !strings.HasSuffix(got, workingMarker+" (7,0s)") {
+		t.Fatalf("no streaming content yet: meta = %q, want suffix %q", got, workingMarker+" (7,0s)")
 	}
 
 	// A streaming preview lands with some accumulated text.
@@ -558,7 +562,7 @@ func TestWorkingMarker_ShowsLiveTokenEstimate(t *testing.T) {
 	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
 	mm = model.(Model)
 	got := workingMeta(mm)
-	if !strings.HasPrefix(got, workingMarker+" (7,0s · ") || !strings.HasSuffix(got, "tokens)") {
+	if !strings.Contains(got, workingMarker+" (7,0s · ") || !strings.HasSuffix(got, "tokens)") {
 		t.Fatalf("streaming content present: meta = %q, want an estimated token count next to elapsed", got)
 	}
 }
@@ -583,6 +587,131 @@ func TestTitleBarBoxedLikeFooter(t *testing.T) {
 	}
 }
 
+// TestWorkingMarker_TimestampAppearsImmediatelyOnSend is the regression lock
+// for a real gap reported live: the timestamp only appeared once the turn
+// finished (or later, once tokens were counted) — not right when the
+// message was actually sent. The echo entry's Meta must carry the send
+// timestamp from the very first render, before any tick or response.
+func TestWorkingMarker_TimestampAppearsImmediatelyOnSend(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-immediate"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 16, 53, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+
+	// No advance, no tick, no response yet — this is the state right after
+	// the enter keypress that sent the message.
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	found := false
+	for _, e := range mm.Entries() {
+		if e.Role == "user" && e.Local {
+			if e.Meta != "17/09 16:53 · "+workingMarker {
+				t.Fatalf("echo Meta right after send = %q, want %q", e.Meta, "17/09 16:53 · "+workingMarker)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a local user echo entry, entries = %+v", mm.Entries())
+	}
+}
+
+// TestWorkingMarker_UserMessageGetsTimestampPrefix is the regression lock
+// for a real gap reported live: the user's own message meta ("elapsed ·
+// tokens") had no timestamp, unlike the assistant summary right below it.
+// Uses a fixed fake-clock start time (not time.Now()) so the exact
+// "DD/MM HH:MM" prefix can be asserted precisely.
+func TestWorkingMarker_UserMessageGetsTimestampPrefix(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-stamp"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 15, 19, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	fc.Advance(9 * time.Second)
+	res := &daemon.ExecuteTurnResult{
+		Messages: []daemon.MessageResult{
+			{Seq: 1, Role: "user", Content: "hola"},
+			{Seq: 2, Role: "assistant", Content: "hola!"},
+		},
+		Usage: &daemon.UsageResult{TotalTokens: 8938},
+	}
+	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
+	mm = model.(Model)
+
+	found := false
+	for _, e := range mm.Entries() {
+		if e.Role == "user" && e.Meta == "17/09 15:19 · 9,0s · 8,938 tokens" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the user message meta to be exactly %q, entries = %+v",
+			"17/09 15:19 · 9,0s · 8,938 tokens", mm.Entries())
+	}
+}
+
+// TestWorkingMarker_LongTurn_AssistantTimestampDiffersFromUser is the
+// regression lock for a real bug reported live: a ~4m44s turn showed the
+// SAME "17/09 16:27" timestamp on both the user message and the assistant
+// summary below it, reading as if they happened simultaneously — and the
+// assistant's elapsed showed as "284.6s" instead of "4m44s". The assistant
+// line must stamp ARRIVAL time (send + elapsed), not send time, and use the
+// same "XmYYs" formatting as the user line.
+func TestWorkingMarker_LongTurn_AssistantTimestampDiffersFromUser(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-long"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 16, 27, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("tarea larga")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	fc.Advance(4*time.Minute + 44*time.Second) // 284s
+	res := &daemon.ExecuteTurnResult{
+		Model: "qwen3:1.7b",
+		Messages: []daemon.MessageResult{
+			{Seq: 1, Role: "user", Content: "tarea larga"},
+			{Seq: 2, Role: "assistant", Content: "listo"},
+		},
+		Usage: &daemon.UsageResult{TotalTokens: 100},
+	}
+	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
+	mm = model.(Model)
+
+	var userMeta, assistantMeta string
+	for _, e := range mm.Entries() {
+		if e.Role == "user" {
+			userMeta = e.Meta
+		}
+		if e.Role == "assistant" && e.Summary {
+			assistantMeta = e.Meta
+		}
+	}
+	if !strings.Contains(userMeta, "4m44s") {
+		t.Fatalf("user meta should show 4m44s (not 284.x s), got %q", userMeta)
+	}
+	if !strings.Contains(assistantMeta, "4m44s") {
+		t.Fatalf("assistant summary should show 4m44s (not 284.6s), got %q", assistantMeta)
+	}
+	if !strings.HasPrefix(userMeta, "17/09 16:27") {
+		t.Fatalf("user timestamp should be send time 16:27, got %q", userMeta)
+	}
+	if !strings.HasPrefix(assistantMeta, "17/09 16:31") {
+		t.Fatalf("assistant timestamp should be arrival time 16:31 (16:27 + 4m44s), not the send time, got %q", assistantMeta)
+	}
+}
+
 func TestWorkingMarker_SendAndClear(t *testing.T) {
 	m := newTestModel()
 	m.SetClient(&fakeClient{})
@@ -593,10 +722,11 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 	m.input.SetValue("list the files")
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
-	// Echo carries the Working marker while the turn is in flight.
+	// Echo carries the Working marker (now prefixed with the send timestamp)
+	// while the turn is in flight.
 	found := false
 	for _, e := range mm.Entries() {
-		if e.Role == "user" && e.Local && e.Meta == workingMarker {
+		if e.Role == "user" && e.Local && strings.Contains(e.Meta, workingMarker) {
 			found = true
 		}
 	}
@@ -626,13 +756,13 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 		if e.Meta == workingMarker {
 			t.Fatalf("Working marker should be finalized after turn, entries = %+v", mm.Entries())
 		}
-		if e.Role == "user" && e.Meta == "33,5s · 1,345 tokens" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "33,5s · 1,345 tokens") {
 			foundStats = true
 		}
 		// Meta is now prefixed with a "DD/MM HH:MM" timestamp (when the turn
 		// was sent) ahead of "elapsed · tokens" — not asserted exactly since
 		// it comes from time.Now() at test-run time; suffix match is enough.
-		if e.Role == "assistant" && strings.HasSuffix(e.Meta, "33.5s · 1,3k tokens") {
+		if e.Role == "assistant" && strings.HasSuffix(e.Meta, "33,5s · 1,3k tokens") {
 			if !e.Summary {
 				t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
 			}
@@ -677,7 +807,7 @@ func TestWorkingMarker_ErrorKeepsElapsed(t *testing.T) {
 		if e.Meta == workingMarker {
 			t.Fatal("Working marker should be finalized on turn error")
 		}
-		if e.Role == "user" && e.Meta == "12,1s" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "12,1s") {
 			found = true
 		}
 	}
@@ -701,7 +831,7 @@ func TestWorkingMarker_HaltKeepsElapsed(t *testing.T) {	m := newTestModel()
 		if e.Meta == workingMarker {
 			t.Fatal("Working marker should be finalized on halt")
 		}
-		if e.Role == "user" && e.Meta == "8,0s" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "8,0s") {
 			found = true
 		}
 	}

@@ -984,7 +984,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (no token count is known); without a clock just clear the marker.
 		meta := ""
 		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
 		}
 		if m.finalizeWorkingMarkers(meta) {
 			m.rebuildTranscript()
@@ -1015,13 +1015,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Compute CLIENT-side elapsed from send to arrival using injected Clock.
 			elapsedStr := ""
 			var durationMs int64 = -1
+			var turnElapsed time.Duration
 			if !m.turnStart.IsZero() && m.clock != nil {
-				elapsed := m.clock.Now().Sub(m.turnStart)
-				if elapsed < 0 {
-					elapsed = 0
+				turnElapsed = m.clock.Now().Sub(m.turnStart)
+				if turnElapsed < 0 {
+					turnElapsed = 0
 				}
-				durationMs = elapsed.Milliseconds()
-				elapsedStr = formatDurationMs(durationMs)
+				durationMs = turnElapsed.Milliseconds()
+				// formatWorkingElapsed, not formatDurationMs: same "0,3s" /
+				// "4m44s" shape as the user message's own elapsed line right
+				// above this one — formatDurationMs's raw "%.1fs" (e.g.
+				// "284.6s" for what should read "4m44s") read as a different,
+				// inconsistent unit next to it.
+				elapsedStr = formatWorkingElapsed(turnElapsed)
 			}
 			// Turn stats: count and latency
 			m.turnCount++
@@ -1071,12 +1077,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		summaryParts := []string{}
-		// Timestamp prefix (when the turn was sent, not when it finished —
-		// the moment the user would actually associate with the exchange):
-		// reported missing live, chat-style timestamps had no way to tell
-		// when in the session a given reply landed.
+		// Timestamp prefix: when the turn FINISHED (send time + elapsed),
+		// not when it was sent — using send time here made this line show
+		// the exact same timestamp as the user message right above it (both
+		// stamped from m.turnStart) even when minutes had passed generating
+		// the reply, which read as if the two happened simultaneously.
 		if !m.turnStart.IsZero() {
-			summaryParts = append(summaryParts, m.turnStart.Format("02/01 15:04"))
+			summaryParts = append(summaryParts, m.turnStart.Add(turnElapsed).Format("02/01 15:04"))
 		}
 		if m.currentModel != "" {
 			summaryParts = append(summaryParts, m.currentModel)
@@ -1169,7 +1176,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// as an inconsistency with those.
 			stats := ""
 			if durationMs >= 0 {
-				stats = formatWorkingElapsed(time.Duration(durationMs) * time.Millisecond)
+				stats = m.turnStampPrefix() + formatWorkingElapsed(time.Duration(durationMs)*time.Millisecond)
 				turnTokens := 0
 				if msg.res.Usage != nil {
 					turnTokens = msg.res.Usage.TotalTokens
@@ -1233,7 +1240,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the echo survived (no token count is known on halt).
 		meta := ""
 		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
 		}
 		if m.finalizeWorkingMarkers(meta) {
 			m.rebuildTranscript()
@@ -1254,7 +1261,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.deltaPending = false
 		meta := ""
 		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
 		}
 		if m.finalizeWorkingMarkers(meta) {
 			m.rebuildTranscript()
@@ -1706,11 +1713,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
 					}
 				}
+			// turnStart set before the echo entry (not after, as before) so
+			// the echo's Meta can carry the send timestamp immediately —
+			// reported live: it previously only appeared once the turn
+			// finished, well after the message was actually sent.
+			if m.clock == nil {
+				m.clock = realClock{}
+			}
+			m.turnStart = m.clock.Now()
 			// Normal turn: optimistic local echo, clear input, spinner, execute.
 			// The daemon-confirmed copy replaces this echo in executeTurnMsg.
 			// The echo carries the Working marker so the pending message is
 			// visibly marked for the whole turn (finalized on turn end).
-			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: workingMarker})
+			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: m.turnStampPrefix() + workingMarker})
 			m.pendingUserText = text
 			m.lastWorkingElapsed = ""
 			// Message history recall (item 20): record every sent message
@@ -1725,10 +1740,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Reset()
 				m.suggestionsVisible = false
 				m.spinner = true
-				if m.clock == nil {
-					m.clock = realClock{}
-				}
-			m.turnStart = m.clock.Now()
 			m.touchDaemon()
 			m.toast = ""
 			// Animated spinner: single driver. tickImmediate primes the
@@ -2327,8 +2338,10 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 		if e.Role != "user" {
 			continue
 		}
-		// Match the bare marker or a tick-stamped one ("◌ Working… (34,4s)").
-		if strings.HasPrefix(e.Meta, workingMarker) || (m.pendingUserText != "" && strings.TrimSpace(e.Content) == m.pendingUserText) {
+		// Match the bare marker or a tick-stamped one ("DD/MM HH:MM · ◌
+		// Working… (34,4s)") — Contains, not HasPrefix: the entry's Meta now
+		// starts with the send timestamp, so the marker itself sits after it.
+		if strings.Contains(e.Meta, workingMarker) || (m.pendingUserText != "" && strings.TrimSpace(e.Content) == m.pendingUserText) {
 			target = i
 			break
 		}
@@ -2343,7 +2356,7 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 				m.entries[i].Meta = meta
 				changed = true
 			}
-		} else if strings.HasPrefix(m.entries[i].Meta, workingMarker) {
+		} else if strings.Contains(m.entries[i].Meta, workingMarker) {
 			m.entries[i].Meta = ""
 			changed = true
 		}
@@ -2351,6 +2364,18 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 	m.pendingUserText = ""
 	m.lastWorkingElapsed = ""
 	return changed
+}
+
+// turnStampPrefix returns "DD/MM HH:MM · " for the current turnStart, or ""
+// when unknown (no clock, or no turn sent yet) — the shared timestamp
+// prefix for every place a turn's final stats land on the user's own
+// message (success, error, halt), matching the assistant summary's own
+// "DD/MM HH:MM · elapsed · tokens" shape.
+func (m Model) turnStampPrefix() string {
+	if m.turnStart.IsZero() {
+		return ""
+	}
+	return m.turnStart.Format("02/01 15:04") + " · "
 }
 
 // formatWorkingElapsed renders a duration for the Working marker:
@@ -2452,8 +2477,8 @@ func (m *Model) stampWorkingElapsed() bool {
 	m.lastWorkingElapsed = s
 	stamped := false
 	for i := range m.entries {
-		if m.entries[i].Role == "user" && strings.HasPrefix(m.entries[i].Meta, workingMarker) {
-			m.entries[i].Meta = workingMarker + " (" + s + ")"
+		if m.entries[i].Role == "user" && strings.Contains(m.entries[i].Meta, workingMarker) {
+			m.entries[i].Meta = m.turnStampPrefix() + workingMarker + " (" + s + ")"
 			stamped = true
 		}
 	}
@@ -3532,7 +3557,10 @@ func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64,
 		if !ok {
 			continue
 		}
-		elapsedStr := formatDurationMs(durMs)
+		// formatWorkingElapsed, not formatDurationMs: matches the live
+		// turn-completion path's format ("4m44s", not "284.6s") so a
+		// reloaded session's elapsed reads the same as one just computed.
+		elapsedStr := formatWorkingElapsed(time.Duration(durMs) * time.Millisecond)
 		switch {
 		case e.Meta == "":
 			if currentModel != "" {
@@ -3545,15 +3573,6 @@ func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64,
 		}
 	}
 	return entries
-}
-
-// formatDurationMs renders a duration in ms for Meta lines ("123ms" under a
-// second, "1.2s" above). Shared by live elapsed injection and sidecar merge.
-func formatDurationMs(durMs int64) string {
-	if durMs < 1000 {
-		return fmt.Sprintf("%dms", durMs)
-	}
-	return fmt.Sprintf("%.1fs", float64(durMs)/1000)
 }
 
 

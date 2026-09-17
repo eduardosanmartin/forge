@@ -232,7 +232,13 @@ func renderMarkdownTable(rows [][]string, aligns []tableAlign, avail int, pal Pa
 	out := []string{hline("┌", "┬", "┐")}
 	out = append(out, renderRow(rows[0], headerStyle)...)
 	out = append(out, hline("├", "┼", "┤"))
-	for _, row := range rows[1:] {
+	// A divider between every data row too (not just header/body), reported
+	// live as missing — without it, adjacent rows ran together with nothing
+	// marking where one ends and the next begins.
+	for i, row := range rows[1:] {
+		if i > 0 {
+			out = append(out, hline("├", "┼", "┤"))
+		}
 		out = append(out, renderRow(row, cellStyle)...)
 	}
 	out = append(out, hline("└", "┴", "┘"))

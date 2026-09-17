@@ -39,7 +39,13 @@ and retry the corrected call. Do not abandon the task after one tool error.
 
 Optional arguments with a default: OMIT them entirely instead of inventing
 values (never guess directories such as /workspace or /tmp). If a call fails
-because of an invented value, retry the identical call without that argument.`
+because of an invented value, retry the identical call without that argument.
+
+Not every request needs a tool call. If the user's message doesn't reference
+this project, its files, or its state, answer directly from your own
+knowledge — do not explore the filesystem "just in case." Use tools when the
+request actually requires reading, writing, or inspecting this project (or
+anything else a tool exists for).`
 
 // ContextAssembler builds the LLM message context with a stable prefix ordering
 // that maximizes prompt-cache/KV-cache hits (RNF-2.2/2.4).

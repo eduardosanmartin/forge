@@ -31,8 +31,9 @@ func TestBuildContentTableAligned(t *testing.T) {
 			tableLines = append(tableLines, ln)
 		}
 	}
-	if len(tableLines) != 6 { // top border, header, mid border, 2 data rows, bottom border
-		t.Fatalf("expected 6 table lines (borders+header+2 rows), got %d:\n%s", len(tableLines), strings.Join(tableLines, "\n"))
+	// top border, header, header/body divider, row 1, row divider, row 2, bottom border.
+	if len(tableLines) != 7 {
+		t.Fatalf("expected 7 table lines (borders+header+divider+2 rows), got %d:\n%s", len(tableLines), strings.Join(tableLines, "\n"))
 	}
 
 	// Every table line must be the exact same visible width — that's what
@@ -52,6 +53,35 @@ func TestBuildContentTableAligned(t *testing.T) {
 	}
 	if !strings.Contains(plain, "Resultado:") || !strings.Contains(plain, "Listo.") {
 		t.Errorf("surrounding prose lost:\n%s", plain)
+	}
+}
+
+// TestBuildContentTableSeparatesEveryDataRow is the regression lock for a
+// real bug reported live: the header/body divider rendered fine, but
+// consecutive DATA rows ran together with nothing marking where one row
+// ended and the next began. Every data row must get its own divider line
+// below it (except the last, which gets the bottom border instead).
+func TestBuildContentTableSeparatesEveryDataRow(t *testing.T) {
+	pal := testPalette()
+	content := "| Modelo | Empresa | Contexto |\n" +
+		"|---|---|---|\n" +
+		"| A | Nvidia | 128k |\n" +
+		"| B | Anthropic | 200k |\n" +
+		"| C | OpenAI | 400k |\n"
+	entries := []Entry{{Role: "assistant", Content: content}}
+	out := BuildContent(entries, pal, 80)
+	plain := ansistrip.Strip(out)
+
+	lines := strings.Split(plain, "\n")
+	var dividers int
+	for _, ln := range lines {
+		if strings.Contains(ln, "\u251c") { // "├"
+			dividers++
+		}
+	}
+	// 1 header/body divider + 2 between the 3 data rows = 3.
+	if dividers != 3 {
+		t.Fatalf("expected 3 divider lines (header/body + 2 between 3 data rows), got %d:\n%s", dividers, plain)
 	}
 }
 
