@@ -177,6 +177,13 @@ type Model struct {
 	sessionFocus    bool
 	sessionFocusIdx int
 
+	// explicitSessionCreate distinguishes a user-triggered "n" (new session)
+	// from the automatic session created once at startup (see the
+	// listSessionsMsg handler) — only the former should toast, or every
+	// launch of `forge tui` would show a "nueva sesión → ..." toast the
+	// user never asked for.
+	explicitSessionCreate bool
+
 	// TUI-7: M2 rail, mouse capture, rail panels, sidecar duration
 	mouseCapture bool   // true = MouseModeCellMotion, false = off (selection free)
 	railPanel    string // "" none, "context", "plugins", "turnstats"
@@ -556,11 +563,13 @@ func (m Model) footerLayoutLabel() string {
 }
 
 // renderTitleBar renders the M2 full-width title bar: "forge <tui-version> ·
-// daemon <daemon-version>" left, cwd right. Rendered as a bordered box in the
-// same style as the footer bar (NormalBorder + BGElevated) so the version is
-// always visible as top chrome. The box is EXACTLY 3 rows (top border,
-// content, bottom border) — SetSize and handleMouseClick account for
-// titleHeightRows, and the cwd is hard-truncated so the content never wraps.
+// daemon <daemon-version>". Rendered as a bordered box in the same style as
+// the footer bar (NormalBorder + BGElevated) so the version is always
+// visible as top chrome. The box is EXACTLY 3 rows (top border, content,
+// bottom border) — SetSize and handleMouseClick account for titleHeightRows.
+// cwd is deliberately NOT shown here: components.FooterModel already
+// renders it on the footer's left side, and repeating it here was pure
+// duplication (reported live — the footer already has the same data).
 func (m Model) renderTitleBar() string {
 	ver := tuiVersion()
 	daemonVer := m.daemonVers
@@ -568,32 +577,17 @@ func (m Model) renderTitleBar() string {
 		daemonVer = "dev"
 	}
 	left := fmt.Sprintf("forge %s · daemon %s", ver, daemonVer)
-	right := m.cwd
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
-	leftLen := lipgloss.Width(left)
-	if gap := width - leftLen - lipgloss.Width(right) - 2; gap < 1 || lipgloss.Width(right) > width-leftLen-2 {
-		// cwd does not fit next to the version block: truncate it to what remains
-		avail := width - leftLen - 2
-		if avail < 1 {
-			avail = 1
-		}
-		right = ansi.Truncate(right, avail, "…")
-	}
-	gap := width - leftLen - lipgloss.Width(right) - 2
-	if gap < 1 {
-		gap = 1
-	}
-	bar := left + strings.Repeat(" ", gap) + right
 	// Box Width includes the borders: cap the inner bar to the content area
 	// (width-2) so it can never wrap to a second row and break the frame.
 	inner := width - 2
 	if inner < 1 {
 		inner = 1
 	}
-	bar = ansi.Truncate(bar, inner, "")
+	bar := ansi.Truncate(left, inner, "…")
 	content := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(m.palette.Text)).
 		Render(bar)
@@ -949,6 +943,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionID = msg.res.ID
 			// refresh sessions list
 			m.sessions = append(m.sessions, *msg.res)
+			// A brand-new session always starts with an empty transcript.
+			// At startup m.entries is already nil (no-op here); triggered
+			// on demand (the sessions dropdown's "n" key) there's a real
+			// prior conversation on screen that must clear, same as
+			// switching to an existing session does.
+			m.lastSeq = 0
+			m.entries = nil
+			m.pendingUserText = ""
+			m.rebuildTranscriptForceBottom()
+			if m.explicitSessionCreate {
+				m.toast = fmt.Sprintf("nueva sesión → %s", msg.res.ID[:8])
+				m.explicitSessionCreate = false
+			}
 		}
 		// Ensure we are subscribed after session creation if not already.
 		if m.eventsCh == nil {
@@ -1064,6 +1071,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		summaryParts := []string{}
+		// Timestamp prefix (when the turn was sent, not when it finished —
+		// the moment the user would actually associate with the exchange):
+		// reported missing live, chat-style timestamps had no way to tell
+		// when in the session a given reply landed.
+		if !m.turnStart.IsZero() {
+			summaryParts = append(summaryParts, m.turnStart.Format("02/01 15:04"))
+		}
 		if m.currentModel != "" {
 			summaryParts = append(summaryParts, m.currentModel)
 		}
@@ -1429,6 +1443,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				m.relayout()
 				return m, nil
+			case "n":
+				// New session (RF: there was previously no way to start a
+				// fresh session from the TUI at all once past startup — only
+				// forge chat's REPL had /new). createSessionMsg's handler
+				// resets the transcript itself, so this only needs to close
+				// the dropdown and dispatch the create.
+				m.sessionsDropdownVisible = false
+				m.sessionFocus = false
+				m.input.Focus()
+				m.relayout()
+				m.toast = "creando nueva sesión…"
+				m.explicitSessionCreate = true
+				return m, m.cmdCreateSession()
 			case "esc":
 				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
@@ -2627,6 +2654,8 @@ func (m *Model) openHelp() {
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("  enter (focus) switch to selected session (lastSeq=0, echo cleared)"))
 	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  n (focus)     start a new session (empty transcript)"))
+	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("  esc/ctrl+g    exit focus mode (other keys consumed)"))
 	sb.WriteString("\n")
 	sb.WriteString(textStyle.Render("Scrolling:"))
@@ -2728,13 +2757,13 @@ func (m Model) View() tea.View {
 		}
 	}
 	if m.sessionsDropdownVisible {
-		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · esc/ctrl+g close")
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · n new session · esc/ctrl+g close")
 		inputView = focusHint + "\n" + inputView
 	} else if m.modelPanelVisible {
 		mpHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ model select: ↑/↓ navigate · enter select · esc close")
 		inputView = mpHint + "\n" + inputView
 	} else if m.sessionFocus {
-		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · esc/ctrl+g back")
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · n new session · esc/ctrl+g back")
 		inputView = focusHint + "\n" + inputView
 	}
 	compPal := toCompPalette(m.palette)

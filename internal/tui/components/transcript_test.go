@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	ansistrip "github.com/charmbracelet/x/ansi"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 )
 
@@ -194,8 +195,42 @@ func TestBuildContentCodeBlockTint(t *testing.T) {
 	if !strings.Contains(out, "48;2;30;25;21") {
 		t.Fatalf("code should carry elevated-bg SGR, got %q", out)
 	}
-	if !strings.Contains(out, "python") || !strings.Contains(out, "print(1)") || !strings.Contains(out, "listo") {
-		t.Fatalf("code content lost, got %q", out)
+	plain := ansistrip.Strip(out)
+	if !strings.Contains(plain, "python") || !strings.Contains(plain, "print(1)") || !strings.Contains(plain, "listo") {
+		t.Fatalf("code content lost once ANSI is stripped, got %q", plain)
+	}
+	// Line-number gutter: single-line body gets "1" before the separator.
+	if !strings.Contains(plain, "1 │ print(1)") {
+		t.Fatalf("expected a line-number gutter before the code, got %q", plain)
+	}
+}
+
+// TestBuildContentCodeBlockRealSyntaxColors is the regression lock for
+// Option A (real chroma-based syntax highlighting, not a flat single-color
+// tint): a keyword, a string literal, and a number in the same line must
+// each carry a DIFFERENT foreground SGR — proof that highlighting is
+// per-token, not a uniform block color.
+func TestBuildContentCodeBlockRealSyntaxColors(t *testing.T) {
+	pal := testPalette()
+	entries := []Entry{{Role: "assistant", Content: "```python\nif x == 1:\n    return \"ok\"\n```"}}
+	out := BuildContent(entries, pal, 80)
+
+	keywordSGR := "38;2;217;119;87" // pal.Accent (see testPalette)
+	stringSGR := "38;2;138;166;114" // pal.Success
+	numberSGR := "38;2;217;162;87" // pal.Warning
+
+	for _, want := range []string{keywordSGR, stringSGR, numberSGR} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected SGR %s (keyword/string/number each colored distinctly), got %q", want, out)
+		}
+	}
+	plain := ansistrip.Strip(out)
+	if !strings.Contains(plain, `if x == 1:`) || !strings.Contains(plain, `return "ok"`) {
+		t.Fatalf("code content lost once ANSI is stripped, got %q", plain)
+	}
+	// Two source lines -> gutter shows "1" and "2".
+	if !strings.Contains(plain, "1 │") || !strings.Contains(plain, "2 │") {
+		t.Fatalf("expected a 2-line gutter (1, 2), got %q", plain)
 	}
 }
 
@@ -210,5 +245,37 @@ func TestBuildContentSummaryGreen(t *testing.T) {
 	outPlain := BuildContent([]Entry{plain}, pal, 80)
 	if strings.Contains(outPlain, "38;2;138;166;114") {
 		t.Fatalf("plain meta must stay dim, got %q", outPlain)
+	}
+}
+
+// TestRenderAssistantLinesCachesFinishedMessages is the regression lock for
+// a real slowdown reported live in `forge tui`: BuildContent re-renders the
+// entire transcript on every streaming tick (~14fps, scheduleDeltaRebuild),
+// and chroma tokenization is expensive — without caching, every historical
+// code block got fully re-highlighted many times a second for the whole
+// duration of any later reply. A second cacheable=true call with identical
+// inputs must return the exact same backing slice (proof it hit the cache,
+// not recomputed) — cacheable=false (an in-progress streaming entry) must
+// never do that, since its content changes every tick anyway.
+func TestRenderAssistantLinesCachesFinishedMessages(t *testing.T) {
+	pal := testPalette()
+	content := "```go\nfmt.Println(\"hi\")\n```"
+
+	first := renderAssistantLines(content, 80, pal, true)
+	second := renderAssistantLines(content, 80, pal, true)
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatal("expected non-empty rendered lines")
+	}
+	if &first[0] != &second[0] {
+		t.Error("expected the second cacheable call to return the cached slice, got a freshly computed one")
+	}
+
+	streamed1 := renderAssistantLines(content, 80, pal, false)
+	streamed2 := renderAssistantLines(content, 80, pal, false)
+	if len(streamed1) == 0 || len(streamed2) == 0 {
+		t.Fatal("expected non-empty rendered lines")
+	}
+	if &streamed1[0] == &streamed2[0] {
+		t.Error("cacheable=false must never be served from cache (streaming content changes every tick)")
 	}
 }

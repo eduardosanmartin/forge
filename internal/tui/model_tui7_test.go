@@ -629,7 +629,10 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 		if e.Role == "user" && e.Meta == "33,5s · 1,345 tokens" {
 			foundStats = true
 		}
-		if e.Role == "assistant" && e.Meta == "33.5s · 1,3k tokens" {
+		// Meta is now prefixed with a "DD/MM HH:MM" timestamp (when the turn
+		// was sent) ahead of "elapsed · tokens" — not asserted exactly since
+		// it comes from time.Now() at test-run time; suffix match is enough.
+		if e.Role == "assistant" && strings.HasSuffix(e.Meta, "33.5s · 1,3k tokens") {
 			if !e.Summary {
 				t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
 			}
@@ -868,6 +871,45 @@ func TestSlashSession_OpensPanelNavigateSelect(t *testing.T) {
 	}
 	if mm.IsSessionsDropdownVisible() {
 		t.Fatal("enter should close the panel")
+	}
+}
+
+// TestSlashSession_NKeyStartsNewSession is the regression lock for a real
+// gap reported live: before this, the only way to start a fresh session was
+// forge chat's REPL /new command — forge tui had no way to do it once past
+// startup (Ctrl+G only ever let you switch to an EXISTING session).
+func TestSlashSession_NKeyStartsNewSession(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessions = []daemon.SessionResult{{ID: "sess-aaa11111"}}
+	m.sessionID = "sess-aaa11111"
+	m.entries = []components.Entry{{Role: "user", Content: "old conversation"}}
+	m.SetSize(80, 24)
+
+	m.input.SetValue("/session")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+	if !mm.IsSessionsDropdownVisible() {
+		t.Fatal("/session should open the sessions panel")
+	}
+
+	model, cmd := mm.Update(keyPress("n"))
+	mm = model.(Model)
+	if mm.IsSessionsDropdownVisible() {
+		t.Fatal("'n' should close the sessions panel")
+	}
+	if cmd == nil {
+		t.Fatal("'n' should dispatch session creation")
+	}
+	msg := cmd()
+	model, _ = mm.Update(msg)
+	mm = model.(Model)
+
+	if mm.SessionID() != "sess-fake" {
+		t.Fatalf("expected the newly created session id, got %q", mm.SessionID())
+	}
+	if len(mm.entries) != 0 {
+		t.Fatalf("a new session must start with an empty transcript, got %d entries", len(mm.entries))
 	}
 }
 
