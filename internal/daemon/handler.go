@@ -308,27 +308,27 @@ func (h *Handler) handleCompareSessions(ctx context.Context, req *JSONRPCRequest
 		SameSession:     cmp.SameSession,
 	}
 	for _, m := range cmp.DivergentA {
-		result.DivergentA = append(result.DivergentA, h.messageToResult(m))
+		result.DivergentA = append(result.DivergentA, messageToResult(m))
 	}
 	for _, m := range cmp.DivergentB {
-		result.DivergentB = append(result.DivergentB, h.messageToResult(m))
+		result.DivergentB = append(result.DivergentB, messageToResult(m))
 	}
 	if len(cmp.DivergentA) > 0 {
-		last := h.messageToResult(cmp.DivergentA[len(cmp.DivergentA)-1])
+		last := messageToResult(cmp.DivergentA[len(cmp.DivergentA)-1])
 		result.LastMessageA = &last
 	} else if cmp.CountA > 0 {
 		// fallback to last of full transcript when no divergent tail (same session)
 		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionA.ID, 0); err == nil && len(msgs) > 0 {
-			last := h.messageToResult(msgs[len(msgs)-1])
+			last := messageToResult(msgs[len(msgs)-1])
 			result.LastMessageA = &last
 		}
 	}
 	if len(cmp.DivergentB) > 0 {
-		last := h.messageToResult(cmp.DivergentB[len(cmp.DivergentB)-1])
+		last := messageToResult(cmp.DivergentB[len(cmp.DivergentB)-1])
 		result.LastMessageB = &last
 	} else if cmp.CountB > 0 {
 		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionB.ID, 0); err == nil && len(msgs) > 0 {
-			last := h.messageToResult(msgs[len(msgs)-1])
+			last := messageToResult(msgs[len(msgs)-1])
 			result.LastMessageB = &last
 		}
 	}
@@ -408,7 +408,7 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 
 	result := ExecuteTurnResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	summarizeTurn(&result)
 	// Prefer the model actually recorded on the final assistant message (it
@@ -498,7 +498,7 @@ func (h *Handler) handleGetMessages(ctx context.Context, req *JSONRPCRequest) *J
 
 	result := GetMessagesResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	return h.resultResponse(req.ID, result)
 }
@@ -516,7 +516,7 @@ func (h *Handler) handleGetMessagesSince(ctx context.Context, req *JSONRPCReques
 
 	result := GetMessagesResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	return h.resultResponse(req.ID, result)
 }
@@ -884,7 +884,7 @@ func (h *Handler) handleJobCancel(ctx context.Context, req *JSONRPCRequest) *JSO
 	return h.resultResponse(req.ID, JobCancelResult{Canceled: job.Status == JobCanceled, JobID: job.ID, Status: job.Status})
 }
 
-func (h *Handler) messageToResult(msg store.Message) MessageResult {
+func messageToResult(msg store.Message) MessageResult {
 	var toolCalls []ToolCallResult
 	for _, tc := range msg.ToolCalls {
 		toolCalls = append(toolCalls, ToolCallResult{

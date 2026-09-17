@@ -70,6 +70,13 @@ type SessionManager struct {
 	jobsMu sync.RWMutex
 	jobs   map[string]*Job
 	jobSeq map[string]int // per-session monotonic counter for job IDs
+
+	// RF-11 daemon migration (hojaDeRuta-multiagente.md Fase 1): manifest
+	// runs hosted in the daemon, analogous to jobs but richer (see runs.go).
+	// In-memory for Fase 1 — no RPC surface yet, no restart discovery
+	// (Fase 2's job).
+	runsMu sync.RWMutex
+	runs   map[string]*RunExecution
 }
 
 // SessionState holds runtime state for an active session.
@@ -133,6 +140,7 @@ func NewSessionManager(
 		logger:    logger,
 		sessions:  make(map[string]*SessionState),
 		jobs:      make(map[string]*Job),
+		runs:      make(map[string]*RunExecution),
 		jobSeq:    make(map[string]int),
 		cfg:       cfg,
 	}
