@@ -20,6 +20,7 @@ import (
 
 	"github.com/eduardosanmartin/forge/internal/clipboard"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 	"github.com/eduardosanmartin/forge/internal/version"
 )
@@ -192,6 +193,20 @@ type Model struct {
 	// needs no reload on session switch.
 	sidecar     map[string]int64 // map[compositeKey]durationMs
 	sidecarPath string           // .forge/tui-state.json
+
+	// TUI-8 (Fase 4): daemon-hosted manifest run observation panel. runID/
+	// runResult track whichever run this TUI is currently watching (started
+	// locally via /run, or picked up from an incoming run.checkpoint.event
+	// for a run this client didn't start itself). runPanelVisible is purely
+	// a display toggle — closing it (esc) does not stop tracking, so a
+	// later checkpoint event, or ctrl+4, can still reopen it on the same
+	// run. runPollPending guards against scheduling more than one status
+	// poll tick in flight, same shape as deltaPending.
+	runPanelVisible bool
+	runID           string
+	runResult       *daemon.RunResult
+	runErr          string
+	runPollPending  bool
 }
 
 type pendingTool struct {
@@ -215,6 +230,7 @@ var allSlashSuggestions = []slashSuggestion{
 	{"/resume", "resume current session"},
 	{"/model", "switch model"},
 	{"/mark", "mark session as success"},
+	{"/run", "start a manifest run (/run <manifest.json>)"},
 }
 
 // TUIClient abstracts daemon RPC for the model.
@@ -232,6 +248,13 @@ type TUIClient interface {
 	Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error)
 	PluginList() (*daemon.PluginListResult, error)
 	SkillList() (*daemon.SkillListResult, error)
+	// Run.* methods (hojaDeRuta-multiagente.md Fase 4): thin wrappers over
+	// the RPCs added in Fase 3 — see ClientAdapter for the actual call
+	// shapes. stateDir "" lets the daemon apply its own default (".").
+	RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error)
+	RunStatus(runID string) (*daemon.RunResult, error)
+	RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error)
+	RunCancel(runID string) (*daemon.RunResult, error)
 }
 
 // Messages for async daemon responses.
@@ -252,6 +275,29 @@ type switchModelResultMsg struct {
 type markSuccessResultMsg struct{ err error }
 type pluginListMsg struct{ res *daemon.PluginListResult; err error }
 type skillListMsg struct{ res *daemon.SkillListResult; err error }
+
+// Run panel messages (Fase 4). runStatusTickMsg carries the run_id it was
+// scheduled for so a stale in-flight tick from a previously tracked run
+// (e.g. the user started a second /run before the first tick fired) is
+// dropped instead of clobbering the newer run's state — same guard shape
+// as deltaPending/scheduleDeltaRebuild uses for transcript rebuilds.
+type runStartMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runStatusMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runApproveMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runCancelMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runStatusTickMsg struct{ runID string }
 
 // Event streaming messages.
 type daemonEventMsg struct{ notif daemon.JSONRPCNotification }
@@ -802,6 +848,75 @@ func (m Model) cmdRefreshSkills() tea.Cmd {
 	}
 }
 
+// cmdRunStart parses manifestPath locally (run.ParseFile — same loader the
+// CLI's `forge run` uses, resolving spec_ref and validating before anything
+// goes over the wire) and sends the parsed manifest as content to run.start,
+// per the Fase 0 flag-mapping decision documented on RunStartParams: the
+// daemon never reads the client's filesystem.
+func (m Model) cmdRunStart(manifestPath string) tea.Cmd {
+	if m.client == nil {
+		return func() tea.Msg { return runStartMsg{err: fmt.Errorf("not connected")} }
+	}
+	mani, err := run.ParseFile(manifestPath)
+	if err != nil {
+		return func() tea.Msg { return runStartMsg{err: err} }
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunStart(*mani, "", false)
+		return runStartMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunStatus(runID string) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunStatus(runID)
+		return runStatusMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunApproveCheckpoint(runID string, approved bool) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunApproveCheckpoint(runID, approved)
+		return runApproveMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunCancel(runID string) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunCancel(runID)
+		return runCancelMsg{res: res, err: err}
+	}
+}
+
+// scheduleRunStatusPoll arms a single 1s status-poll tick for runID, guarded
+// by runPollPending so overlapping ticks never stack (mirrors
+// scheduleDeltaRebuild's deltaPending guard). Call this whenever runResult
+// enters or stays in a state that can still change on its own — i.e.
+// RunRunning; a paused-at-checkpoint or terminal run has nothing to poll
+// for until a local action (approve/decline/cancel) changes it.
+func (m *Model) scheduleRunStatusPoll(runID string) tea.Cmd {
+	if m.runPollPending || runID == "" {
+		return nil
+	}
+	m.runPollPending = true
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return runStatusTickMsg{runID: runID}
+	})
+}
+
 func (m Model) cmdSubscribeEvents() tea.Cmd {
 	if m.client == nil {
 		return nil
@@ -1333,6 +1448,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case runStartMsg:
+		if msg.err != nil {
+			m.runErr = msg.err.Error()
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runID = msg.res.ID
+		m.runResult = msg.res
+		m.runErr = ""
+		m.runPanelVisible = true
+		m.toast = fmt.Sprintf("run %s started", msg.res.ID)
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runStatusTickMsg:
+		m.runPollPending = false
+		if msg.runID != m.runID {
+			// A newer /run (or the panel losing its run entirely) superseded
+			// this tick while it was in flight — drop it.
+			return m, nil
+		}
+		return m, m.cmdRunStatus(msg.runID)
+
+	case runStatusMsg:
+		if msg.err != nil {
+			m.runErr = msg.err.Error()
+			return m, nil
+		}
+		if msg.res == nil || msg.res.ID != m.runID {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runApproveMsg:
+		if msg.err != nil {
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runCancelMsg:
+		if msg.err != nil {
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		m.toast = fmt.Sprintf("run %s canceled", msg.res.ID)
+		return m, nil
+
 	case tea.KeyPressMsg:
 		// Emergency stop: two CONSECUTIVE esc presses (no other key between
 		// them, within escDoubleTapWindow) halt every session, not just the
@@ -1370,6 +1556,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Any other key when rail panel visible? Let global handle but esc is priority.
 			// For simplicity, allow esc only; other keys close as well? Spec: Esc closes any panel.
 			// Keep rail panel until esc or toggle.
+		}
+		// Run panel (Fase 4) intercepts before help/sessions/model panels —
+		// y/n approve or decline a pending checkpoint, c cancels the run,
+		// esc closes the panel WITHOUT canceling (the run — and its
+		// tracking — keeps going in the background; ctrl+4 reopens it).
+		if m.runPanelVisible {
+			switch msg.String() {
+			case "esc":
+				m.runPanelVisible = false
+				return m, nil
+			case "y":
+				if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+					return m, m.cmdRunApproveCheckpoint(m.runID, true)
+				}
+				return m, nil
+			case "n":
+				if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+					return m, m.cmdRunApproveCheckpoint(m.runID, false)
+				}
+				return m, nil
+			case "c":
+				return m, m.cmdRunCancel(m.runID)
+			default:
+				if key.Matches(msg, m.keyMap.ShowRunPanel) {
+					// ctrl+4 while already open closes it — same toggle feel
+					// as ctrl+1/2/3 on the rail panels.
+					m.runPanelVisible = false
+				}
+				return m, nil
+			}
 		}
 		// Help overlay intercepts everything: esc or any key closes it.
 		if m.helpVisible {
@@ -1621,6 +1837,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.railPanel = "turnstats"
 			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ShowRunPanel):
+			if m.runID == "" {
+				m.toast = "no active run — start one with /run <manifest.json>"
+				return m, nil
+			}
+			m.runPanelVisible = !m.runPanelVisible
 			return m, nil
 		case key.Matches(msg, m.keyMap.GrabSession):
 			// TUI-6: ctrl+g opens sessions dropdown (floating overlay like /help)
@@ -1890,6 +2113,24 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 		}
 		return nil
 
+	case daemon.MethodRunCheckpointEvent:
+		// Fase 4: "notificación entrante → el panel se abre solo" — this
+		// fires the instant a daemon-hosted run blocks on a required
+		// checkpoint (see publishRunCheckpointEvent, Fase 2), whether or
+		// not this TUI is the client that started the run. Opens/updates
+		// the panel unconditionally: a run this client already knows about
+		// gets its checkpoint surfaced immediately; a run started elsewhere
+		// (another TUI, the CLI, a script) gets picked up and tracked from
+		// here on, same as if /run had started it locally.
+		var payload daemon.RunCheckpointEventPayload
+		if err := json.Unmarshal(notif.Params, &payload); err != nil {
+			m.showError(err)
+			return nil
+		}
+		m.runID = payload.RunID
+		m.runPanelVisible = true
+		return m.cmdRunStatus(payload.RunID)
+
 	case daemon.MethodEmergencyHalt:
 		var payload daemon.EmergencyHaltPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
@@ -2144,6 +2385,22 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		// Closed by esc or any key; replaces toast-based help (keep toast for command errors).
 		m.openHelp()
 		return true, nil
+	case "/run":
+		// Fase 4: first TUI consumer of the daemon-hosted run engine
+		// (Fase 1-3). The manifest path is resolved and parsed locally
+		// (cmdRunStart) exactly like the CLI's `forge run` does; only the
+		// parsed content crosses the wire.
+		if len(parts) < 2 {
+			m.toast = "usage: /run <manifest.json>"
+			return true, nil
+		}
+		if m.client == nil {
+			m.toast = "not connected"
+			return true, nil
+		}
+		manifestPath := parts[1]
+		m.toast = "starting run…"
+		return true, m.cmdRunStart(manifestPath)
 	default:
 		m.toast = fmt.Sprintf("unknown command %q (/help for list)", cmd)
 		return true, nil
@@ -2801,6 +3058,8 @@ func (m Model) View() tea.View {
 		footerHint = "session focus"
 	} else if m.modelPanelVisible {
 		footerHint = "model select"
+	} else if m.runPanelVisible {
+		footerHint = "run panel"
 	} else if m.railPanel != "" {
 		footerHint = m.railPanel + " panel"
 	}
@@ -2927,6 +3186,19 @@ func (m Model) View() tea.View {
 			panel = m.renderTurnStatsPanel()
 		}
 		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Accent)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+		float(boxStyle.Render(capLines(panel, maxOverlayRows-2)))
+	}
+	if m.runPanelVisible {
+		panel := m.renderRunPanel()
+		borderColor := m.palette.Accent
+		if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+			// A pending checkpoint needs a decision — the accent-vs-warning
+			// border distinguishes "just watching progress" from "blocked,
+			// awaiting you" at a glance, same idea as the message panel's
+			// error/success border color swap.
+			borderColor = m.palette.Warning
+		}
+		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(borderColor)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
 		float(boxStyle.Render(capLines(panel, maxOverlayRows-2)))
 	}
 	// Message panel (error or success confirmation) renders LAST (highest
@@ -3364,6 +3636,53 @@ func (m Model) renderTurnStatsPanel() string {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("  • "+truncateError(m.toast, 60)) + "\n")
 	}
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("esc to close") + "\n")
+	return sb.String()
+}
+
+// renderRunPanel renders the Fase 4 run-observation panel: current status,
+// progress counters, and — when the run is genuinely blocked live in
+// OnCheckpoint (see internal/daemon/runs.go's newDaemonManifestRunner) — the
+// pending checkpoint with the y/n approve/decline hint. Values come from
+// m.runResult, refreshed by /run, the poll tick, or an incoming
+// run.checkpoint.event; a nil m.runResult (start RPC in flight, or a
+// checkpoint event arrived before the first status fetch landed) renders a
+// "loading" line instead of guessing.
+func (m Model) renderRunPanel() string {
+	var sb strings.Builder
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true)
+	text := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim))
+	faint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint))
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Warning)).Bold(true)
+
+	sb.WriteString(accent.Render("Run: "+m.runID) + "\n")
+	if m.runErr != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Error)).Render("error: "+m.runErr) + "\n")
+	}
+	if m.runResult == nil {
+		sb.WriteString(faint.Render("(loading status…)") + "\n")
+		sb.WriteString(dim.Render("esc to close") + "\n")
+		return sb.String()
+	}
+	res := m.runResult
+	sb.WriteString(dim.Render("status: ") + text.Render(res.Status) + "\n")
+	if res.CurrentTask != "" {
+		sb.WriteString(dim.Render("current task: ") + text.Render(res.CurrentTask) + "\n")
+	}
+	sb.WriteString(dim.Render(fmt.Sprintf("tokens: %s · iterations: %d", formatTokens(res.TokensUsed), res.IterUsed)) + "\n")
+	if res.PendingCheckpoint != nil {
+		cp := res.PendingCheckpoint
+		sb.WriteString(warn.Render(fmt.Sprintf("⚠ checkpoint pending: %s (%s)", cp.ID, cp.Trigger)) + "\n")
+		sb.WriteString(text.Render("  y approve · n decline") + "\n")
+	}
+	if res.Report != nil {
+		sb.WriteString(dim.Render(fmt.Sprintf("tasks completed: %d/%d", len(res.Report.CompletedTasks), res.Report.TotalTasks)) + "\n")
+		sb.WriteString(dim.Render("validation: ") + text.Render(res.Report.ValidationState) + "\n")
+	}
+	if res.Error != "" {
+		sb.WriteString(faint.Render(truncateError(res.Error, 80)) + "\n")
+	}
+	sb.WriteString(dim.Render("c cancel · esc close") + "\n")
 	return sb.String()
 }
 

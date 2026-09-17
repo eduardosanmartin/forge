@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 )
 
 // ClientAdapter adapts internal/client.Client to TUIClient interface.
@@ -86,6 +87,42 @@ func (a *ClientAdapter) SkillList() (*daemon.SkillListResult, error) {
 }
 func (a *ClientAdapter) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
 	return a.c.Events(ctx)
+}
+
+// Run.* methods (Fase 4, hojaDeRuta-multiagente.md): thin wrappers over the
+// RPCs added in Fase 3, same generic a.c.Call shape Status/CreateSession
+// already use above — no bespoke client.Client helper needed.
+func (a *ClientAdapter) RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunStart, daemon.RunStartParams{Manifest: mani, StateDir: stateDir, Decompose: decompose}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunStatus(runID string) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunStatus, daemon.RunStatusParams{RunID: runID}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunApproveCheckpoint, daemon.RunApproveCheckpointParams{RunID: runID, Approved: approved}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunCancel(runID string) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunCancel, daemon.RunCancelParams{RunID: runID}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
 }
 
 // resolveDefaultModel reads the project config JSON at configPath and returns

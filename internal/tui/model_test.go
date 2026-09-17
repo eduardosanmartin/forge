@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
 
@@ -352,6 +353,24 @@ type fakeClient struct {
 	skillErr      error
 	pluginCalled  bool
 	skillCalled   bool
+
+	// Fase 4 run panel fakes.
+	runStartRes    *daemon.RunResult
+	runStartErr    error
+	runStartMani   run.Manifest
+	runStatusRes   *daemon.RunResult
+	runStatusErr   error
+	runStatusCalls []string
+	runApproveRes  *daemon.RunResult
+	runApproveErr  error
+	runApproveCall struct {
+		runID    string
+		approved bool
+		called   bool
+	}
+	runCancelRes  *daemon.RunResult
+	runCancelErr  error
+	runCancelCall string
 }
 
 func (f *fakeClient) Status() (*daemon.StatusResult, error) {
@@ -411,6 +430,24 @@ func (f *fakeClient) SkillList() (*daemon.SkillListResult, error) {
 		return f.skillRes, f.skillErr
 	}
 	return &daemon.SkillListResult{Skills: []daemon.SkillInfoResult{}}, nil
+}
+func (f *fakeClient) RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error) {
+	f.runStartMani = mani
+	return f.runStartRes, f.runStartErr
+}
+func (f *fakeClient) RunStatus(runID string) (*daemon.RunResult, error) {
+	f.runStatusCalls = append(f.runStatusCalls, runID)
+	return f.runStatusRes, f.runStatusErr
+}
+func (f *fakeClient) RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error) {
+	f.runApproveCall.runID = runID
+	f.runApproveCall.approved = approved
+	f.runApproveCall.called = true
+	return f.runApproveRes, f.runApproveErr
+}
+func (f *fakeClient) RunCancel(runID string) (*daemon.RunResult, error) {
+	f.runCancelCall = runID
+	return f.runCancelRes, f.runCancelErr
 }
 func (f *fakeClient) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
 	if f.eventsErr != nil {

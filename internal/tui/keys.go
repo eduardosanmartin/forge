@@ -14,6 +14,9 @@ import "charm.land/bubbles/v2/key"
 // Mouse capture: shift+drag bypasses mouse reporting for text selection (Windows Terminal honors it).
 // ctrl+m toggles mouse capture on/off at runtime with a footer toast.
 // Rail panels: ctrl+1 Context & tokens, ctrl+2 Plugins & skills, ctrl+3 Turn stats, esc closes.
+// Run panel: ctrl+4 reopens the manifest-run observation panel (see /run) if
+// a run is currently tracked; inside it, y/n approve/decline a pending
+// checkpoint and c cancels the run — esc closes the panel without canceling.
 // Emergency stop: esc esc (two CONSECUTIVE presses within escDoubleTapWindow,
 // no other key between them) halts EVERY session via emergency.halt_all —
 // not a key.Binding since bubbles' key package has no double-press concept;
@@ -32,6 +35,7 @@ type KeyMap struct {
 	ShowContext     key.Binding
 	ShowPlugins     key.Binding
 	ShowTurnStats   key.Binding
+	ShowRunPanel    key.Binding
 }
 
 // DefaultKeyMap returns the global key bindings.
@@ -77,6 +81,10 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("ctrl+3"),
 			key.WithHelp("ctrl+3", "turn stats panel"),
 		),
+		ShowRunPanel: key.NewBinding(
+			key.WithKeys("ctrl+4"),
+			key.WithHelp("ctrl+4", "run panel (started via /run)"),
+		),
 	}
 }
 
@@ -88,6 +96,6 @@ func (k KeyMap) ShortHelp() []key.Binding {
 // FullHelp returns full help bindings grouped.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.ToggleSidebar, k.CycleLayout, k.Quit, k.Help, k.Halt, k.GrabSession, k.ToggleMouse, k.ShowContext, k.ShowPlugins, k.ShowTurnStats},
+		{k.ToggleSidebar, k.CycleLayout, k.Quit, k.Help, k.Halt, k.GrabSession, k.ToggleMouse, k.ShowContext, k.ShowPlugins, k.ShowTurnStats, k.ShowRunPanel},
 	}
 }
