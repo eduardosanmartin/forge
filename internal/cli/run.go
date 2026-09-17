@@ -59,6 +59,7 @@ func newRunCommand() *cobra.Command {
 		resume           bool
 		verifyAudit      bool
 		decompose        bool
+		logActivity      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run [--json] [--session <id>] [--retrieval] [--compaction] [--anchoring] [--routing] [--skills] <prompt>",
@@ -95,7 +96,13 @@ func newRunCommand() *cobra.Command {
 			"                     (see sugerenciasDeClaude.md §5). The proposal is written to\n" +
 			"                     --state-dir/.forge/runs/<run_id>/tasks.decomposed.json and gated by\n" +
 			"                     the manifest's after_spec_decomposition checkpoint when declared.\n" +
-			"                     Requires --manifest; refuses a manifest that already has \"tasks\".",
+			"                     Requires --manifest; refuses a manifest that already has \"tasks\".\n" +
+			"  --log              Mirror every task/tool/checkpoint activity line into\n" +
+			"                     --state-dir/.forge/runs/<run_id>/activity.log, in addition to the\n" +
+			"                     terminal (or instead of it, for lines --json otherwise suppresses) —\n" +
+			"                     a persistent record of what a long autonomous run actually did.\n" +
+			"                     Appended across --resume invocations of the same run_id, never\n" +
+			"                     truncated.",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if manifestPath != "" {
 				if len(args) != 0 {
@@ -143,7 +150,7 @@ func newRunCommand() *cobra.Command {
 				// rejection...) never reaches that point and must still get
 				// cobra's normal "Error: %s" (e.g. the "run forge serve" hint),
 				// exactly as before this change.
-				return runManifest(cmd, manifestPath, jsonOut, autoYes, stateDir, resume, decompose)
+				return runManifest(cmd, manifestPath, jsonOut, autoYes, stateDir, resume, decompose, logActivity)
 			}
 			return runRun(cmd.Context(), args[0], sessionID, jsonOut,
 				enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills)
@@ -162,6 +169,7 @@ func newRunCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&resume, "resume", false, "resume a manifest run interrupted by a crash, disconnect, or HITL pause (RF-11.8) instead of starting over")
 	cmd.Flags().BoolVar(&verifyAudit, "verify-audit", false, "verify the tamper-evident audit log (RNF-4.10) instead of running anything")
 	cmd.Flags().BoolVar(&decompose, "decompose", false, "ask the default model to break the manifest's goal into an atomic task list before running (requires an empty \"tasks\" in the manifest)")
+	cmd.Flags().BoolVar(&logActivity, "log", false, "mirror activity (progress, tool calls, checkpoints, report) into --state-dir/.forge/runs/<run_id>/activity.log")
 	return cmd
 }
 
@@ -357,18 +365,53 @@ func formatSubagentSnapshot(prev, current map[string]int) (msg string, changed b
 // while the task's blocking RPC call is still in flight (see
 // client.ManifestExecutor's onToolTick). The event payload carries no
 // argument preview (daemon.ToolCallEventPayload has none), only name/status.
-func printToolCallTick(ev daemon.ToolCallEventPayload) {
+func printToolCallTick(w io.Writer, ev daemon.ToolCallEventPayload) {
 	switch ev.Status {
 	case "started":
-		fmt.Fprintf(os.Stderr, "  -> %s\n", ev.Name)
+		fmt.Fprintf(w, "  -> %s\n", ev.Name)
 	case "finished":
-		fmt.Fprintln(os.Stderr, "  <- ok")
+		fmt.Fprintln(w, "  <- ok")
 	case "error":
-		fmt.Fprintf(os.Stderr, "  <- error: %s\n", ev.Error)
+		fmt.Fprintf(w, "  <- error: %s\n", ev.Error)
 	}
 }
 
-func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool, stateDir string, resume, decompose bool) error {
+// activityWriter combines a terminal target (nil when the terminal should
+// stay quiet for this line — e.g. --json mode) with an optional --log file,
+// so activity still lands in the file even when the terminal is suppressed.
+// Returns nil only when neither target applies (caller skips entirely).
+func activityWriter(terminal, logFile io.Writer) io.Writer {
+	switch {
+	case terminal == nil && logFile == nil:
+		return nil
+	case terminal == nil:
+		return logFile
+	case logFile == nil:
+		return terminal
+	default:
+		return io.MultiWriter(terminal, logFile)
+	}
+}
+
+// openActivityLog creates (or appends to) --state-dir/.forge/runs/<run_id>/
+// activity.log when --log is set, colocated with the state.json/report.json
+// this same run already persists there. Appends rather than truncates so a
+// resumed run's log reads as one continuous timeline across invocations.
+func openActivityLog(stateDir, runID string, verb, manifestPath string) (*os.File, error) {
+	dir := filepath.Join(stateDir, ".forge", "runs", runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("--log: create %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, "activity.log")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("--log: open %s: %w", path, err)
+	}
+	fmt.Fprintf(f, "\n=== forge %s --manifest %s (run_id=%s) — %s ===\n", verb, manifestPath, runID, time.Now().Format(time.RFC3339))
+	return f, nil
+}
+
+func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool, stateDir string, resume, decompose, logActivity bool) error {
 	ctx := cmd.Context()
 	app, _ := AppFromContext(ctx)
 	if app == nil || app.Config == nil {
@@ -392,6 +435,20 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	}
 	if resume && mani.Mode == "dry_run" {
 		return &UsageError{Err: fmt.Errorf("--resume is not valid with mode dry_run: dry runs execute nothing and persist no state to resume from")}
+	}
+
+	var logFile io.Writer
+	if logActivity {
+		verb := "run"
+		if resume {
+			verb = "resume"
+		}
+		f, lErr := openActivityLog(stateDir, mani.RunID, verb, manifestPath)
+		if lErr != nil {
+			return lErr
+		}
+		defer f.Close()
+		logFile = f
 	}
 
 	var sessID string
@@ -418,9 +475,9 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	// though the resulting plan is only previewed, never executed
 	// (Runner.Run decomposes BEFORE its own dry_run short-circuit).
 	if mani.Mode == "dry_run" && !decompose {
-		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "")
+		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "", logFile)
 		rep, _ := r.Run(ctx)
-		return writeManifestReport(rep, jsonOut)
+		return writeManifestReport(activityWriter(os.Stdout, logFile), rep, jsonOut)
 	}
 
 	cl, err := client.Connect(ctx, "")
@@ -442,13 +499,17 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 
 	var exec run.Executor
 	if mani.Mode != "dry_run" {
-		var onToolTick func(daemon.ToolCallEventPayload)
+		var toolTickTerminal io.Writer
 		if !jsonOut {
-			onToolTick = printToolCallTick
+			toolTickTerminal = os.Stderr
+		}
+		var onToolTick func(daemon.ToolCallEventPayload)
+		if ttw := activityWriter(toolTickTerminal, logFile); ttw != nil {
+			onToolTick = func(ev daemon.ToolCallEventPayload) { printToolCallTick(ttw, ev) }
 		}
 		exec = client.ManifestExecutor(ctx, cl, sessID, onToolTick)
 	}
-	r := newManifestRunner(mani, cfg, exec, autoYes, stateDir, sessID)
+	r := newManifestRunner(mani, cfg, exec, autoYes, stateDir, sessID, logFile)
 	if decompose {
 		r.Decompose = true
 		r.Decomposer = client.ManifestDecomposer(cl)
@@ -459,10 +520,16 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	// CLI-side session.list poll — no daemon changes, the topology data
 	// already exists (same metadata `forge subagents list` reads). Stopped
 	// via cancel once Run/Resume returns, whatever the outcome.
-	if mani.Mode != "dry_run" && !jsonOut {
-		pollCtx, pollCancel := context.WithCancel(ctx)
-		defer pollCancel()
-		go pollSubagents(pollCtx, cl, sessID, os.Stderr)
+	if mani.Mode != "dry_run" {
+		var subagentTerminal io.Writer
+		if !jsonOut {
+			subagentTerminal = os.Stderr
+		}
+		if saw := activityWriter(subagentTerminal, logFile); saw != nil {
+			pollCtx, pollCancel := context.WithCancel(ctx)
+			defer pollCancel()
+			go pollSubagents(pollCtx, cl, sessID, saw)
+		}
 	}
 
 	var rep *run.Report
@@ -474,11 +541,11 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	}
 	// Always report, even when paused/killed.
 	if rep != nil {
-		if wErr := writeManifestReport(rep, jsonOut); wErr != nil {
+		if wErr := writeManifestReport(activityWriter(os.Stdout, logFile), rep, jsonOut); wErr != nil {
 			return wErr
 		}
 		if !jsonOut {
-			printManifestGuidance(os.Stdout, rep, manifestPath)
+			printManifestGuidance(activityWriter(os.Stdout, logFile), rep, manifestPath)
 		}
 		// We reached a real Report and already printed our own guidance for
 		// it above — cobra's generic "Error: %s" on top would only repeat
@@ -545,7 +612,12 @@ func createRunSession(ctx context.Context, cl *client.Client, mani *run.Manifest
 	return res.ID, nil
 }
 
-func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor, autoYes bool, stateDir, sessionID string) *run.Runner {
+// newManifestRunner wires the Runner's observability hooks. logFile is
+// non-nil only when --log was passed, and every hook mirrors its terminal
+// output into it (in addition to, never instead of, the terminal — these
+// hooks already print unconditionally of --json, matching their existing
+// behavior before --log existed).
+func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor, autoYes bool, stateDir, sessionID string, logFile io.Writer) *run.Runner {
 	r := &run.Runner{
 		Manifest:  mani,
 		Config:    cfg,
@@ -553,14 +625,15 @@ func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor
 		StateDir:  stateDir,
 		SessionID: sessionID,
 	}
+	cpw := activityWriter(os.Stderr, logFile)
 	if autoYes {
 		r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
-			fmt.Fprintf(os.Stderr, "[HITL auto-approved] %s (%s)\n", cp.ID, cp.Trigger)
+			fmt.Fprintf(cpw, "[HITL auto-approved] %s (%s)\n", cp.ID, cp.Trigger)
 			return true, nil
 		}
 	} else {
 		r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
-			fmt.Fprintf(os.Stderr, "[HITL] checkpoint %q (%s) requires approval — run paused (re-run with --yes to auto-approve)\n", cp.ID, cp.Trigger)
+			fmt.Fprintf(cpw, "[HITL] checkpoint %q (%s) requires approval — run paused (re-run with --yes to auto-approve)\n", cp.ID, cp.Trigger)
 			return false, nil
 		}
 	}
@@ -571,7 +644,8 @@ func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor
 	// wordstat/chores examples ("no se ve actividad, solo el cursor
 	// parpadeando"), and the only way to check progress was polling
 	// `forge sessions` from a second terminal.
-	r.OnProgress = func(ev run.ProgressEvent) { printManifestProgress(os.Stderr, ev) }
+	progressW := activityWriter(os.Stderr, logFile)
+	r.OnProgress = func(ev run.ProgressEvent) { printManifestProgress(progressW, ev) }
 	return r
 }
 
@@ -595,26 +669,26 @@ func printManifestProgress(w io.Writer, ev run.ProgressEvent) {
 	}
 }
 
-func writeManifestReport(rep *run.Report, jsonOut bool) error {
+func writeManifestReport(out io.Writer, rep *run.Report, jsonOut bool) error {
 	if rep == nil {
 		return nil
 	}
 	if jsonOut {
-		return writeJSONResultEnvelope(os.Stdout, "run", rep)
+		return writeJSONResultEnvelope(out, "run", rep)
 	}
-	fmt.Fprintf(os.Stdout, "run %s [%s] %s — %d/%d tasks, budget tokens %d iters %d\n",
+	fmt.Fprintf(out, "run %s [%s] %s — %d/%d tasks, budget tokens %d iters %d\n",
 		rep.RunID, rep.Mode, rep.Status, len(rep.CompletedTasks), rep.TotalTasks, rep.BudgetUsed.TokensUsed, rep.BudgetUsed.IterationsUsed)
 	if len(rep.PausedCheckpoints) > 0 {
-		fmt.Fprintf(os.Stdout, "paused checkpoints: %s\n", strings.Join(rep.PausedCheckpoints, ", "))
+		fmt.Fprintf(out, "paused checkpoints: %s\n", strings.Join(rep.PausedCheckpoints, ", "))
 	}
 	if rep.ValidationState != "" {
-		fmt.Fprintf(os.Stdout, "validation: %s\n", rep.ValidationState)
+		fmt.Fprintf(out, "validation: %s\n", rep.ValidationState)
 	}
 	for _, a := range rep.Assumptions {
-		fmt.Fprintf(os.Stdout, "assumption: %s\n", a)
+		fmt.Fprintf(out, "assumption: %s\n", a)
 	}
 	for _, d := range rep.Deviations {
-		fmt.Fprintf(os.Stdout, "deviation: %s\n", d)
+		fmt.Fprintf(out, "deviation: %s\n", d)
 	}
 	return nil
 }

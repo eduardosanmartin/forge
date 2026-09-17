@@ -118,6 +118,16 @@ func runInit(out io.Writer, projectName string, force bool) error {
 	return nil
 }
 
+// scaffoldAgentMaxIterations overrides config.DefaultAgentMaxIterations (10)
+// for generated projects. 10 is a per-TURN tool-call cap, not the run-wide
+// budget — observed in practice (a real single-task manifest run) a task
+// doing little more than a handful of fs_read/fs_write calls burned all 10
+// slots and hit "agent reached max_iterations" before it could finish,
+// forcing an avoidable retry. 30 still leaves 10x headroom under the
+// scaffolded manifest's own run-wide budget.max_iterations (300 in
+// initManifest) while still catching a genuinely runaway turn.
+const scaffoldAgentMaxIterations = 30
+
 // initConfig builds a valid, loadable starter config: real default
 // constants where forge already has one (never hand-copied magic numbers,
 // so this can't silently drift from the library's own defaults), an
@@ -162,7 +172,7 @@ func initConfig(slug string) *config.Config {
 			Custom: config.CustomPermissions{Deny: []string{}, Allow: []string{}},
 		},
 		Agent: config.AgentConfig{
-			MaxIterations:       config.DefaultAgentMaxIterations,
+			MaxIterations:       scaffoldAgentMaxIterations,
 			MaxTurnSeconds:      config.DefaultAgentMaxTurnSeconds,
 			MaxParallelChildren: config.DefaultAgentMaxParallelChildren,
 		},

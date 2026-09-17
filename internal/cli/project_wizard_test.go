@@ -213,6 +213,66 @@ func TestRunWizard_RemoteProvider(t *testing.T) {
 	if remote.APIKey == "" {
 		t.Error("api_key should be an explicit placeholder for a remote provider, not blank")
 	}
+
+	found := false
+	for _, h := range cfg.Network.AllowedHosts {
+		if h == "api.example.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("network.allowed_hosts = %v, want it to include the remote provider's host — otherwise every call fails the egress allowlist", cfg.Network.AllowedHosts)
+	}
+}
+
+// TestRunWizard_AnthropicProviderAllowsHost is the same allowlist regression
+// for the Anthropic branch, whose base_url isn't answered by the user (it's
+// hardcoded to api.anthropic.com) so this is the only place it gets covered.
+func TestRunWizard_AnthropicProviderAllowsHost(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	p := NewScriptedPrompter([]string{
+		"desc",
+		"",
+		"",
+		"",
+		"arch",
+		"",                           // sensitivity default
+		"3",                          // provider: anthropic
+		"claude-3-5-sonnet-20241022", // model
+		"",                           // goal default
+	})
+
+	var out bytes.Buffer
+	if err := runWizard(p, &out, "Anthropic Project"); err != nil {
+		t.Fatalf("runWizard: %v out=%s", err, out.String())
+	}
+
+	cfgPath := filepath.Join("Anthropic Project", ".forge", "config.json")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("generated config.json failed to Load: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("generated config.json failed Validate: %v", err)
+	}
+	anthropic, ok := cfg.Providers["anthropic"]
+	if !ok {
+		t.Fatalf("expected an 'anthropic' provider, got %+v", cfg.Providers)
+	}
+	if anthropic.Models[0] != "claude-3-5-sonnet-20241022" {
+		t.Errorf("model = %q, want the answered model", anthropic.Models[0])
+	}
+
+	found := false
+	for _, h := range cfg.Network.AllowedHosts {
+		if h == "api.anthropic.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("network.allowed_hosts = %v, want it to include api.anthropic.com", cfg.Network.AllowedHosts)
+	}
 }
 
 // TestRunWizard_RejectsEmptyName mirrors init's own guard: the wizard

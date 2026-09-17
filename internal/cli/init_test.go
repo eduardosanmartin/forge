@@ -92,6 +92,11 @@ func TestRunInit_ScaffoldsValidLoadableFiles(t *testing.T) {
 		`"sidebar": true`,
 		`"plugin_wasm_max_bytes": 2097152`,
 		`"skill_file_max_bytes": 1048576`,
+		// Regression lock for scaffoldAgentMaxIterations: the raw library
+		// default (10) is a per-turn tool-call cap that a real single-task
+		// manifest run exhausted mid-task (a handful of fs_read/fs_write
+		// calls), forcing an avoidable retry — see init.go's doc comment.
+		`"max_iterations": 30`,
 	} {
 		if !strings.Contains(string(rawCfg), want) {
 			t.Errorf("config.json missing %s — a zero-value field leaked through instead of a real default", want)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -271,9 +272,16 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 	cfg := initConfig(slug)
 	cfg.Project.Sensitivity = a.Sensitivity
 
+	// remoteBaseURL, when set, gets its hostname added to
+	// network.allowed_hosts below — the egress allowlist defaults to only
+	// 127.0.0.1/localhost (initConfig), so a remote provider's requests
+	// would otherwise be rejected by validateAllowlist at call time.
+	var remoteBaseURL string
+
 	switch a.ProviderKind {
 	case 1: // remote openai-compatible
 		cfg.DefaultProvider = "remote"
+		remoteBaseURL = a.BaseURL
 		cfg.Providers = map[string]config.Provider{
 			"remote": {
 				Kind:    "openai-compatible",
@@ -289,10 +297,11 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 		}
 	case 2: // anthropic
 		cfg.DefaultProvider = "anthropic"
+		remoteBaseURL = "https://api.anthropic.com"
 		cfg.Providers = map[string]config.Provider{
 			"anthropic": {
 				Kind:    "anthropic",
-				BaseURL: "https://api.anthropic.com",
+				BaseURL: remoteBaseURL,
 				Models:  []string{a.ModelName},
 				ModelRoles: map[string]string{
 					"cheap":      a.ModelName,
@@ -304,10 +313,11 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 		}
 	case 3: // gemini
 		cfg.DefaultProvider = "gemini"
+		remoteBaseURL = "https://generativelanguage.googleapis.com"
 		cfg.Providers = map[string]config.Provider{
 			"gemini": {
 				Kind:    "gemini",
-				BaseURL: "https://generativelanguage.googleapis.com",
+				BaseURL: remoteBaseURL,
 				Models:  []string{a.ModelName},
 				ModelRoles: map[string]string{
 					"cheap":      a.ModelName,
@@ -329,6 +339,12 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 					"reasoning":  a.ModelName,
 				},
 			},
+		}
+	}
+
+	if remoteBaseURL != "" {
+		if u, err := url.Parse(remoteBaseURL); err == nil && u.Hostname() != "" {
+			cfg.Network.AllowedHosts = append(cfg.Network.AllowedHosts, u.Hostname())
 		}
 	}
 
