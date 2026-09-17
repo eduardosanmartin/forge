@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -452,4 +454,189 @@ func TestRunManager_CancelWhileLiveBlockedAtCheckpoint(t *testing.T) {
 	// optimistic status set races the detached goroutine's actual state.json
 	// write; see that test's comment.
 	time.Sleep(100 * time.Millisecond)
+}
+
+// TestRunRPC_StartStatusList exercises run.start/run.status/run.list end to
+// end through the Handler, the same way TestJobQueue_HandlerRPC covers
+// job.* — this is the Fase 3 surface (hojaDeRuta-multiagente.md) that adds
+// nothing new below the RPC layer (StartRun/GetRun/ListRuns are already
+// covered directly), so it only needs to prove request/response wiring and
+// JSON shapes round-trip correctly.
+func TestRunRPC_StartStatusList(t *testing.T) {
+	m := newTestSessionManagerForRuns()
+	h := NewHandler(m, slog.New(slog.DiscardHandler), nil, nil)
+	stateDir := t.TempDir()
+	mani := testRunManifest("rpc-run-1", run.ModeCheckpoint, false)
+
+	startParams, _ := json.Marshal(RunStartParams{Manifest: *mani, StateDir: stateDir})
+	reqStart := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunStart, Params: startParams}
+	resp := h.HandleRequest(context.Background(), reqStart)
+	if resp.Error != nil {
+		t.Fatalf("run.start error: %v", resp.Error)
+	}
+	var started RunResult
+	if err := json.Unmarshal(resp.Result, &started); err != nil {
+		t.Fatalf("unmarshal run.start result: %v", err)
+	}
+	if started.ID != "rpc-run-1" {
+		t.Fatalf("run.start ID = %q, want %q", started.ID, "rpc-run-1")
+	}
+
+	// A second run.start for the same run_id while it's active must map to
+	// ErrCodeRunAlreadyActive, not a generic internal error.
+	reqStartAgain := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunStart, Params: startParams}
+	resp = h.HandleRequest(context.Background(), reqStartAgain)
+	if resp.Error == nil || resp.Error.Code != ErrCodeRunAlreadyActive {
+		t.Fatalf("want ErrCodeRunAlreadyActive, got %+v", resp.Error)
+	}
+
+	waitForRunTerminal(t, m, "rpc-run-1", 5*time.Second)
+
+	// run.status
+	statusParams, _ := json.Marshal(RunStatusParams{RunID: "rpc-run-1"})
+	reqStatus := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunStatus, Params: statusParams}
+	resp = h.HandleRequest(context.Background(), reqStatus)
+	if resp.Error != nil {
+		t.Fatalf("run.status error: %v", resp.Error)
+	}
+	var status RunResult
+	if err := json.Unmarshal(resp.Result, &status); err != nil {
+		t.Fatalf("unmarshal run.status result: %v", err)
+	}
+	if status.Status != RunDone {
+		t.Fatalf("run.status Status = %q, want %q", status.Status, RunDone)
+	}
+
+	// run.status on an unknown run_id must be ErrCodeRunNotFound.
+	missingParams, _ := json.Marshal(RunStatusParams{RunID: "no-such-run"})
+	reqMissing := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunStatus, Params: missingParams}
+	resp = h.HandleRequest(context.Background(), reqMissing)
+	if resp.Error == nil || resp.Error.Code != ErrCodeRunNotFound {
+		t.Fatalf("want ErrCodeRunNotFound, got %+v", resp.Error)
+	}
+
+	// run.list
+	reqList := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunList}
+	resp = h.HandleRequest(context.Background(), reqList)
+	if resp.Error != nil {
+		t.Fatalf("run.list error: %v", resp.Error)
+	}
+	var list RunListResult
+	if err := json.Unmarshal(resp.Result, &list); err != nil {
+		t.Fatalf("unmarshal run.list result: %v", err)
+	}
+	found := false
+	for _, r := range list.Runs {
+		if r.ID == "rpc-run-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("run.list did not include rpc-run-1: %+v", list.Runs)
+	}
+
+	// run.cancel on an already-terminal run must be ErrCodeRunNotFound —
+	// CancelRun treats a terminal entry the same as no entry at all.
+	cancelParams, _ := json.Marshal(RunCancelParams{RunID: "no-such-run"})
+	reqCancel := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunCancel, Params: cancelParams}
+	resp = h.HandleRequest(context.Background(), reqCancel)
+	if resp.Error == nil || resp.Error.Code != ErrCodeRunNotFound {
+		t.Fatalf("want ErrCodeRunNotFound for run.cancel on missing run, got %+v", resp.Error)
+	}
+
+	// run.resume against a run_id with no persisted state.json must fail —
+	// LoadState errors aren't one of the run.* sentinels, so this exercises
+	// the default-to-internal-error branch instead of a 4xx-style mapping.
+	// Uses a fresh run_id/stateDir: "rpc-run-1" itself now HAS persisted
+	// state (it completed above), so resuming it would succeed instead.
+	unresumedMani := testRunManifest("rpc-run-never-started", run.ModeCheckpoint, false)
+	resumeParams, _ := json.Marshal(RunResumeParams{Manifest: *unresumedMani, StateDir: t.TempDir()})
+	reqResume := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunResume, Params: resumeParams}
+	resp = h.HandleRequest(context.Background(), reqResume)
+	if resp.Error == nil {
+		t.Fatal("want run.resume to fail without a persisted checkpoint state")
+	}
+	if resp.Error.Code != ErrCodeInternalError {
+		t.Fatalf("run.resume error code = %d, want %d", resp.Error.Code, ErrCodeInternalError)
+	}
+}
+
+// TestRunRPC_ApproveCheckpointAndNotification drives a daemon-hosted run
+// through a live HITL checkpoint entirely over RPC (run.start, then
+// run.approve_checkpoint), and confirms the run.checkpoint.event
+// notification (Fase 2's publishRunCheckpointEvent) reaches a subscribed
+// transport the moment the run blocks — the one piece of Fase 3 surface
+// that isn't just a thin wrapper over an already-tested SessionManager
+// method.
+func TestRunRPC_ApproveCheckpointAndNotification(t *testing.T) {
+	m := newTestSessionManagerForRuns()
+	h := NewHandler(m, slog.New(slog.DiscardHandler), nil, nil)
+	stateDir := t.TempDir()
+	mani := testRunManifest("rpc-run-checkpoint", run.ModeCheckpoint, true)
+
+	var mu sync.Mutex
+	var notifs []*JSONRPCNotification
+	m.SetDeltaPublisher(func(sessionID string, notif *JSONRPCNotification) {
+		mu.Lock()
+		defer mu.Unlock()
+		notifs = append(notifs, notif)
+	})
+
+	startParams, _ := json.Marshal(RunStartParams{Manifest: *mani, StateDir: stateDir})
+	reqStart := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunStart, Params: startParams}
+	resp := h.HandleRequest(context.Background(), reqStart)
+	if resp.Error != nil {
+		t.Fatalf("run.start error: %v", resp.Error)
+	}
+
+	waitForCheckpointPending(t, m, "rpc-run-checkpoint", 5*time.Second)
+
+	// The checkpoint notification should have arrived by the time the run
+	// is observably paused (publishRunCheckpointEvent fires before the
+	// blocking select in handleCheckpoint).
+	var gotEvent bool
+	mu.Lock()
+	for _, n := range notifs {
+		if n.Method == MethodRunCheckpointEvent {
+			var payload RunCheckpointEventPayload
+			if err := json.Unmarshal(n.Params, &payload); err != nil {
+				t.Fatalf("unmarshal checkpoint event payload: %v", err)
+			}
+			if payload.RunID == "rpc-run-checkpoint" {
+				gotEvent = true
+			}
+		}
+	}
+	mu.Unlock()
+	if !gotEvent {
+		t.Fatal("expected a run.checkpoint.event notification for rpc-run-checkpoint")
+	}
+
+	// run.approve_checkpoint on a run with no pending checkpoint must be
+	// ErrCodeRunNoCheckpointPending, not a generic failure — verify this
+	// BEFORE approving so the run is still genuinely paused.
+	reqBogus := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunApproveCheckpoint}
+	respBogus := h.HandleRequest(context.Background(), reqBogus)
+	if respBogus.Error == nil || respBogus.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("want ErrCodeInvalidParams for missing run_id, got %+v", respBogus.Error)
+	}
+
+	approveParams, _ := json.Marshal(RunApproveCheckpointParams{RunID: "rpc-run-checkpoint", Approved: true})
+	reqApprove := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunApproveCheckpoint, Params: approveParams}
+	resp = h.HandleRequest(context.Background(), reqApprove)
+	if resp.Error != nil {
+		t.Fatalf("run.approve_checkpoint error: %v", resp.Error)
+	}
+
+	res := waitForRunTerminal(t, m, "rpc-run-checkpoint", 5*time.Second)
+	if res.Status != RunDone {
+		t.Fatalf("final status = %q, want %q", res.Status, RunDone)
+	}
+
+	// A second approval after completion must be ErrCodeRunNoCheckpointPending.
+	reqApproveAgain := &JSONRPCRequest{JSONRPC: "2.0", Method: MethodRunApproveCheckpoint, Params: approveParams}
+	resp = h.HandleRequest(context.Background(), reqApproveAgain)
+	if resp.Error == nil || resp.Error.Code != ErrCodeRunNoCheckpointPending {
+		t.Fatalf("want ErrCodeRunNoCheckpointPending, got %+v", resp.Error)
+	}
 }

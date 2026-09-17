@@ -2,12 +2,22 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/run"
+)
+
+// Sentinel errors for run.* RPC handlers (Fase 3) to map onto the right
+// JSON-RPC error code via errors.Is, same pattern store.ErrSessionNotFound
+// already uses.
+var (
+	ErrRunNotFound            = errors.New("run not found")
+	ErrRunAlreadyActive       = errors.New("run already active")
+	ErrRunNoCheckpointPending = errors.New("run is not currently awaiting a checkpoint decision")
 )
 
 // RunExecution lifecycle states (RF-11 daemon migration, Fase 1+2 of
@@ -57,17 +67,17 @@ type RunExecution struct {
 // RunResult is a thread-safe snapshot of a RunExecution — same shape/purpose
 // as JobResult for Job.
 type RunResult struct {
-	ID                string
-	SessionID         string
-	Status            string
-	CurrentTask       string
-	PendingCheckpoint *run.Checkpoint // set only when Status == RunPausedCheckpoint
-	TokensUsed        int
-	IterUsed          int
-	Error             string
-	CreatedAt         int64
-	UpdatedAt         int64
-	Report            *run.Report
+	ID                string          `json:"id"`
+	SessionID         string          `json:"session_id"`
+	Status            string          `json:"status"`
+	CurrentTask       string          `json:"current_task,omitempty"`
+	PendingCheckpoint *run.Checkpoint `json:"pending_checkpoint,omitempty"` // set only when Status == RunPausedCheckpoint
+	TokensUsed        int             `json:"tokens_used"`
+	IterUsed          int             `json:"iterations_used"`
+	Error             string          `json:"error,omitempty"`
+	CreatedAt         int64           `json:"created_at"`
+	UpdatedAt         int64           `json:"updated_at"`
+	Report            *run.Report     `json:"report,omitempty"`
 }
 
 // isRunActive reports whether id currently has a live goroutine — status
@@ -125,7 +135,7 @@ func (m *SessionManager) StartRun(ctx context.Context, mani *run.Manifest, state
 		return nil, fmt.Errorf("sensitivity ceiling rejected manifest: %w", err)
 	}
 	if m.isRunActive(mani.RunID) {
-		return nil, fmt.Errorf("run %q already active", mani.RunID)
+		return nil, fmt.Errorf("run %q: %w", mani.RunID, ErrRunAlreadyActive)
 	}
 
 	var sessID string
@@ -162,7 +172,7 @@ func (m *SessionManager) ResumeRun(ctx context.Context, mani *run.Manifest, stat
 		return nil, fmt.Errorf("--resume is not valid with mode dry_run: dry runs execute nothing and persist no state to resume from")
 	}
 	if m.isRunActive(mani.RunID) {
-		return nil, fmt.Errorf("run %q already active", mani.RunID)
+		return nil, fmt.Errorf("run %q: %w", mani.RunID, ErrRunAlreadyActive)
 	}
 	prev, err := run.LoadState(stateDir, mani.RunID)
 	if err != nil {
@@ -470,12 +480,12 @@ func (m *SessionManager) ApproveRunCheckpoint(runID string, approved bool) (RunR
 	exec, ok := m.runs[runID]
 	m.runsMu.RUnlock()
 	if !ok {
-		return RunResult{}, fmt.Errorf("run not found: %s", runID)
+		return RunResult{}, fmt.Errorf("run %q: %w", runID, ErrRunNotFound)
 	}
 	exec.mu.Lock()
 	if exec.status != RunPausedCheckpoint || !exec.checkpointWaiting {
 		exec.mu.Unlock()
-		return RunResult{}, fmt.Errorf("run %q is not currently awaiting a checkpoint decision", runID)
+		return RunResult{}, fmt.Errorf("run %q: %w", runID, ErrRunNoCheckpointPending)
 	}
 	ch := exec.checkpointCh
 	exec.checkpointWaiting = false
@@ -527,7 +537,7 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 	exec, ok := m.runs[id]
 	m.runsMu.RUnlock()
 	if !ok {
-		return RunResult{}, fmt.Errorf("run not found: %s", id)
+		return RunResult{}, fmt.Errorf("run %q: %w", id, ErrRunNotFound)
 	}
 	exec.mu.Lock()
 	cancelable := exec.status == RunRunning || exec.status == RunPausedCheckpoint

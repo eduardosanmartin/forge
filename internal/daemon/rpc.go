@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/eduardosanmartin/forge/internal/cost"
+	"github.com/eduardosanmartin/forge/internal/run"
 )
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.
@@ -53,6 +54,13 @@ const (
 	ErrCodeApprovalRequired = -32013
 	ErrCodeAlreadyExists    = -32014
 	ErrCodeJobNotFound      = -32020
+	ErrCodeRunNotFound      = -32030
+	ErrCodeRunAlreadyActive = -32031
+	// ErrCodeRunNoCheckpointPending: run.approve_checkpoint on a run that
+	// isn't currently blocked on a checkpoint (nothing to approve, or a
+	// decision was already delivered — see ApproveRunCheckpoint's own doc
+	// comment in internal/daemon/runs.go).
+	ErrCodeRunNoCheckpointPending = -32032
 )
 
 // Method names for daemon -> client notifications.
@@ -174,6 +182,18 @@ const (
 	MethodProviderList       = "provider.list"
 	MethodProviderListModels = "provider.list_models"
 	MethodProviderSwitch     = "provider.switch"
+	// RF-11 daemon migration (hojaDeRuta-multiagente.md Fase 3): manifest
+	// runs as a first-class RPC concept, same run.* naming convention
+	// session.*/job.*/provider.* already use. The engine (StartRun,
+	// ResumeRun, GetRun, ListRuns, CancelRun, ApproveRunCheckpoint) has
+	// existed since Fase 1/2 (internal/daemon/runs.go) — these are its
+	// first public callers.
+	MethodRunStart             = "run.start"
+	MethodRunStatus            = "run.status"
+	MethodRunList              = "run.list"
+	MethodRunResume            = "run.resume"
+	MethodRunCancel            = "run.cancel"
+	MethodRunApproveCheckpoint = "run.approve_checkpoint"
 )
 
 // CreateSessionParams for session.create.
@@ -651,4 +671,42 @@ func NewNotification(method string, params any) (*JSONRPCNotification, error) {
 		Method:  method,
 		Params:  data,
 	}, nil
+}
+
+// RunStartParams for run.start. Manifest travels as content, not a path —
+// the CLI (or any other client) reads/parses the manifest file locally and
+// sends the parsed result, matching Fase 0's flag-mapping table
+// (hojaDeRuta-multiagente.md): "--manifest: CLI sigue leyendo/parseando
+// local, manda el contenido a run.start".
+type RunStartParams struct {
+	Manifest  run.Manifest `json:"manifest"`
+	StateDir  string       `json:"state_dir,omitempty"`
+	Decompose bool         `json:"decompose,omitempty"`
+}
+
+// RunResumeParams for run.resume.
+type RunResumeParams struct {
+	Manifest run.Manifest `json:"manifest"`
+	StateDir string       `json:"state_dir,omitempty"`
+}
+
+// RunStatusParams for run.status.
+type RunStatusParams struct {
+	RunID string `json:"run_id"`
+}
+
+// RunListResult for run.list.
+type RunListResult struct {
+	Runs []RunResult `json:"runs"`
+}
+
+// RunCancelParams for run.cancel.
+type RunCancelParams struct {
+	RunID string `json:"run_id"`
+}
+
+// RunApproveCheckpointParams for run.approve_checkpoint.
+type RunApproveCheckpointParams struct {
+	RunID    string `json:"run_id"`
+	Approved bool   `json:"approved"`
 }

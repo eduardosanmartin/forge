@@ -111,6 +111,18 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleMemoryDelete(ctx, req)
 	case MethodFanout:
 		return h.handleFanout(ctx, req)
+	case MethodRunStart:
+		return h.handleRunStart(ctx, req)
+	case MethodRunStatus:
+		return h.handleRunStatus(ctx, req)
+	case MethodRunList:
+		return h.handleRunList(ctx, req)
+	case MethodRunResume:
+		return h.handleRunResume(ctx, req)
+	case MethodRunCancel:
+		return h.handleRunCancel(ctx, req)
+	case MethodRunApproveCheckpoint:
+		return h.handleRunApproveCheckpoint(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -882,6 +894,114 @@ func (h *Handler) handleJobCancel(ctx context.Context, req *JSONRPCRequest) *JSO
 		return NewErrorResponse(req.ID, ErrCodeJobNotFound, "job not found", nil)
 	}
 	return h.resultResponse(req.ID, JobCancelResult{Canceled: job.Status == JobCanceled, JobID: job.ID, Status: job.Status})
+}
+
+// run.* handlers (RF-11 daemon migration, hojaDeRuta-multiagente.md Fase
+// 3) — thin RPC wrappers over the engine SessionManager.StartRun/
+// ResumeRun/GetRun/ListRuns/CancelRun/ApproveRunCheckpoint already
+// implement (internal/daemon/runs.go, Fase 1/2). Manifest travels as
+// content in the request, never a path — the daemon has no reason to read
+// the client's filesystem.
+
+func (h *Handler) handleRunStart(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunStartParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	stateDir := params.StateDir
+	if stateDir == "" {
+		stateDir = "."
+	}
+	exec, err := h.mgr.StartRun(ctx, &params.Manifest, stateDir, params.Decompose)
+	if err != nil {
+		if errors.Is(err, ErrRunAlreadyActive) {
+			return NewErrorResponse(req.ID, ErrCodeRunAlreadyActive, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, exec.snapshot())
+}
+
+func (h *Handler) handleRunStatus(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunStatusParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, ok := h.mgr.GetRun(params.RunID)
+	if !ok {
+		return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleRunList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	runs := h.mgr.ListRuns()
+	if runs == nil {
+		runs = []RunResult{}
+	}
+	return h.resultResponse(req.ID, RunListResult{Runs: runs})
+}
+
+func (h *Handler) handleRunResume(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunResumeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	stateDir := params.StateDir
+	if stateDir == "" {
+		stateDir = "."
+	}
+	exec, err := h.mgr.ResumeRun(ctx, &params.Manifest, stateDir)
+	if err != nil {
+		if errors.Is(err, ErrRunAlreadyActive) {
+			return NewErrorResponse(req.ID, ErrCodeRunAlreadyActive, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, exec.snapshot())
+}
+
+func (h *Handler) handleRunCancel(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunCancelParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, err := h.mgr.CancelRun(params.RunID)
+	if err != nil {
+		if errors.Is(err, ErrRunNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleRunApproveCheckpoint(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunApproveCheckpointParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, err := h.mgr.ApproveRunCheckpoint(params.RunID, params.Approved)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRunNotFound):
+			return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+		case errors.Is(err, ErrRunNoCheckpointPending):
+			return NewErrorResponse(req.ID, ErrCodeRunNoCheckpointPending, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, res)
 }
 
 func messageToResult(msg store.Message) MessageResult {
