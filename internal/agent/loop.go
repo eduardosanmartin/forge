@@ -629,10 +629,22 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		}
 
 		// No tool calls - final response
+		//
+		// A reasoning-capable model can spend its entire completion-token
+		// budget "thinking" and stop before ever writing a final answer —
+		// observed live via OpenRouter (nvidia/nemotron-3.5-lightning:free):
+		// Content arrived empty while Reasoning carried real generated text
+		// and Usage billed real completion_tokens. Falling back to the
+		// reasoning text (clearly labeled) beats showing a silent blank
+		// reply for tokens that were, in fact, spent producing something.
+		finalContent := choice.Message.Content
+		if finalContent == "" && choice.Message.Reasoning != "" {
+			finalContent = "⚠ The model did not produce a final answer — it spent its entire response reasoning internally before stopping. Here is what it reasoned:\n\n" + choice.Message.Reasoning
+		}
 		finalMsg := &store.Message{
 			SessionID:  sessionID,
 			Role:       "assistant",
-			Content:    choice.Message.Content,
+			Content:    finalContent,
 			Usage:      resp.Usage,
 			Model:      model,
 			DurationMs: llmElapsed,
@@ -762,7 +774,7 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 	if ch == nil {
 		return llm.ChatResponse{}, 0, errors.New("nil stream channel")
 	}
-	content, toolCalls, usage, finishReason, ttftMs, cErr := consumeStream(ctx, ch, onDelta, startTime)
+	content, reasoning, toolCalls, usage, finishReason, ttftMs, cErr := consumeStream(ctx, ch, onDelta, startTime)
 	if cErr != nil {
 		return llm.ChatResponse{}, ttftMs, cErr
 	}
@@ -775,6 +787,7 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 			Message: llm.Message{
 				Role:      "assistant",
 				Content:   content,
+				Reasoning: reasoning,
 				ToolCalls: toolCalls,
 			},
 			FinishReason: finishReason,
@@ -817,19 +830,20 @@ func mergeToolCallDelta(calls []llm.ToolCall, frag llm.ToolCall) []llm.ToolCall 
 // A chunk with Error != "" is treated as terminal mid-stream failure (fails turn).
 // TTFT is measured as time from startTime to first non-empty text delta; 0 if none.
 // Context cancellation is respected and produces a context error.
-func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string), startTime time.Time) (string, []llm.ToolCall, *llm.Usage, string, int64, error) {
+func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string), startTime time.Time) (string, string, []llm.ToolCall, *llm.Usage, string, int64, error) {
 	var (
-		contentBuilder strings.Builder
-		toolCalls      []llm.ToolCall
-		usage          *llm.Usage
-		finishReason   string
-		ttftMs         int64
-		ttftSet        bool
+		contentBuilder   strings.Builder
+		reasoningBuilder strings.Builder
+		toolCalls        []llm.ToolCall
+		usage            *llm.Usage
+		finishReason     string
+		ttftMs           int64
+		ttftSet          bool
 	)
 	for {
 		select {
 		case <-ctx.Done():
-			return "", nil, nil, "", ttftMs, ctx.Err()
+			return "", "", nil, nil, "", ttftMs, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: final assembly.
@@ -840,10 +854,10 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 						finishReason = "stop"
 					}
 				}
-				return contentBuilder.String(), toolCalls, usage, finishReason, ttftMs, nil
+				return contentBuilder.String(), reasoningBuilder.String(), toolCalls, usage, finishReason, ttftMs, nil
 			}
 			if chunk.Error != "" {
-				return "", nil, nil, "", ttftMs, fmt.Errorf("stream error: %s", chunk.Error)
+				return "", "", nil, nil, "", ttftMs, fmt.Errorf("stream error: %s", chunk.Error)
 			}
 			if chunk.Usage != nil {
 				usage = chunk.Usage
@@ -862,6 +876,14 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 					if onDelta != nil {
 						onDelta(choice.Delta.Content)
 					}
+				}
+				// Reasoning-capable providers (observed live from OpenRouter)
+				// stream "thinking" text in delta.reasoning, separate from
+				// delta.content — accumulated but never forwarded to onDelta:
+				// it isn't the answer, so it shouldn't appear as if it were
+				// live response text.
+				if choice.Delta.Reasoning != "" {
+					reasoningBuilder.WriteString(choice.Delta.Reasoning)
 				}
 				if len(choice.Delta.ToolCalls) > 0 {
 					for _, frag := range choice.Delta.ToolCalls {

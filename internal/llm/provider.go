@@ -17,6 +17,17 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant->tool
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool->result
 	Name       string     `json:"name,omitempty"`         // tool name for tool messages
+	// Reasoning captures a reasoning-capable model's "thinking" text when the
+	// provider sends it as a field separate from Content (observed live from
+	// OpenRouter: delta.reasoning, alongside delta.content). Without this
+	// field json.Unmarshal silently drops it. A model that spends its whole
+	// completion-token budget reasoning and never transitions to a final
+	// answer leaves Content empty but Reasoning populated — the agent loop's
+	// final-response step (internal/agent/loop.go) falls back to showing
+	// this instead of a blank reply. Reused for both the streaming delta
+	// (StreamChoice.Delta) and the non-streaming Choice.Message, since both
+	// share this struct.
+	Reasoning string `json:"reasoning,omitempty"`
 }
 
 // ToolCall represents a function call made by the assistant.
