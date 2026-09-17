@@ -853,17 +853,33 @@ func (r *Runner) handleCheckpoint(ctx context.Context, cp Checkpoint, reason str
 		_ = r.persistState()
 		return false, nil
 	}
+	// Persist "paused, awaiting this checkpoint" BEFORE calling OnCheckpoint,
+	// not after (hojaDeRuta-multiagente.md Fase 2): a daemon-hosted
+	// OnCheckpoint blocks on a channel waiting for a live external decision
+	// — that wait can outlive a daemon restart, and on restart the only
+	// source of truth is this file. Persisting after the callback returns
+	// (the pre-Fase-2 behavior, still correct for the CLI's synchronous
+	// stdin-prompt OnCheckpoint) would leave state.json showing stale
+	// pre-checkpoint state for the entire wait. If OnCheckpoint approves
+	// quickly, this is superseded within the same call, below — a harmless
+	// transient on disk, not a real pause.
+	r.state.PausedCheckpoint = &cp
+	r.state.PauseReason = reason
+	r.state.Status = StatusPaused
+	r.state.UpdatedAt = r.now()
+	_ = r.persistState()
+
 	approved, err := r.OnCheckpoint(cp, &r.state)
 	if err != nil {
 		return false, err
 	}
-	if !approved {
-		r.state.PausedCheckpoint = &cp
-		r.state.PauseReason = reason
-		r.state.Status = StatusPaused
-		r.state.UpdatedAt = r.now()
-		_ = r.persistState()
+	if approved {
+		r.state.PausedCheckpoint = nil
+		r.state.PauseReason = ""
+		r.state.Status = StatusRunning
 	}
+	r.state.UpdatedAt = r.now()
+	_ = r.persistState()
 	return approved, nil
 }
 

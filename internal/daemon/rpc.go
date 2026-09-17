@@ -62,6 +62,12 @@ const (
 	MethodToolCallEvent = "tool.call.event"     // tool call started/finished
 	MethodEmergencyHalt = "emergency.halt"      // emergency stop broadcast
 	MethodMessageDelta  = "message.delta.event" // WU3: live text delta during streaming (additive)
+	// MethodRunCheckpointEvent fires the instant a daemon-hosted manifest
+	// run blocks on a required HITL checkpoint (RF-11 daemon migration,
+	// hojaDeRuta-multiagente.md Fase 2). No RPC to approve it exists yet
+	// (Fase 3) — publishing the notification a phase early costs nothing
+	// and means Fase 3 only has to wire the approve RPC, not this too.
+	MethodRunCheckpointEvent = "run.checkpoint.event"
 )
 
 // SessionEventPayload carries session lifecycle events.
@@ -90,6 +96,18 @@ type ToolCallEventPayload struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"` // "started" | "finished" | "error"
 	Error      string `json:"error,omitempty"`
+}
+
+// RunCheckpointEventPayload carries a daemon-hosted run's checkpoint pause
+// (shape decided in Fase 0 of hojaDeRuta-multiagente.md: id/trigger/reason,
+// separate from a would-be run.progress.event — the budget already travels
+// inside run.task.event, this is deliberately not a third event).
+type RunCheckpointEventPayload struct {
+	RunID      string `json:"run_id"`
+	SessionID  string `json:"session_id"`
+	Checkpoint string `json:"checkpoint"` // checkpoint ID
+	Trigger    string `json:"trigger"`
+	Reason     string `json:"reason"`
 }
 
 // MessageDeltaPayload carries live streaming deltas (WU3).

@@ -10,19 +10,19 @@ import (
 	"github.com/eduardosanmartin/forge/internal/run"
 )
 
-// RunExecution lifecycle states (RF-11 daemon migration, Fase 1 of
+// RunExecution lifecycle states (RF-11 daemon migration, Fase 1+2 of
 // hojaDeRuta-multiagente.md). This is the daemon's OWN bookkeeping enum —
 // same relationship Job's JobRunning/JobDone/... has to a plain agent turn
 // — not a reuse of run.Report.Status, though most values map 1:1.
 //
-// RunPausedCheckpoint and RunKilled are TERMINAL here: the goroutine has
-// already exited by the time either is set, exactly like a CLI-driven run
-// pausing today (`forge run --manifest ... --resume` starts a fresh
-// process). Fase 2 of the roadmap is where a checkpoint pause becomes a
-// live, in-memory block on a channel that an external approval unblocks
-// without a new goroutine — Fase 1 deliberately does not get ahead of that;
-// ResumeRun (below) is Fase 1's own way to continue a paused run, mirroring
-// Runner.Resume() exactly as the CLI already uses it.
+// RunPausedCheckpoint is a LIVE, non-terminal state as of Fase 2: the
+// goroutine is still alive, blocked inside OnCheckpoint reading from
+// checkpointCh (see newDaemonManifestRunner). ApproveRunCheckpoint
+// unblocks it in place — no new goroutine, no session/context loss —
+// which is strictly better than Fase 1's "pause ends the goroutine, a
+// later ResumeRun starts a fresh one" behavior (still available and still
+// correct: it's how a run recovers from an actual daemon restart, which
+// necessarily kills every live goroutine regardless of this channel).
 const (
 	RunRunning          = "running"
 	RunPausedCheckpoint = "paused_checkpoint"
@@ -39,56 +39,76 @@ type RunExecution struct {
 	CreatedAt int64
 	UpdatedAt int64
 
-	mu          sync.Mutex
-	status      string
-	currentTask string
-	tokensUsed  int
-	iterUsed    int
-	err         string
-	report      *run.Report
-	cancel      context.CancelFunc
-	done        chan struct{}
+	mu                sync.Mutex
+	status            string
+	currentTask       string
+	tokensUsed        int
+	iterUsed          int
+	err               string
+	report            *run.Report
+	ctx               context.Context // this run's own cancellation context, set once at launchRun before the goroutine starts
+	cancel            context.CancelFunc
+	done              chan struct{}
+	pendingCheckpoint *run.Checkpoint // non-nil only while status == RunPausedCheckpoint
+	checkpointCh      chan bool       // Fase 2: ApproveRunCheckpoint sends here; OnCheckpoint blocks reading it
+	checkpointWaiting bool            // guards ApproveRunCheckpoint against a decision with nothing listening
 }
 
 // RunResult is a thread-safe snapshot of a RunExecution — same shape/purpose
 // as JobResult for Job.
 type RunResult struct {
-	ID          string
-	SessionID   string
-	Status      string
-	CurrentTask string
-	TokensUsed  int
-	IterUsed    int
-	Error       string
-	CreatedAt   int64
-	UpdatedAt   int64
-	Report      *run.Report
+	ID                string
+	SessionID         string
+	Status            string
+	CurrentTask       string
+	PendingCheckpoint *run.Checkpoint // set only when Status == RunPausedCheckpoint
+	TokensUsed        int
+	IterUsed          int
+	Error             string
+	CreatedAt         int64
+	UpdatedAt         int64
+	Report            *run.Report
 }
 
-// isRunActive reports whether id currently has a live goroutine (status
-// RunRunning). A terminal entry (done/failed/killed/canceled/paused) never
-// blocks starting fresh — StartRun/ResumeRun overwrite it in m.runs — only
-// a genuinely in-flight run does, since two goroutines racing on the same
+// isRunActive reports whether id currently has a live goroutine — status
+// RunRunning, or (Fase 2) RunPausedCheckpoint, since that goroutine is
+// alive too, just blocked in OnCheckpoint. A truly terminal entry
+// (done/failed/killed/canceled) never blocks starting fresh —
+// StartRun/ResumeRun overwrite it in m.runs — only a genuinely in-flight
+// or paused-in-place run does, since two goroutines racing on the same
 // run_id would corrupt its shared state.json.
 func (m *SessionManager) isRunActive(id string) bool {
 	res, ok := m.GetRun(id)
-	return ok && res.Status == RunRunning
+	if !ok {
+		return false
+	}
+	if res.Status == RunRunning {
+		return true
+	}
+	// RunPausedCheckpoint is active ONLY while genuinely blocked live
+	// (Report nil — Run()/Resume() has not returned yet). A DECLINED
+	// checkpoint also reports RunPausedCheckpoint, but by then the
+	// goroutine has exited and finishRun has set Report — that's Fase 1's
+	// terminal pause, not a live one, and must not block a fresh
+	// StartRun/ResumeRun.
+	return res.Status == RunPausedCheckpoint && res.Report == nil
 }
 
 func (r *RunExecution) snapshot() RunResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return RunResult{
-		ID:          r.ID,
-		SessionID:   r.SessionID,
-		Status:      r.status,
-		CurrentTask: r.currentTask,
-		TokensUsed:  r.tokensUsed,
-		IterUsed:    r.iterUsed,
-		Error:       r.err,
-		CreatedAt:   r.CreatedAt,
-		UpdatedAt:   r.UpdatedAt,
-		Report:      r.report,
+		ID:                r.ID,
+		SessionID:         r.SessionID,
+		Status:            r.status,
+		CurrentTask:       r.currentTask,
+		PendingCheckpoint: r.pendingCheckpoint,
+		TokensUsed:        r.tokensUsed,
+		IterUsed:          r.iterUsed,
+		Error:             r.err,
+		CreatedAt:         r.CreatedAt,
+		UpdatedAt:         r.UpdatedAt,
+		Report:            r.report,
 	}
 }
 
@@ -176,13 +196,61 @@ func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, s
 	}
 	r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
 		m.logger.Info("run checkpoint reached", "run_id", mani.RunID, "checkpoint", cp.ID, "trigger", cp.Trigger)
-		// Fase 1: same "pause, persist state, exit" contract the CLI already
-		// uses — a required checkpoint always returns false here; Runner
-		// persists RunState and Run()/Resume() returns a StatusPaused
-		// report. ResumeRun (above) is how the run continues once approved
-		// (a fresh goroutine reusing the same session). Fase 2 replaces
-		// this with a real live block on a channel.
-		return false, nil
+		m.runsMu.RLock()
+		exec, ok := m.runs[mani.RunID]
+		m.runsMu.RUnlock()
+		if !ok {
+			// Should never happen: launchRun registers exec before the
+			// goroutine that could reach a checkpoint even starts. Never
+			// block forever on a run nothing can find — decline safely,
+			// same as Fase 1's unconditional false.
+			return false, nil
+		}
+
+		// Fase 2: block on a fresh, per-checkpoint channel instead of
+		// deciding synchronously — ApproveRunCheckpoint (below) delivers
+		// the decision from any external caller, potentially much later,
+		// without losing this run's goroutine/session/conversational
+		// context (Fase 1's "pause ends the goroutine, ResumeRun starts a
+		// fresh one" remains correct and available — it's how a run
+		// recovers from an actual daemon restart, which kills this
+		// goroutine regardless).
+		ch := make(chan bool, 1)
+		cpCopy := cp
+		exec.mu.Lock()
+		exec.status = RunPausedCheckpoint
+		exec.pendingCheckpoint = &cpCopy
+		exec.checkpointCh = ch
+		exec.checkpointWaiting = true
+		exec.UpdatedAt = time.Now().UnixMilli()
+		exec.mu.Unlock()
+
+		m.publishRunCheckpointEvent(mani.RunID, sessionID, cp, "checkpoint pending approval")
+
+		select {
+		case approved := <-ch:
+			exec.mu.Lock()
+			exec.checkpointWaiting = false
+			exec.pendingCheckpoint = nil
+			if approved {
+				exec.status = RunRunning
+			}
+			exec.UpdatedAt = time.Now().UnixMilli()
+			exec.mu.Unlock()
+			return approved, nil
+		case <-exec.ctx.Done():
+			// CancelRun (or a genuine parent shutdown) fired while this run
+			// was paused waiting for a decision — handleCheckpoint's caller
+			// treats a non-nil error as a real failure (failReport), which
+			// finishRun below maps back to RunCanceled via ctxErr, not
+			// RunFailed (see finishRun's doc comment).
+			exec.mu.Lock()
+			exec.checkpointWaiting = false
+			exec.pendingCheckpoint = nil
+			exec.UpdatedAt = time.Now().UnixMilli()
+			exec.mu.Unlock()
+			return false, exec.ctx.Err()
+		}
 	}
 	r.OnProgress = func(ev run.ProgressEvent) {
 		m.setRunProgress(mani.RunID, ev)
@@ -223,6 +291,7 @@ func (m *SessionManager) launchRun(runID, sessionID string, call func(context.Co
 		CreatedAt: now,
 		UpdatedAt: now,
 		status:    RunRunning,
+		ctx:       rctx,
 		cancel:    cancel,
 		done:      make(chan struct{}),
 	}
@@ -242,54 +311,61 @@ func (m *SessionManager) launchRun(runID, sessionID string, call func(context.Co
 	return exec
 }
 
-// finishRun records the terminal outcome of a run's goroutine. A no-op if
-// the run was already finalized externally (CancelRun racing the goroutine
-// itself) — same guard Job.finishJob uses.
+// finishRun records the terminal outcome of a run's goroutine and is the
+// SOLE closer of exec.done — called exactly once, from launchRun's
+// goroutine, after call() truly returns. If the status was already
+// finalized externally (CancelRun racing ahead of us — see its own doc
+// comment) that verdict wins and is left untouched; either way, done is
+// always closed here, so a caller waiting on it is guaranteed the
+// goroutine has actually stopped, not just been asked to.
 func (m *SessionManager) finishRun(exec *RunExecution, report *run.Report, err error, ctxErr error) {
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
-	if exec.status != RunRunning {
-		return
-	}
-	exec.UpdatedAt = time.Now().UnixMilli()
-	switch {
-	case report != nil:
-		// A report means Run()/Resume() reached a real terminal state.
-		// Its Status is authoritative EVEN WHEN err is also non-nil:
-		// pauseReport/killedReport/failReport (internal/run/runner.go) all
-		// deliberately return (report, err) together — e.g. pauseReport's
-		// err reads "paused at checkpoint ... — awaiting approval", a
-		// human-readable reason string for CLI/RPC callers, not a real
-		// failure. Checking err first would misclassify every HITL pause
-		// and every hard-budget kill as RunFailed.
-		exec.report = report
-		exec.tokensUsed = report.BudgetUsed.TokensUsed
-		exec.iterUsed = report.BudgetUsed.IterationsUsed
-		switch report.Status {
-		case run.StatusCompleted:
-			exec.status = RunDone
-		case run.StatusPaused:
-			exec.status = RunPausedCheckpoint
-		case run.StatusKilled:
-			exec.status = RunKilled
+	if exec.status == RunRunning || exec.status == RunPausedCheckpoint {
+		exec.UpdatedAt = time.Now().UnixMilli()
+		switch {
+		case report != nil:
+			// A report means Run()/Resume() reached a real terminal state.
+			// Its Status is authoritative EVEN WHEN err is also non-nil:
+			// pauseReport/killedReport/failReport (internal/run/runner.go)
+			// all deliberately return (report, err) together — e.g.
+			// pauseReport's err reads "paused at checkpoint ... — awaiting
+			// approval", a human-readable reason string for CLI/RPC
+			// callers, not a real failure. Checking err first would
+			// misclassify every HITL pause and every hard-budget kill as
+			// RunFailed.
+			exec.report = report
+			exec.tokensUsed = report.BudgetUsed.TokensUsed
+			exec.iterUsed = report.BudgetUsed.IterationsUsed
+			switch report.Status {
+			case run.StatusCompleted:
+				exec.status = RunDone
+			case run.StatusPaused:
+				exec.status = RunPausedCheckpoint
+			case run.StatusKilled:
+				exec.status = RunKilled
+			default:
+				exec.status = RunFailed
+			}
+			if err != nil {
+				exec.err = err.Error()
+			}
+		case ctxErr == context.Canceled:
+			exec.status = RunCanceled
+			if err != nil {
+				exec.err = err.Error()
+			}
+		case err != nil:
+			exec.status = RunFailed
+			exec.err = err.Error()
 		default:
 			exec.status = RunFailed
+			exec.err = "run produced no report"
 		}
-		if err != nil {
-			exec.err = err.Error()
-		}
-	case ctxErr == context.Canceled:
-		exec.status = RunCanceled
-		if err != nil {
-			exec.err = err.Error()
-		}
-	case err != nil:
-		exec.status = RunFailed
-		exec.err = err.Error()
-	default:
-		exec.status = RunFailed
-		exec.err = "run produced no report"
 	}
+	// Defensive: never leave a stale pending checkpoint once the goroutine
+	// has truly finished, whatever path got here.
+	exec.pendingCheckpoint = nil
 	select {
 	case <-exec.done:
 	default:
@@ -358,6 +434,62 @@ func (m *SessionManager) manifestDecomposer() run.Decomposer {
 	}
 }
 
+// publishRunCheckpointEvent broadcasts run.checkpoint.event the instant a
+// run blocks on a required checkpoint (Fase 2 of hojaDeRuta-multiagente.md
+// — no public RPC to approve it exists until Fase 3, but publishing this
+// notification a phase early costs nothing since deltaPublisher already
+// exists for tool.call.event/message.delta.event). Best-effort: a nil
+// publisher (no client ever subscribed) or a marshal failure is silently
+// skipped, same as onToolEvent's own convention.
+func (m *SessionManager) publishRunCheckpointEvent(runID, sessionID string, cp run.Checkpoint, reason string) {
+	m.mu.RLock()
+	pub := m.deltaPublisher
+	m.mu.RUnlock()
+	if pub == nil {
+		return
+	}
+	payload := RunCheckpointEventPayload{RunID: runID, SessionID: sessionID, Checkpoint: cp.ID, Trigger: cp.Trigger, Reason: reason}
+	if notif, err := NewNotification(MethodRunCheckpointEvent, payload); err == nil {
+		pub(sessionID, notif)
+	}
+}
+
+// ApproveRunCheckpoint delivers a live decision to a run currently blocked
+// on a checkpoint (Fase 2): approved=true continues execution in the SAME
+// goroutine/session — no context lost, unlike Fase 1's "pause ends the
+// goroutine, ResumeRun starts a fresh one" (still correct, still how a run
+// recovers from an actual daemon restart). approved=false pauses it
+// cleanly (Runner's own pauseReport path) and DOES end that goroutine —
+// there is no reason to keep a declined run's goroutine alive; a later
+// ResumeRun starts fresh and will reach the same checkpoint again. Returns
+// an error if the run isn't currently waiting on a checkpoint at all
+// (nothing to approve, or a decision was already delivered — checked and
+// cleared atomically so two racing approvals can't both send).
+func (m *SessionManager) ApproveRunCheckpoint(runID string, approved bool) (RunResult, error) {
+	m.runsMu.RLock()
+	exec, ok := m.runs[runID]
+	m.runsMu.RUnlock()
+	if !ok {
+		return RunResult{}, fmt.Errorf("run not found: %s", runID)
+	}
+	exec.mu.Lock()
+	if exec.status != RunPausedCheckpoint || !exec.checkpointWaiting {
+		exec.mu.Unlock()
+		return RunResult{}, fmt.Errorf("run %q is not currently awaiting a checkpoint decision", runID)
+	}
+	ch := exec.checkpointCh
+	exec.checkpointWaiting = false
+	exec.mu.Unlock()
+
+	select {
+	case ch <- approved:
+	default:
+		// Unreachable in practice: ch is buffered(1) and checkpointWaiting
+		// guards against a second send — defensive, never blocks the caller.
+	}
+	return exec.snapshot(), nil
+}
+
 // GetRun returns a snapshot of a run by ID.
 func (m *SessionManager) GetRun(id string) (RunResult, bool) {
 	m.runsMu.RLock()
@@ -381,10 +513,15 @@ func (m *SessionManager) ListRuns() []RunResult {
 	return out
 }
 
-// CancelRun cancels a running run by ID — same optimistic-set-then-let-the-
-// goroutine-observe-it pattern as Job.CancelJob: the context is canceled,
-// status is set to RunCanceled immediately (so a concurrent GetRun sees it
-// right away) rather than waiting for the goroutine to actually unwind.
+// CancelRun cancels a run by ID — running, or (Fase 2) paused live inside a
+// checkpoint (its goroutine is still alive, blocked in OnCheckpoint, and
+// exec.ctx.Done() unblocks it there too). Same optimistic-set pattern as
+// Job.CancelJob: status flips to RunCanceled immediately (a concurrent
+// GetRun sees it right away) rather than waiting for the goroutine to
+// actually unwind — but unlike Job, this does NOT close exec.done itself;
+// finishRun (called once, from the goroutine's own eventual completion) is
+// the sole owner of that close, so a caller waiting on it always sees the
+// goroutine has truly stopped, not just been asked to.
 func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 	m.runsMu.RLock()
 	exec, ok := m.runs[id]
@@ -393,26 +530,18 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("run not found: %s", id)
 	}
 	exec.mu.Lock()
-	running := exec.status == RunRunning
+	cancelable := exec.status == RunRunning || exec.status == RunPausedCheckpoint
 	cancel := exec.cancel
-	exec.mu.Unlock()
-	if !running {
-		return exec.snapshot(), nil
-	}
-	if cancel != nil {
-		cancel()
-	}
-	exec.mu.Lock()
-	if exec.status == RunRunning {
+	if cancelable {
 		exec.status = RunCanceled
 		exec.err = "canceled by user"
+		exec.pendingCheckpoint = nil
+		exec.checkpointWaiting = false
 		exec.UpdatedAt = time.Now().UnixMilli()
-		select {
-		case <-exec.done:
-		default:
-			close(exec.done)
-		}
 	}
 	exec.mu.Unlock()
+	if cancelable && cancel != nil {
+		cancel()
+	}
 	return exec.snapshot(), nil
 }
