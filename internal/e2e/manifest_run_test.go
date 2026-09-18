@@ -46,22 +46,57 @@ import (
 // at each call site.
 func newManifestStack(t *testing.T, baseURL string, models []string) *stack {
 	t.Helper()
+	return newManifestStackOpts(t, baseURL, models, manifestStackOpts{})
+}
 
-	ws := ownTempDir(t, "forge-e2e-manifest-ws")
-	initGitRepo(t, ws)
+// manifestStackOpts lets a test pin down the workspace/storage path (and
+// sensitivity ceiling) instead of getting fresh ones every call — needed
+// for TestManifestRun_ResumeAfterDaemonRestart, which must reopen the SAME
+// store and read the SAME .forge/runs/<run_id>/state.json a second daemon
+// instance never wrote itself, exactly like a real `forge serve` restart.
+// Zero value (manifestStackOpts{}) reproduces newManifestStack's own
+// always-fresh behavior.
+type manifestStackOpts struct {
+	workspace   string // "" = create+chdir a fresh one
+	storagePath string // "" = create a fresh one
+	sensitivity string // "" = config.Defaults()'s own default
+}
+
+// newManifestStackOpts duplicates newStack's body (harness_test.go) with
+// two things that harness deliberately leaves out for this migration's own
+// tests: SetDeltaPublisher (see newManifestStack's doc comment above) and,
+// here, the ability to pin workspace/storage path/sensitivity so a test can
+// build a SECOND daemon instance over the SAME on-disk state as a first one
+// it already tore down — simulating a real daemon restart.
+func newManifestStackOpts(t *testing.T, baseURL string, models []string, opts manifestStackOpts) *stack {
+	t.Helper()
+
+	ws := opts.workspace
+	if ws == "" {
+		ws = ownTempDir(t, "forge-e2e-manifest-ws")
+		initGitRepo(t, ws)
+	}
 
 	if err := os.Chdir(ws); err != nil {
 		t.Fatalf("chdir into workspace %s: %v", ws, err)
 	}
 	t.Cleanup(func() { _ = os.Chdir(initialWd()) })
 
+	storagePath := opts.storagePath
+	if storagePath == "" {
+		storagePath = filepath.Join(ownTempDir(t, "forge-e2e-manifest-home"), "forge.db")
+	}
+
 	cfg := config.Defaults()
-	cfg.Storage.Path = filepath.Join(ownTempDir(t, "forge-e2e-manifest-home"), "forge.db")
+	cfg.Storage.Path = storagePath
 	cfg.DefaultProvider = "ollama"
 	cfg.Providers = map[string]config.Provider{
 		"ollama": {Kind: "openai-compatible", BaseURL: baseURL, Models: models},
 	}
 	cfg.Network.AllowedHosts = []string{"127.0.0.1", "localhost"}
+	if opts.sensitivity != "" {
+		cfg.Project.Sensitivity = opts.sensitivity
+	}
 	pol := testPolicy()
 	cfg.Permissions = config.PermissionsPolicy{
 		FS:    config.FSPermissions{Read: pol.FS.Read, Write: pol.FS.Write},
@@ -131,6 +166,32 @@ func pointHomeAtDaemon(t *testing.T, addr string) {
 	}
 }
 
+// resetRunCommandFlags resets every leakable bool/string flag on the `run`
+// subcommand back to its default — RootCommand is a shared singleton
+// across every test in this package (runCLI reuses it, matching
+// internal/cli/run_log_test.go's resetRunFlagsForTest), and pflag never
+// resets a bound variable back to its default just because a later
+// Parse() omits it. Once this package grew enough manifest-run tests that
+// remembering "--yes=false"/"--decompose=false"/"--resume=false" at every
+// call site became easy to get wrong (Fase 7 did, immediately), doing the
+// reset centrally in runCLI itself is safer than relying on every call
+// site to opt in.
+func resetRunCommandFlags(t *testing.T) {
+	t.Helper()
+	cmd, _, err := cli.RootCommand.Find([]string{"run"})
+	if err != nil {
+		t.Fatalf("find run command: %v", err)
+	}
+	for _, name := range []string{"manifest", "state-dir", "log", "resume", "yes", "decompose", "verify-audit", "json", "session"} {
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			continue
+		}
+		_ = f.Value.Set(f.DefValue)
+		f.Changed = false
+	}
+}
+
 // runCLI executes the real forge CLI (same RootCommand singleton
 // production uses) with args, capturing real os.Stdout/os.Stderr — needed
 // because runManifest's progress/report writers are hardcoded to
@@ -138,6 +199,7 @@ func pointHomeAtDaemon(t *testing.T, addr string) {
 // ErrOrStderr redirection) exactly as they were before Fase 5.
 func runCLI(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	resetRunCommandFlags(t)
 
 	origStdout, origStderr := os.Stdout, os.Stderr
 	rOut, wOut, pErr := os.Pipe()
