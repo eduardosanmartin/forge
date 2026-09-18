@@ -130,9 +130,9 @@ type TurnOptions struct {
 	// (never affects control flow or the persisted transcript) — wired by
 	// SessionManager to broadcast daemon.MethodToolCallEvent regardless of
 	// whether text-delta streaming is enabled, since manifest-driven task
-	// turns (client.ManifestExecutor) never enable streaming but still
-	// benefit from live tool-call visibility. errMsg is "" except on
-	// status "error".
+	// turns (the daemon's own manifestExecutor, internal/daemon/runs.go)
+	// never enable streaming but still benefit from live tool-call
+	// visibility. errMsg is "" except on status "error".
 	OnToolEvent func(toolCallID, name, status, errMsg string)
 }
 

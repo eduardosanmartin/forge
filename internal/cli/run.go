@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/client"
-	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/run"
 
@@ -362,9 +361,9 @@ func formatSubagentSnapshot(prev, current map[string]int) (msg string, changed b
 // printToolCallTick renders one live daemon.MethodToolCallEvent for a
 // manifest task's turn — the same "-> tool(...)" / "<- ok"/"<- error" shape
 // writeHumanResult prints after the fact for a single-prompt turn, but LIVE
-// while the task's blocking RPC call is still in flight (see
-// client.ManifestExecutor's onToolTick). The event payload carries no
-// argument preview (daemon.ToolCallEventPayload has none), only name/status.
+// while the task's turn is still in flight (see watchManifestEvents). The
+// event payload carries no argument preview (daemon.ToolCallEventPayload
+// has none), only name/status.
 func printToolCallTick(w io.Writer, ev daemon.ToolCallEventPayload) {
 	switch ev.Status {
 	case "started":
@@ -477,11 +476,17 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	// though the resulting plan is only previewed, never executed
 	// (Runner.Run decomposes BEFORE its own dry_run short-circuit). This is
 	// the ONE manifest path Fase 5 deliberately keeps running locally
-	// in-process (newManifestRunner/Runner.Run, no RPC at all) instead of
-	// through run.start: routing it through the daemon would newly REQUIRE
-	// one to be running for a mode that has never needed it.
+	// in-process (Runner.Run, no RPC at all) instead of through run.start:
+	// routing it through the daemon would newly REQUIRE one to be running
+	// for a mode that has never needed it. Runner.Run for dry_run always
+	// short-circuits to dryRunReport() before ever reaching execute() — the
+	// only place OnCheckpoint/OnProgress/Executor are used — so this needs
+	// none of them (Fase 6: the old newManifestRunner wired all three
+	// unconditionally, but they were unreachable dead code at this, the
+	// only remaining call site, once Fase 5 moved every other manifest path
+	// onto run.start/run.resume).
 	if mani.Mode == run.ModeDryRun && !decompose {
-		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "", logFile)
+		r := &run.Runner{Manifest: mani, Config: cfg, StateDir: stateDir}
 		rep, _ := r.Run(ctx)
 		return writeManifestReport(activityWriter(os.Stdout, logFile), rep, jsonOut)
 	}
@@ -638,9 +643,9 @@ func driveManifestRun(ctx, eventsCtx context.Context, cl *client.Client, mani *r
 // watchManifestEvents is driveManifestRun's event loop, run in its own
 // goroutine for the run's whole lifetime (canceled via eventsCtx). Every
 // notification this connection receives is filtered here — cl.Events never
-// scopes a subscription server-side (see internal/client/run_manifest.go's
-// ManifestExecutor, which relies on the exact same broadcast-to-everyone
-// behavior for tool.call.event today).
+// scopes a subscription server-side, so every connected client gets every
+// broadcast notification and filters client-side (same convention the
+// TUI's event handling already relies on).
 func watchManifestEvents(ctx context.Context, cl *client.Client, runID, sessionID string, events <-chan daemon.JSONRPCNotification, progressW, ttw io.Writer, autoYes bool) {
 	for {
 		select {
@@ -696,9 +701,10 @@ func progressEventFromPayload(p daemon.RunProgressEventPayload) run.ProgressEven
 	}
 }
 
-// handleCheckpointEvent reproduces the exact HITL lines
-// newManifestRunner's OnCheckpoint callback used to print synchronously,
-// then submits the same immediate decision via run.approve_checkpoint. A
+// handleCheckpointEvent reproduces the exact HITL lines the old in-process
+// OnCheckpoint callback (removed in Fase 6 — see Runner.Run's dry_run call
+// site above) used to print synchronously, then submits the same immediate
+// decision via run.approve_checkpoint. A
 // failure submitting the decision is a genuinely NEW failure mode this
 // architecture introduces (the old in-process callback could never fail to
 // deliver its own return value) — surfaced to stderr rather than silently
@@ -789,43 +795,6 @@ func printManifestGuidance(w io.Writer, rep *run.Report, manifestPath string) {
 func loadManifest(path string) (*run.Manifest, error) {
 	// Delegates to run.ParseFile so spec_ref resolution and validation stay in one place.
 	return run.ParseFile(path)
-}
-
-// newManifestRunner wires the Runner's observability hooks. logFile is
-// non-nil only when --log was passed, and every hook mirrors its terminal
-// output into it (in addition to, never instead of, the terminal — these
-// hooks already print unconditionally of --json, matching their existing
-// behavior before --log existed).
-func newManifestRunner(mani *run.Manifest, cfg *config.Config, exec run.Executor, autoYes bool, stateDir, sessionID string, logFile io.Writer) *run.Runner {
-	r := &run.Runner{
-		Manifest:  mani,
-		Config:    cfg,
-		Executor:  exec,
-		StateDir:  stateDir,
-		SessionID: sessionID,
-	}
-	cpw := activityWriter(os.Stderr, logFile)
-	if autoYes {
-		r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
-			fmt.Fprintf(cpw, "[HITL auto-approved] %s (%s)\n", cp.ID, cp.Trigger)
-			return true, nil
-		}
-	} else {
-		r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
-			fmt.Fprintf(cpw, "[HITL] checkpoint %q (%s) requires approval — run paused (re-run with --yes to auto-approve)\n", cp.ID, cp.Trigger)
-			return false, nil
-		}
-	}
-	// Progress to stderr, unconditional on --json (same convention as the
-	// HITL lines above: --json only constrains the final stdout result,
-	// stderr stays human-readable). Otherwise the terminal is silent for the
-	// entire duration of a task's turn — a real complaint hit running the
-	// wordstat/chores examples ("no se ve actividad, solo el cursor
-	// parpadeando"), and the only way to check progress was polling
-	// `forge sessions` from a second terminal.
-	progressW := activityWriter(os.Stderr, logFile)
-	r.OnProgress = func(ev run.ProgressEvent) { printManifestProgress(progressW, ev) }
-	return r
 }
 
 // printManifestProgress renders one run.ProgressEvent as a single line.
