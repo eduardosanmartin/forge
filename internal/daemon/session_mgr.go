@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
+	"github.com/eduardosanmartin/forge/internal/routing"
 	"github.com/eduardosanmartin/forge/internal/store"
 	"github.com/eduardosanmartin/forge/internal/tools"
 )
@@ -67,6 +70,13 @@ type SessionManager struct {
 	jobsMu sync.RWMutex
 	jobs   map[string]*Job
 	jobSeq map[string]int // per-session monotonic counter for job IDs
+
+	// RF-11 daemon migration (hojaDeRuta-multiagente.md Fase 1): manifest
+	// runs hosted in the daemon, analogous to jobs but richer (see runs.go).
+	// In-memory for Fase 1 — no RPC surface yet, no restart discovery
+	// (Fase 2's job).
+	runsMu sync.RWMutex
+	runs   map[string]*RunExecution
 }
 
 // SessionState holds runtime state for an active session.
@@ -130,6 +140,7 @@ func NewSessionManager(
 		logger:    logger,
 		sessions:  make(map[string]*SessionState),
 		jobs:      make(map[string]*Job),
+		runs:      make(map[string]*RunExecution),
 		jobSeq:    make(map[string]int),
 		cfg:       cfg,
 	}
@@ -293,6 +304,22 @@ func (m *SessionManager) DeleteSession(ctx context.Context, id string) error {
 // ExecuteTurn executes a single agent turn for a session.
 // v1Flags can include: enableRetrieval, enableCompaction, enableAnchoring, enableRouting, enableSkills
 func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage string, v1Flags ...bool) ([]store.Message, error) {
+	return m.executeTurn(ctx, sessionID, userMessage, "", v1Flags...)
+}
+
+// ExecuteTurnWithModelHint is ExecuteTurn plus a per-call model override
+// (RF-11 manifest execution, sugerenciasDeClaude.md §5.6): modelHint is a
+// routing.ModelRole name ("cheap"/"generation"/"reasoning" — matches
+// run.Task.ModelHint's vocabulary exactly). When non-empty and the registry
+// exposes a ModelRouter, it's resolved to a concrete model name and pinned
+// for this one turn only (agent.TurnOptions.OverrideModel) — the session's
+// own default model and any other turn in it are unaffected. An empty hint,
+// or a registry without router support, behaves exactly like ExecuteTurn.
+func (m *SessionManager) ExecuteTurnWithModelHint(ctx context.Context, sessionID, userMessage, modelHint string, v1Flags ...bool) ([]store.Message, error) {
+	return m.executeTurn(ctx, sessionID, userMessage, modelHint, v1Flags...)
+}
+
+func (m *SessionManager) executeTurn(ctx context.Context, sessionID, userMessage, modelHint string, v1Flags ...bool) ([]store.Message, error) {
 	// Check if session exists
 	session, err := m.store.GetSession(ctx, sessionID)
 	if err != nil {
@@ -343,6 +370,43 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		}
 		if v, ok := session.Metadata["v1_skills"].(bool); ok {
 			enableSkills = v
+		}
+	}
+
+	// no_tools: set once at session creation (see client.ManifestDecomposer)
+	// for a session that must never call a tool, e.g. the RF-11 manifest
+	// decomposition turn — read-only here, unlike the v1 flags above it's
+	// never resolved from RPC params, only from how the session was created.
+	noTools := false
+	if session.Metadata != nil {
+		if v, ok := session.Metadata["no_tools"].(bool); ok {
+			noTools = v
+		}
+	}
+
+	// modelHint (ExecuteTurnWithModelHint only) resolves through the
+	// registry's ModelRouter into a concrete per-turn model override. An
+	// unrecognized hint or a registry without router support silently
+	// resolves to "" — the turn just runs with no override, exactly like a
+	// plain ExecuteTurn call, rather than failing the turn over what is
+	// fundamentally a sizing hint, not a hard requirement.
+	overrideModel := ""
+	var overrideProvider llm.Provider
+	if modelHint != "" {
+		role := routing.ModelRole(modelHint)
+		if rp, ok := m.llmReg.(routerProvider); ok {
+			if router := rp.GetRouter(); router != nil {
+				overrideModel = router.ModelForRole(role)
+			}
+		}
+		// The resolved model can belong to ANY configured provider (RF-2.4/
+		// 2.5 cost-based routing lets each role point at a different one) —
+		// pin the provider that declared it too, or the call would still go
+		// out over whatever provider the turn defaults to.
+		if overrideModel != "" {
+			if pp, ok := m.llmReg.(roleProviderResolver); ok {
+				overrideProvider = pp.ProviderForRole(role)
+			}
 		}
 	}
 
@@ -411,6 +475,24 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 	// the manager publishes text deltas via MessageDelta notifications so TUI clients
 	// receive live updates. Tool calls still execute as before; Chat remains canonical
 	// when streaming is disabled or provider lacks support.
+	// Tool-call events (RF: live progress) broadcast unconditionally —
+	// unlike OnDelta above, NOT gated behind streamingEnabled, since
+	// manifest-driven task turns (client.ManifestExecutor) never enable
+	// text-delta streaming but still benefit from live tool-call ticks
+	// (forge run subscribes to these while its blocking RPC call waits).
+	onToolEvent := func(toolCallID, name, status, errMsg string) {
+		m.mu.RLock()
+		pub := m.deltaPublisher
+		m.mu.RUnlock()
+		if pub == nil {
+			return
+		}
+		payload := ToolCallEventPayload{SessionID: sessionID, ToolCallID: toolCallID, Name: name, Status: status, Error: errMsg}
+		if notif, nErr := NewNotification(MethodToolCallEvent, payload); nErr == nil {
+			pub(sessionID, notif)
+		}
+	}
+
 	var result agent.TurnResult
 	streamingEnabled := m.cfg != nil && m.cfg.LLM.Streaming.IsEnabled()
 	if streamingEnabled && m.deltaPublisher != nil {
@@ -418,6 +500,10 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 		var firstSent bool
 		opts := agent.TurnOptions{
 			StreamingEnabled: true,
+			NoTools:          noTools,
+			OverrideModel:    overrideModel,
+			OverrideProvider: overrideProvider,
+			OnToolEvent:      onToolEvent,
 			OnDelta: func(delta string) {
 				// Publish per-delta notification (additive, best-effort, non-blocking).
 				// TTFT is emitted on first delta for observability.
@@ -444,9 +530,9 @@ func (m *SessionManager) ExecuteTurn(ctx context.Context, sessionID, userMessage
 			m.logger.Debug("ttft", "session_id", sessionID, "ttft_ms", result.Metrics.TTFTMs)
 		}
 	} else if streamingEnabled {
-		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true})
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{StreamingEnabled: true, NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider, OnToolEvent: onToolEvent})
 	} else {
-		result, turnErr = m.agent.ExecuteTurn(turnCtx, sessionID, userMessage)
+		result, turnErr = m.agent.ExecuteTurnWithOptions(turnCtx, sessionID, userMessage, agent.TurnOptions{NoTools: noTools, OverrideModel: overrideModel, OverrideProvider: overrideProvider, OnToolEvent: onToolEvent})
 	}
 	if turnErr != nil {
 		return result.Messages, turnErr
@@ -573,6 +659,44 @@ type modelSetter interface {
 	SetDefault(model string) error
 }
 
+// routerProvider is implemented by an LLM registry that exposes its
+// role/step model router (*llm.Registry does). Type-asserted the same way
+// modelSetter is, rather than widening LLMRegistryInterface, so a registry
+// without router support degrades to "no override" instead of failing to
+// satisfy the interface at all.
+type routerProvider interface {
+	GetRouter() *routing.ModelRouter
+}
+
+// roleProviderResolver is implemented by an LLM registry that can name which
+// configured provider owns a role's resolved model (*llm.Registry does).
+// Type-asserted like routerProvider: a registry without it just resolves no
+// provider override, so a model_hint turn falls back to whatever provider it
+// would have used anyway rather than failing.
+type roleProviderResolver interface {
+	ProviderForRole(role routing.ModelRole) llm.Provider
+}
+
+// providerSwitcher matches registries that support hot-swapping the default
+// provider and model together (*llm.Registry does).
+type providerSwitcher interface {
+	SwitchProviderAndModel(provider, model string) error
+}
+
+// allModelsLister matches registries that can enumerate every model across
+// every configured provider — used by SwitchModel's bare-name fallback to
+// find which OTHER provider (if any) has a model not in the current one.
+type allModelsLister interface {
+	ListAll() []llm.ModelInfo
+}
+
+// providerLister matches registries that support discovering configured
+// providers and, per provider, a live (freshly refreshed) model catalog.
+type providerLister interface {
+	ListProviders() []llm.ProviderInfo
+	ListProviderModels(name string) ([]string, error)
+}
+
 // MarkSuccess marks a session as human-verified successful (RF-4.4 input gate).
 // It sets session metadata "success"=true via the store's merge semantics.
 func (m *SessionManager) MarkSuccess(ctx context.Context, sessionID string) error {
@@ -585,24 +709,163 @@ func (m *SessionManager) MarkSuccess(ctx context.Context, sessionID string) erro
 	return nil
 }
 
-// SwitchModel hot-swaps the daemon's default model and records the choice in
-// the session metadata under the "model" key. It fails if the session does
-// not exist or the registry rejects the model.
-func (m *SessionManager) SwitchModel(ctx context.Context, sessionID, model string) error {
-	if _, err := m.store.GetSession(ctx, sessionID); err != nil {
-		return fmt.Errorf("switch model: %w", err)
+// SwitchModel hot-swaps the daemon's default model and, when sessionID is
+// non-empty, records the choice in that session's metadata under the
+// "model" key (and "provider" when a provider switch happened too). An
+// empty sessionID skips both the session-existence check and the metadata
+// write — the registry-level switch (the part that actually matters: every
+// future session picks up the new default) still happens, for callers with
+// no session in play at all (forge daemon set-provider). A non-empty
+// sessionID that doesn't exist still fails, exactly as before.
+//
+// modelSpec accepts two forms:
+//   - "provider/model" (matching forge fanout --models' own syntax) switches
+//     BOTH the default provider and model atomically, validated against that
+//     provider's live catalog (llm.Registry.SwitchProviderAndModel) — this
+//     works even for a model that isn't declared in providers.<name>.models,
+//     since the live catalog comes from the provider's own /models endpoint.
+//   - a bare "model" name first tries the current default provider
+//     (unchanged pre-existing behavior). If not found there, every OTHER
+//     configured provider's cached catalog (llm.Registry.ListAll) is
+//     searched: exactly one match elsewhere switches provider+model
+//     automatically; more than one is reported as an ambiguity error naming
+//     every provider that has it (use "provider/model" to disambiguate);
+//     zero matches returns the original not-found error unchanged.
+func (m *SessionManager) SwitchModel(ctx context.Context, sessionID, modelSpec string) error {
+	if sessionID != "" {
+		if _, err := m.store.GetSession(ctx, sessionID); err != nil {
+			return fmt.Errorf("switch model: %w", err)
+		}
 	}
 
-	setter, ok := m.llmReg.(modelSetter)
-	if !ok {
-		return &ModelUnavailableError{Model: model, Err: errors.New("llm registry does not support model switching")}
-	}
-	if err := setter.SetDefault(model); err != nil {
-		return &ModelUnavailableError{Model: model, Err: err}
+	provider, model := "", modelSpec
+	if p, mdl, ok := strings.Cut(modelSpec, "/"); ok && m.isKnownProvider(p) {
+		// Only split on "/" when the prefix actually names a configured
+		// provider — otherwise this is a bare model name that happens to
+		// contain a slash (e.g. a HuggingFace-style "org/model" catalog
+		// name like "opencode/muse-spark-1.3-contributor-free"), and
+		// splitting it here misreads "opencode" as a provider name,
+		// producing a "provider not found" error for a model that's
+		// actually declared under some other real provider. Falls through
+		// to the bare-model-name path below, which resolves it correctly
+		// via SetDefault/resolveModelAcrossProviders.
+		provider, model = p, mdl
 	}
 
-	if err := m.store.UpdateSessionMetadata(ctx, sessionID, map[string]any{"model": model}); err != nil {
+	if provider != "" {
+		switcher, ok := m.llmReg.(providerSwitcher)
+		if !ok {
+			return &ModelUnavailableError{Model: modelSpec, Err: errors.New("llm registry does not support provider switching")}
+		}
+		if err := switcher.SwitchProviderAndModel(provider, model); err != nil {
+			return &ModelUnavailableError{Model: modelSpec, Err: err}
+		}
+	} else {
+		setter, ok := m.llmReg.(modelSetter)
+		if !ok {
+			return &ModelUnavailableError{Model: model, Err: errors.New("llm registry does not support model switching")}
+		}
+		if err := setter.SetDefault(model); err != nil {
+			resolved, rerr := m.resolveModelAcrossProviders(model, err)
+			if rerr != nil {
+				return rerr
+			}
+			provider = resolved
+		}
+	}
+
+	if sessionID == "" {
+		return nil
+	}
+	meta := map[string]any{"model": model}
+	if provider != "" {
+		meta["provider"] = provider
+	}
+	if err := m.store.UpdateSessionMetadata(ctx, sessionID, meta); err != nil {
 		return fmt.Errorf("persist model choice: %w", err)
 	}
 	return nil
+}
+
+// resolveModelAcrossProviders is SwitchModel's fallback when a bare model
+// name isn't in the current default provider (setErr): search every other
+// provider's cached catalog for it. Returns the single provider name that
+// has it (already switched via SwitchProviderAndModel) on a unique match,
+// or an error — the original setErr unchanged on zero matches, a named
+// ambiguity error on more than one.
+func (m *SessionManager) resolveModelAcrossProviders(model string, setErr error) (string, error) {
+	lister, lok := m.llmReg.(allModelsLister)
+	switcher, sok := m.llmReg.(providerSwitcher)
+	if !lok || !sok {
+		return "", &ModelUnavailableError{Model: model, Err: setErr}
+	}
+	matches := make(map[string]bool)
+	for _, mi := range lister.ListAll() {
+		if mi.Name == model {
+			matches[mi.Provider] = true
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", &ModelUnavailableError{Model: model, Err: setErr}
+	case 1:
+		var providerName string
+		for p := range matches {
+			providerName = p
+		}
+		if err := switcher.SwitchProviderAndModel(providerName, model); err != nil {
+			return "", &ModelUnavailableError{Model: model, Err: err}
+		}
+		return providerName, nil
+	default:
+		names := make([]string, 0, len(matches))
+		for p := range matches {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		return "", &ModelUnavailableError{Model: model, Err: fmt.Errorf(
+			"model %q exists in multiple providers (%s) — use %q to disambiguate",
+			model, strings.Join(names, ", "), fmt.Sprintf("%s/%s", names[0], model))}
+	}
+}
+
+// isKnownProvider reports whether name matches a configured provider —
+// used by SwitchModel to decide whether a "/" in modelSpec is explicit
+// provider/model syntax or just part of a bare model name (see its call
+// site). A registry that doesn't implement providerLister can't answer, so
+// this conservatively says no: modelSpec is then treated as a bare model
+// name end to end, which is the same behavior every registry had before
+// SwitchModel's "provider/model" syntax existed.
+func (m *SessionManager) isKnownProvider(name string) bool {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return false
+	}
+	for _, p := range lister.ListProviders() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ListProviders returns every configured provider's name and kind.
+func (m *SessionManager) ListProviders() ([]llm.ProviderInfo, error) {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return nil, errors.New("llm registry does not support provider listing")
+	}
+	return lister.ListProviders(), nil
+}
+
+// ListProviderModels returns the live model catalog for one named provider —
+// see llm.Registry.ListProviderModels: this forces a fresh fetch rather than
+// serving whatever was cached at daemon startup, so it surfaces every model
+// the provider actually has right now, declared in config or not.
+func (m *SessionManager) ListProviderModels(name string) ([]string, error) {
+	lister, ok := m.llmReg.(providerLister)
+	if !ok {
+		return nil, errors.New("llm registry does not support provider listing")
+	}
+	return lister.ListProviderModels(name)
 }

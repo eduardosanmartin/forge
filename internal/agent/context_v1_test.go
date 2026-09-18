@@ -365,14 +365,13 @@ func TestContextAssembler_Build_CompactionV1_AboveThresholdCompactsView(t *testi
 	}
 
 	// ...plus the most recent turns verbatim (sliding window of 20
-	// messages + the current user message).
-	if got := countNonSystemMessages(messages); got != 21 {
-		t.Errorf("non-system message count = %d, want 21 (20 verbatim + current user)", got)
+	// messages; the last of those 20 IS the current user message — Build no
+	// longer duplicates it with a second append).
+	if got := countNonSystemMessages(messages); got != 20 {
+		t.Errorf("non-system message count = %d, want 20 (verbatim window, current user message included once)", got)
 	}
-	// The newest filler stays verbatim inside the window (the two trailing
-	// messages are the current user message, duplicated by existing v0
-	// behavior, so scan the whole tail).
-	tail := messages[len(messages)-22:]
+	// The newest filler stays verbatim inside the window.
+	tail := messages[len(messages)-20:]
 	found := false
 	for _, m := range tail {
 		if contains(m.Content, "filler turn 43 deterministic content") {
@@ -417,8 +416,8 @@ func TestContextAssembler_Build_CompactionV1_AtOrBelowThresholdKeepsWindow(t *te
 	if _, ok := findSystemMessageByPrefix(messages, "COMPACTED HISTORY (v1):"); ok {
 		t.Error("no compaction expected at or below the threshold")
 	}
-	if got := countNonSystemMessages(messages); got != 21 {
-		t.Errorf("non-system message count = %d, want 21 (plain window)", got)
+	if got := countNonSystemMessages(messages); got != 20 {
+		t.Errorf("non-system message count = %d, want 20 (plain window, current user message included once)", got)
 	}
 }
 

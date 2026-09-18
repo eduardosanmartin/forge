@@ -36,7 +36,7 @@ func TestKeyMapShortHelp(t *testing.T) {
 		t.Fatalf("ShortHelp len %d", len(sh))
 	}
 	fh := km.FullHelp()
-	if len(fh) == 0 || len(fh[0]) != 10 {
+	if len(fh) == 0 || len(fh[0]) != 11 {
 		t.Fatalf("FullHelp shape %v", fh)
 	}
 }
@@ -45,7 +45,7 @@ func TestKeyMapDistinct(t *testing.T) {
 	km := DefaultKeyMap()
 	// Ensure no duplicate keys across bindings (including ctrl+g); must avoid reserved set ctrl+h, ctrl+o, ctrl+l, ctrl+c, ctrl+p
 	seen := map[string]string{}
-	for _, b := range []key.Binding{km.ToggleSidebar, km.CycleLayout, km.Quit, km.Halt, km.GrabSession, km.ToggleMouse, km.ShowContext, km.ShowPlugins, km.ShowTurnStats} {
+	for _, b := range []key.Binding{km.ToggleSidebar, km.CycleLayout, km.Quit, km.Halt, km.GrabSession, km.ToggleMouse, km.ShowContext, km.ShowPlugins, km.ShowTurnStats, km.ShowRunPanel} {
 		for _, k := range b.Keys() {
 			if prev, ok := seen[k]; ok {
 				t.Fatalf("duplicate key %q in %q and previous %q", k, b.Help().Desc, prev)

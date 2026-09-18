@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/routing"
@@ -20,6 +23,36 @@ type ModelInfo struct {
 	Kind     string
 }
 
+// ProviderInfo describes one configured provider (name + kind only — not its
+// model catalog, which is looked up separately via ListProviderModels since
+// it means a live network call).
+type ProviderInfo struct {
+	Name string
+	Kind string
+}
+
+// modelRefresher is implemented by every provider constructor in this
+// package; type-asserted (like requestTimeoutSetter) rather than added to
+// the shared Provider interface, so a provider kind without a refreshable
+// catalog still satisfies Provider.
+type modelRefresher interface {
+	RefreshModels() error
+}
+
+// fallbackEntry is one parsed "provider/model" step of config.FallbackChain.
+type fallbackEntry struct {
+	provider string
+	model    string
+}
+
+// defaultCooldown is how long a provider/model stays skipped by
+// ResolveAttempts after a retryable failure when the failure carried no
+// Retry-After header. Deliberately short: the point is to stop hammering a
+// model that just failed on every single turn, not to lock it out for an
+// operator-visible amount of time — 30s covers a typical rate-limit blip
+// without meaningfully delaying recovery once the provider is healthy again.
+const defaultCooldown = 30 * time.Second
+
 // Registry manages multiple LLM providers and supports hot-swapping the default model.
 type Registry struct {
 	providers       map[string]Provider
@@ -27,9 +60,32 @@ type Registry struct {
 	defaultProvider string
 	defaultModel    string
 	router          *routing.ModelRouter
-	allowedHosts    []string
+	// roleProviders holds, for each role the router resolves, which
+	// configured provider declared it — see buildModelRouter. A role's model
+	// name alone isn't enough to know which provider's client should handle
+	// the call: two providers can (legitimately, for cost-based routing, or
+	// by accident) declare the same role with different models.
+	roleProviders map[routing.ModelRole]string
+	allowedHosts  []string
 	logger          *slog.Logger
 	mu              sync.RWMutex
+	// fallbackChain backs ChatWithFallback (RNF: failover on rate limit/
+	// transient outage). Parsed once at construction from
+	// config.Config.FallbackChain — malformed or unknown-provider entries
+	// are dropped with a warning rather than failing the whole daemon:
+	// Config.Validate() is the strict gate; a config that somehow reached
+	// here without validation degrades gracefully instead of panicking.
+	fallbackChain []fallbackEntry
+	// cooldowns holds "provider/model" -> until, for entries ResolveAttempts
+	// should skip because they failed retryably too recently (see
+	// RecordFailure). Read/written under mu like everything else here;
+	// lazily checked on each call, never swept by a background timer, so an
+	// entry that's expired just stops affecting anything the next time
+	// ResolveAttempts reads it.
+	cooldowns map[string]time.Time
+	// clock is time.Now by default; overridable in tests so cooldown
+	// expiry can be exercised deterministically without a real sleep.
+	clock func() time.Time
 }
 
 // New creates a new Registry from configuration.
@@ -50,6 +106,8 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 		defaultModel:    "",
 		allowedHosts:    allowedHosts,
 		logger:          logger,
+		cooldowns:       make(map[string]time.Time),
+		clock:           time.Now,
 	}
 
 	// Build providers
@@ -77,7 +135,24 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 	// Build model router from config
 	r.router = r.buildModelRouter(cfg)
 
-	// Set default model: config-declared models take priority, Ollama list as fallback
+	// Parse the fallback chain (opt-in — empty/absent disables ChatWithFallback
+	// entirely, see that method). Entries are "provider/model"; a malformed
+	// entry or one naming a provider not in this registry is dropped with a
+	// warning instead of failing construction.
+	for i, entry := range cfg.FallbackChain {
+		providerName, model, ok := strings.Cut(entry, "/")
+		if !ok || providerName == "" || model == "" {
+			logger.Warn("fallback_chain entry malformed, skipping", "index", i, "entry", entry)
+			continue
+		}
+		if _, exists := r.providers[providerName]; !exists {
+			logger.Warn("fallback_chain entry names an unconfigured provider, skipping", "index", i, "entry", entry)
+			continue
+		}
+		r.fallbackChain = append(r.fallbackChain, fallbackEntry{provider: providerName, model: model})
+	}
+
+	// Set default model: config-declared models take priority, provider list as fallback
 	if provider, ok := r.providers[r.defaultProvider]; ok {
 		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
 			r.defaultModel = cfg.Providers[r.defaultProvider].Models[0]
@@ -92,44 +167,112 @@ func New(cfg *config.Config, allowedHosts []string, logger *slog.Logger) (*Regis
 	return r, nil
 }
 
+// buildModelRouter collects providers.<name>.model_roles into one role->model
+// map plus a parallel role->provider map (r.roleProviders). Deterministic
+// precedence: every non-default provider is applied first, in sorted name
+// order, then the default provider last — so the default provider's
+// declaration for a role always wins when it declares one, while a role only
+// some OTHER provider declares still resolves (legitimate cost routing: e.g.
+// a local free provider serves "cheap" while the default handles
+// "reasoning"). Before this ordering, two providers declaring the SAME role
+// resolved to whichever one Go's (randomized) map iteration hit last —
+// observed in practice sending a request to the default provider's endpoint
+// carrying another provider's model name, which that endpoint rejected.
 func (r *Registry) buildModelRouter(cfg *config.Config) *routing.ModelRouter {
 	roleModels := make(map[routing.ModelRole]string)
+	r.roleProviders = make(map[routing.ModelRole]string)
 
-	// Collect model roles from all providers
-	for _, p := range cfg.Providers {
-		for role, model := range p.ModelRoles {
+	apply := func(providerName string) {
+		for role, model := range cfg.Providers[providerName].ModelRoles {
+			var rr routing.ModelRole
 			switch role {
 			case "cheap":
-				roleModels[routing.RoleCheap] = model
+				rr = routing.RoleCheap
 			case "generation":
-				roleModels[routing.RoleGeneration] = model
+				rr = routing.RoleGeneration
 			case "reasoning":
-				roleModels[routing.RoleReasoning] = model
+				rr = routing.RoleReasoning
+			default:
+				continue
 			}
+			roleModels[rr] = model
+			r.roleProviders[rr] = providerName
 		}
 	}
+
+	others := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		if name != r.defaultProvider {
+			others = append(others, name)
+		}
+	}
+	sort.Strings(others)
+	for _, name := range others {
+		apply(name)
+	}
+	apply(r.defaultProvider)
 
 	// Fallback to first model in default provider if no roles configured
 	if len(roleModels) == 0 {
 		if len(cfg.Providers[r.defaultProvider].Models) > 0 {
 			roleModels[routing.RoleGeneration] = cfg.Providers[r.defaultProvider].Models[0]
+			r.roleProviders[routing.RoleGeneration] = r.defaultProvider
 		}
 	}
 
 	return routing.NewModelRouter(roleModels)
 }
 
+// ProviderForRole returns the Provider that declared the model the router
+// resolves for role (see buildModelRouter), or nil if the role has no
+// resolution. Callers that pin a turn's model via ModelForRole must also
+// pin the provider via this method — the model name alone does not imply
+// which provider's client understands it.
+func (r *Registry) ProviderForRole(role routing.ModelRole) Provider {
+	r.mu.RLock()
+	name, ok := r.roleProviders[role]
+	r.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return r.providers[name]
+}
+
+// requestTimeoutSetter is implemented by every provider constructor below;
+// it's a local optional interface (rather than adding SetRequestTimeout to
+// the shared Provider interface) so provider kinds added later without
+// per-request timeout support still satisfy Provider.
+type requestTimeoutSetter interface {
+	SetRequestTimeout(time.Duration)
+}
+
 func (r *Registry) createProvider(name string, p config.Provider) (Provider, error) {
+	var (
+		provider Provider
+		err      error
+	)
 	switch p.Kind {
 	case "openai-compatible":
-		return NewOllamaProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewOpenAICompatibleProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "anthropic":
-		return NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	case "gemini":
-		return NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", p.Kind)
 	}
+	if err != nil {
+		return nil, err
+	}
+	// config.DefaultRequestTimeoutSeconds (== the constructors' own built-in
+	// default) makes this a no-op when unset; only an explicit override
+	// changes anything.
+	if p.RequestTimeoutSeconds > 0 {
+		if setter, ok := provider.(requestTimeoutSetter); ok {
+			setter.SetRequestTimeout(time.Duration(p.RequestTimeoutSeconds) * time.Second)
+		}
+	}
+	return provider, nil
 }
 
 // GetProvider returns a provider by name.
@@ -203,6 +346,72 @@ func (r *Registry) SetDefault(model string) error {
 	return nil
 }
 
+// ListProviders returns every configured provider's name and kind, sorted by
+// name. Instant (no network call) — it reads the registry's own
+// construction-time config, not a live catalog; see ListProviderModels for
+// that.
+func (r *Registry) ListProviders() []ProviderInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]ProviderInfo, 0, len(r.providers))
+	for name := range r.providers {
+		out = append(out, ProviderInfo{Name: name, Kind: r.providerKinds[name]})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ListProviderModels returns the LIVE model catalog for one named provider —
+// forces a fresh RefreshModels() call first (when the provider supports it)
+// rather than serving whatever was cached at daemon startup, so a model
+// added to the provider after the daemon started still shows up. This is
+// what lets a provider switch offer every model the provider actually has,
+// not just the ones declared in providers.<name>.models.
+func (r *Registry) ListProviderModels(name string) ([]string, error) {
+	r.mu.RLock()
+	provider, ok := r.providers[name]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("provider %q not found", name)
+	}
+	if refresher, ok := provider.(modelRefresher); ok {
+		if err := refresher.RefreshModels(); err != nil {
+			return nil, fmt.Errorf("refresh models for provider %q: %w", name, err)
+		}
+	}
+	return provider.ListModels()
+}
+
+// SwitchProviderAndModel atomically switches BOTH the default provider and
+// model (hot-swap, like SetDefault) — for an explicit "provider/model"
+// selection rather than a bare model name search within the current
+// provider. Validates model against the target provider's freshly refreshed
+// live catalog (ListProviderModels), so an undeclared-but-real model works
+// here exactly like a declared one.
+func (r *Registry) SwitchProviderAndModel(providerName, model string) error {
+	models, err := r.ListProviderModels(providerName)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, m := range models {
+		if m == model {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("model %q not available in provider %q", model, providerName)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defaultProvider = providerName
+	r.defaultModel = model
+	r.logger.Info("default provider and model changed", "provider", providerName, "model", model)
+	return nil
+}
+
 // ListAll returns all models from all providers with provider tags.
 func (r *Registry) ListAll() []ModelInfo {
 	r.mu.RLock()
@@ -272,6 +481,168 @@ func (r *Registry) Close() error {
 	}
 	r.providers = nil
 	return errors.Join(errs...)
+}
+
+// FallbackTarget is one resolved candidate a failover-aware call may try —
+// the live provider instance plus its name and model. Exposed (via
+// ResolveAttempts) for callers that must walk candidates themselves rather
+// than through ChatWithFallback: the streaming path
+// (agent.Agent.callLLMStreamWithFailover) can only tell a safe-to-retry
+// failure (nothing streamed to the caller yet) from a mid-stream one by
+// consuming the channel itself, something Registry has no part in, so it
+// hands over the resolved candidates and lets the caller report outcomes
+// back via RecordSuccess/RecordFailure.
+type FallbackTarget struct {
+	Provider     Provider
+	ProviderName string
+	Model        string
+}
+
+func attemptKey(providerName, model string) string {
+	return providerName + "/" + model
+}
+
+// ResolveAttempts returns the ordered candidates a failover-aware call
+// should try: the current default first, then each fallback_chain entry in
+// its configured order (skipping any whose provider is no longer
+// registered). An entry currently in cooldown from a recent retryable
+// failure (see RecordFailure) is skipped — UNLESS every candidate is
+// cooling, in which case cooldowns are ignored for this call entirely: a
+// single wrong or over-long Retry-After must never wedge every model, so
+// the fallback degrades to "try in order" rather than "have nothing left to
+// try." The default is whatever RecordSuccess last promoted (sticky), not
+// necessarily config.DefaultProvider — a successful fallback makes the
+// model that worked the new default for subsequent calls.
+func (r *Registry) ResolveAttempts() []FallbackTarget {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	seen := make(map[string]bool, 1+len(r.fallbackChain))
+	all := make([]FallbackTarget, 0, 1+len(r.fallbackChain))
+	if p, ok := r.providers[r.defaultProvider]; ok && p != nil {
+		all = append(all, FallbackTarget{Provider: p, ProviderName: r.defaultProvider, Model: r.defaultModel})
+		seen[attemptKey(r.defaultProvider, r.defaultModel)] = true
+	}
+	for _, e := range r.fallbackChain {
+		// A sticky promotion (RecordSuccess) can turn a chain entry into the
+		// current default; skip it here rather than list it twice — the
+		// entry above already covers it.
+		key := attemptKey(e.provider, e.model)
+		if seen[key] {
+			continue
+		}
+		if p, ok := r.providers[e.provider]; ok {
+			all = append(all, FallbackTarget{Provider: p, ProviderName: e.provider, Model: e.model})
+			seen[key] = true
+		}
+	}
+
+	now := r.clock()
+	fresh := make([]FallbackTarget, 0, len(all))
+	for _, t := range all {
+		until, cooling := r.cooldowns[attemptKey(t.ProviderName, t.Model)]
+		if !cooling || !now.Before(until) {
+			fresh = append(fresh, t)
+		}
+	}
+	if len(fresh) == 0 {
+		return all
+	}
+	return fresh
+}
+
+// RecordSuccess marks providerName/model as the sticky default: later calls
+// go straight to it instead of re-trying whatever failed first. A no-op
+// beyond clearing its cooldown when it's already the default. Called after
+// every successful attempt in ChatWithFallback/callLLMStreamWithFailover,
+// including the very first one, so a plain, always-succeeding default just
+// keeps re-confirming itself at negligible cost (a map delete and two
+// string comparisons under the existing lock).
+func (r *Registry) RecordSuccess(providerName, model string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.cooldowns, attemptKey(providerName, model))
+	if r.defaultProvider == providerName && r.defaultModel == model {
+		return
+	}
+	r.defaultProvider = providerName
+	r.defaultModel = model
+	r.logger.Warn("fallback promoted to sticky default", "provider", providerName, "model", model)
+}
+
+// RecordFailure puts providerName/model into cooldown after a retryable
+// failure, so ResolveAttempts skips it for a while instead of offering it
+// again on every subsequent call. Uses the failure's Retry-After when the
+// provider sent one (RetryAfterOf), otherwise defaultCooldown. Callers must
+// only call this for a failure that IsRetryable — a non-retryable one
+// (bad request, auth) isn't transient, so cooling down wouldn't help and
+// would just needlessly hide the model from ResolveAttempts.
+func (r *Registry) RecordFailure(providerName, model string, err error) {
+	d := RetryAfterOf(err)
+	if d <= 0 {
+		d = defaultCooldown
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cooldowns[attemptKey(providerName, model)] = r.clock().Add(d)
+}
+
+// ChatWithFallback sends req against ResolveAttempts' first candidate
+// (normally the default, sticky-adjusted); on a RetryableError (rate limit,
+// transient upstream outage, network timeout — see IsRetryable) it walks
+// the remaining candidates in order, one attempt per entry, until one
+// succeeds or they run out. A non-retryable failure — from the first
+// candidate OR from any later one — stops immediately without trying
+// what's left: swapping models can't fix a malformed request or an auth
+// failure, so continuing would just burn attempts on a copy of the same
+// broken call. A successful attempt is recorded via RecordSuccess (sticky
+// promotion); a retryable failure via RecordFailure (cooldown).
+//
+// With no fallback_chain configured (the default — this method is opt-in
+// exactly like the config field), a single failure returns immediately,
+// identical to calling Chat.
+//
+// On exhaustion, the returned error joins every attempt (via errors.Join)
+// so the daemon log shows the whole chain that was tried, not just the last
+// failure.
+func (r *Registry) ChatWithFallback(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+	attempts := r.ResolveAttempts()
+	if len(attempts) == 0 {
+		return ChatResponse{}, errors.New("no default provider available")
+	}
+
+	first := attempts[0]
+	firstReq := req
+	firstReq.Model = first.Model
+	resp, err := first.Provider.Chat(ctx, firstReq)
+	if err == nil {
+		r.RecordSuccess(first.ProviderName, first.Model)
+		return resp, nil
+	}
+	if !IsRetryable(err) || len(attempts) == 1 {
+		return resp, err
+	}
+	r.RecordFailure(first.ProviderName, first.Model, err)
+
+	errs := []error{fmt.Errorf("%s/%s: %w", first.ProviderName, first.Model, err)}
+	for _, target := range attempts[1:] {
+		fbReq := req
+		fbReq.Model = target.Model
+		fbResp, fbErr := target.Provider.Chat(ctx, fbReq)
+		if fbErr == nil {
+			r.RecordSuccess(target.ProviderName, target.Model)
+			r.logger.Warn("fell back to next model in fallback_chain",
+				"from_provider", first.ProviderName, "from_model", first.Model,
+				"to_provider", target.ProviderName, "to_model", target.Model)
+			return fbResp, nil
+		}
+		errs = append(errs, fmt.Errorf("%s/%s: %w", target.ProviderName, target.Model, fbErr))
+		if !IsRetryable(fbErr) {
+			break
+		}
+		r.RecordFailure(target.ProviderName, target.Model, fbErr)
+	}
+	return ChatResponse{}, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
 }
 
 // Chat sends a chat request using the default provider and model.

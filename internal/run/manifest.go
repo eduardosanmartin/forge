@@ -83,9 +83,33 @@ type Checkpoint struct {
 
 // Task is one atomic SPEC unit (RF-11.3).
 type Task struct {
-	ID           string `json:"id"`
-	Goal         string `json:"goal"`
+	ID   string `json:"id"`
+	Goal string `json:"goal"`
+	// DoneCriteria is free text by default (purely descriptive, never
+	// checked). Prefixing it with "cmd:" makes it a MECHANICAL check: the
+	// runner shells out to the rest of the string after a successful task
+	// turn and only marks the task complete when it exits 0 — e.g.
+	// "cmd: go test ./internal/foo/..." — instead of trusting the model's
+	// own judgment that it's done (see doneCriteriaCommand/runDoneCriteria
+	// in runner.go). Small/local models are the ones most likely to declare
+	// success without having achieved it, which is exactly when a
+	// deterministic check matters most.
 	DoneCriteria string `json:"done_criteria,omitempty"`
+	// FileBudget optionally scopes which files/paths this task is expected
+	// to touch (a hint for whoever authors or reviews the task, human or the
+	// decomposition step — see Decomposer in runner.go). Purely declarative
+	// today: nothing enforces it yet, the same way MaxCostUSD is declared
+	// but not metered.
+	FileBudget string `json:"file_budget,omitempty"`
+	// ModelHint optionally names the model-router role (e.g. "cheap",
+	// "generation", "reasoning" — see internal/routing.ModelRole) this task
+	// is sized for. client.ManifestExecutor forwards it as
+	// ExecuteTurnParams.ModelHint, which the daemon resolves through
+	// providers.<name>.model_roles into a real per-task model override
+	// (SessionManager.ExecuteTurnWithModelHint) — an unset hint, or a
+	// registry/config with no model_roles configured, runs the task on the
+	// session's normal default model exactly as before this field existed.
+	ModelHint string `json:"model_hint,omitempty"`
 }
 
 // Known triggers.
@@ -210,9 +234,18 @@ func (m *Manifest) Validate() error {
 			errs = append(errs, fmt.Errorf("hitl.checkpoints[%d] with before_editing trigger must have non-empty match", i))
 		}
 	}
-	// Tasks
-	seenTaskID := make(map[string]bool, len(m.Tasks))
-	for i, t := range m.Tasks {
+	errs = append(errs, ValidateTasks(m.Tasks)...)
+	return errors.Join(errs...)
+}
+
+// ValidateTasks checks task-list invariants shared by Manifest.Validate and
+// the decomposition path (Decomposer output goes through the same rules
+// before it's accepted — an LLM-proposed task list is untrusted input just
+// like a hand-written one).
+func ValidateTasks(tasks []Task) []error {
+	var errs []error
+	seenTaskID := make(map[string]bool, len(tasks))
+	for i, t := range tasks {
 		if strings.TrimSpace(t.ID) == "" {
 			errs = append(errs, fmt.Errorf("tasks[%d].id must not be empty", i))
 		} else if seenTaskID[t.ID] {
@@ -223,7 +256,7 @@ func (m *Manifest) Validate() error {
 			errs = append(errs, fmt.Errorf("tasks[%d].goal must not be empty", i))
 		}
 	}
-	return errors.Join(errs...)
+	return errs
 }
 
 func validateRunID(id string) error {

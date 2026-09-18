@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -22,8 +22,10 @@ import (
 	"github.com/eduardosanmartin/forge/internal/logging"
 )
 
-// OllamaProvider implements Provider for OpenAI-compatible endpoints (e.g., Ollama).
-type OllamaProvider struct {
+const forgeUserAgent = "forge/0.0.0-dev"
+
+// OpenAICompatibleProvider implements Provider for OpenAI-compatible endpoints (e.g., Ollama, OpenCode Zen, OpenRouter).
+type OpenAICompatibleProvider struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
@@ -34,10 +36,10 @@ type OllamaProvider struct {
 	closedMu   sync.Mutex
 }
 
-// NewOllamaProvider creates a new Ollama provider.
+// NewOpenAICompatibleProvider creates a new OpenAI-compatible provider.
 // allowedHosts enforces network egress allowlist (RNF-4.9): baseURL host:port must
 // be in the list (exact match). Empty allowlist = deny all. Returns error if not allowed.
-func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *slog.Logger) (*OllamaProvider, error) {
+func NewOpenAICompatibleProvider(baseURL, apiKey string, allowedHosts []string, logger *slog.Logger) (*OpenAICompatibleProvider, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -84,7 +86,7 @@ func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *sl
 		},
 	}
 
-	p := &OllamaProvider{
+	p := &OpenAICompatibleProvider{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		httpClient: client,
@@ -92,12 +94,24 @@ func NewOllamaProvider(baseURL, apiKey string, allowedHosts []string, logger *sl
 	}
 
 	// Fetch models at startup
-	if err := p.refreshModels(); err != nil {
+	if err := p.RefreshModels(); err != nil {
 		logger.Warn("failed to fetch models at startup", "error", err)
 		// Don't fail construction; models can be refreshed later
 	}
 
 	return p, nil
+}
+
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0 — the registry
+// calls this once, right after construction and before any request, with
+// config.Provider.RequestTimeoutSeconds (previously every provider was
+// stuck with the same fixed 15-minute timeout regardless of whether it
+// fronted a fast local model or a legitimately slow remote one).
+func (p *OpenAICompatibleProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
 }
 
 // validateAllowlist checks if the baseURL host is in the allowedHosts list.
@@ -134,9 +148,12 @@ func validateAllowlist(baseURL string, allowedHosts []string) error {
 	return fmt.Errorf("network egress denied: host %q not in allowlist %v", hostPort, allowedHosts)
 }
 
-// refreshModels fetches models from /models (OpenAI-compatible endpoint).
-// The baseURL is guaranteed to have /v1 path by the constructor.
-func (p *OllamaProvider) refreshModels() error {
+// RefreshModels re-fetches the live model list from /models (OpenAI-compatible
+// endpoint) — not the config's declared list, the provider's own catalog.
+// The baseURL is guaranteed to have /v1 path by the constructor. Exported so
+// a provider switch (daemon.switch_provider) can force a fresh list instead
+// of serving whatever was cached at daemon startup.
+func (p *OpenAICompatibleProvider) RefreshModels() error {
 	models, err := p.fetchModels(p.baseURL + "/models")
 	if err != nil {
 		p.logger.Debug("fetch /models failed", "error", err)
@@ -160,16 +177,17 @@ func (p *OllamaProvider) refreshModels() error {
 	return nil
 }
 
-func (p *OllamaProvider) fetchModels(endpoint string) ([]string, error) {
+func (p *OpenAICompatibleProvider) fetchModels(endpoint string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	}
 	if err != nil {
 		return nil, err
+	}
+	req.Header.Set("User-Agent", forgeUserAgent)
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
 
 	resp, err := p.httpClient.Do(req)
@@ -213,7 +231,7 @@ func (p *OllamaProvider) fetchModels(endpoint string) ([]string, error) {
 }
 
 // Chat implements Provider.Chat for non-streaming requests.
-func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
+func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req ChatRequest) (ChatResponse, error) {
 	p.closedMu.Lock()
 	if p.closed {
 		p.closedMu.Unlock()
@@ -232,8 +250,12 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 		return ChatResponse{}, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", forgeUserAgent)
 	if p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	if req.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", req.SessionID)
 	}
 
 	p.logger.Debug("chat request", "endpoint", endpoint, "body", logging.Redact(string(body)))
@@ -252,7 +274,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 	p.logger.Debug("chat response", "status", resp.StatusCode, "body", logging.Redact(string(respBody)))
 
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody)
+		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	var chatResp ChatResponse
@@ -264,7 +286,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 }
 
 // ChatStream implements Provider.ChatStream for streaming requests.
-func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
+func (p *OpenAICompatibleProvider) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamChunk, error) {
 	p.closedMu.Lock()
 	if p.closed {
 		p.closedMu.Unlock()
@@ -286,8 +308,12 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("User-Agent", forgeUserAgent)
 	if p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
+	if req.SessionID != "" {
+		httpReq.Header.Set("x-opencode-session", req.SessionID)
 	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
@@ -301,7 +327,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+		return nil, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	ch := make(chan StreamChunk, 16)
@@ -348,7 +374,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 	return ch, nil
 }
 
-func (p *OllamaProvider) buildRequestBody(req ChatRequest) map[string]any {
+func (p *OpenAICompatibleProvider) buildRequestBody(req ChatRequest) map[string]any {
 	body := map[string]any{
 		"model":    req.Model,
 		"messages": p.messagesToAPI(req.Messages),
@@ -376,14 +402,23 @@ func (p *OllamaProvider) buildRequestBody(req ChatRequest) map[string]any {
 	return body
 }
 
-func (p *OllamaProvider) messagesToAPI(msgs []Message) []map[string]any {
+func (p *OpenAICompatibleProvider) messagesToAPI(msgs []Message) []map[string]any {
 	out := make([]map[string]any, len(msgs))
 	for i, m := range msgs {
 		msg := map[string]any{
 			"role":    m.Role,
 			"content": m.Content,
 		}
-		if m.Name != "" {
+		// "name" is only ever populated on a "tool" role message in practice
+		// (the tool's name, for storage/audit — see internal/agent/loop.go).
+		// It's a leftover of the pre-tool_calls "function" message shape:
+		// the current tool-calling protocol identifies a tool result solely
+		// by tool_call_id, and at least one real backend (OpenCode Zen
+		// "Console Go") rejects "name" on a "tool" message outright ("name"
+		// is not supported by this endpoint). Other backends likely just
+		// ignore the extra field, which is why this went unnoticed until a
+		// stricter validator hit it.
+		if m.Name != "" && m.Role != "tool" {
 			msg["name"] = m.Name
 		}
 		if len(m.ToolCalls) > 0 {
@@ -408,7 +443,7 @@ func (p *OllamaProvider) messagesToAPI(msgs []Message) []map[string]any {
 	return out
 }
 
-func (p *OllamaProvider) toolsToAPI(tools []ToolDef) []map[string]any {
+func (p *OpenAICompatibleProvider) toolsToAPI(tools []ToolDef) []map[string]any {
 	out := make([]map[string]any, len(tools))
 	for i, t := range tools {
 		out[i] = map[string]any{
@@ -424,7 +459,7 @@ func (p *OllamaProvider) toolsToAPI(tools []ToolDef) []map[string]any {
 }
 
 // ListModels implements Provider.ListModels.
-func (p *OllamaProvider) ListModels() ([]string, error) {
+func (p *OpenAICompatibleProvider) ListModels() ([]string, error) {
 	p.modelsMu.RLock()
 	defer p.modelsMu.RUnlock()
 	// Return a copy
@@ -434,7 +469,7 @@ func (p *OllamaProvider) ListModels() ([]string, error) {
 }
 
 // Close implements Provider.Close.
-func (p *OllamaProvider) Close() error {
+func (p *OpenAICompatibleProvider) Close() error {
 	p.closedMu.Lock()
 	defer p.closedMu.Unlock()
 	if p.closed {
@@ -445,29 +480,42 @@ func (p *OllamaProvider) Close() error {
 	return nil
 }
 
-// mapError maps network/transport errors to typed errors.
-func (p *OllamaProvider) mapError(err error) error {
+// mapError maps network/transport errors to typed errors. Timeouts and
+// connection failures are wrapped as RetryableError (StatusCode 0 — no HTTP
+// response was ever received): they're exactly the transient case a
+// fallback chain exists for, as opposed to e.g. a malformed request that
+// would fail identically against any other model too.
+func (p *OpenAICompatibleProvider) mapError(err error) error {
 	var netErr *url.Error
 	if errors.As(err, &netErr) {
 		if netErr.Timeout() {
-			return fmt.Errorf("request timeout: %w", err)
+			return &RetryableError{Err: fmt.Errorf("request timeout: %w", err)}
 		}
-		return fmt.Errorf("connection error: %w", err)
+		return &RetryableError{Err: fmt.Errorf("connection error: %w", err)}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("request deadline exceeded: %w", err)
+		return &RetryableError{Err: fmt.Errorf("request deadline exceeded: %w", err)}
 	}
 	return fmt.Errorf("request failed: %w", err)
 }
 
-// mapHTTPError maps HTTP error status codes to typed errors.
-func (p *OllamaProvider) mapHTTPError(statusCode int, body []byte) error {
+// mapHTTPError maps HTTP error status codes to typed errors. 429 (rate
+// limited) and 502/503/504 (upstream unavailable) are wrapped as
+// RetryableError — see that type's doc comment for why the rest (400/401/
+// 403/404/500) are deliberately NOT: retrying an unauthorized or malformed
+// request against a different model wastes an attempt on a failure a model
+// swap can't fix.
+func (p *OpenAICompatibleProvider) mapHTTPError(statusCode int, body []byte, headers http.Header) error {
 	bodyStr := logging.Redact(string(body))
 	switch statusCode {
 	case http.StatusNotFound:
 		return fmt.Errorf("model not found (404): %s", bodyStr)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("rate limited (429): %s", bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("rate limited (429): %s", bodyStr),
+		}
 	case http.StatusUnauthorized:
 		return fmt.Errorf("unauthorized (401): %s", bodyStr)
 	case http.StatusForbidden:
@@ -477,7 +525,11 @@ func (p *OllamaProvider) mapHTTPError(statusCode int, body []byte) error {
 	case http.StatusInternalServerError:
 		return fmt.Errorf("server error (500): %s", bodyStr)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr),
+		}
 	default:
 		return fmt.Errorf("HTTP %d: %s", statusCode, bodyStr)
 	}

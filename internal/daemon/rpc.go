@@ -3,6 +3,9 @@ package daemon
 
 import (
 	"encoding/json"
+
+	"github.com/eduardosanmartin/forge/internal/cost"
+	"github.com/eduardosanmartin/forge/internal/run"
 )
 
 // JSONRPCRequest represents a JSON-RPC 2.0 request.
@@ -51,6 +54,13 @@ const (
 	ErrCodeApprovalRequired = -32013
 	ErrCodeAlreadyExists    = -32014
 	ErrCodeJobNotFound      = -32020
+	ErrCodeRunNotFound      = -32030
+	ErrCodeRunAlreadyActive = -32031
+	// ErrCodeRunNoCheckpointPending: run.approve_checkpoint on a run that
+	// isn't currently blocked on a checkpoint (nothing to approve, or a
+	// decision was already delivered — see ApproveRunCheckpoint's own doc
+	// comment in internal/daemon/runs.go).
+	ErrCodeRunNoCheckpointPending = -32032
 )
 
 // Method names for daemon -> client notifications.
@@ -60,6 +70,22 @@ const (
 	MethodToolCallEvent = "tool.call.event"     // tool call started/finished
 	MethodEmergencyHalt = "emergency.halt"      // emergency stop broadcast
 	MethodMessageDelta  = "message.delta.event" // WU3: live text delta during streaming (additive)
+	// MethodRunCheckpointEvent fires the instant a daemon-hosted manifest
+	// run blocks on a required HITL checkpoint (RF-11 daemon migration,
+	// hojaDeRuta-multiagente.md Fase 2). No RPC to approve it exists yet
+	// (Fase 3) — publishing the notification a phase early costs nothing
+	// and means Fase 3 only has to wire the approve RPC, not this too.
+	MethodRunCheckpointEvent = "run.checkpoint.event"
+	// MethodRunProgressEvent mirrors one internal/run.ProgressEvent
+	// (task_start/task_retry/task_done/task_failed) the instant the
+	// daemon-hosted Runner's OnProgress hook fires (hojaDeRuta-multiagente.md
+	// Fase 5). Added specifically so internal/cli/run.go's thin RPC client
+	// can reproduce the EXACT same per-task progress lines
+	// printManifestProgress always printed when the Runner ran in-process —
+	// run.status polling alone only exposes cumulative current-task/tokens/
+	// iterations, not per-attempt retry/failure detail, which isn't enough
+	// to preserve that output byte-for-byte.
+	MethodRunProgressEvent = "run.progress.event"
 )
 
 // SessionEventPayload carries session lifecycle events.
@@ -88,6 +114,35 @@ type ToolCallEventPayload struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"` // "started" | "finished" | "error"
 	Error      string `json:"error,omitempty"`
+}
+
+// RunCheckpointEventPayload carries a daemon-hosted run's checkpoint pause
+// (shape decided in Fase 0 of hojaDeRuta-multiagente.md: id/trigger/reason,
+// separate from a would-be run.progress.event — the budget already travels
+// inside run.task.event, this is deliberately not a third event).
+type RunCheckpointEventPayload struct {
+	RunID      string `json:"run_id"`
+	SessionID  string `json:"session_id"`
+	Checkpoint string `json:"checkpoint"` // checkpoint ID
+	Trigger    string `json:"trigger"`
+	Reason     string `json:"reason"`
+}
+
+// RunProgressEventPayload mirrors internal/run.ProgressEvent (see
+// MethodRunProgressEvent) — run.Err isn't JSON-serializable so it travels as
+// Error's formatted string, "" when nil.
+type RunProgressEventPayload struct {
+	RunID          string `json:"run_id"`
+	SessionID      string `json:"session_id"`
+	Phase          string `json:"phase"` // task_start | task_retry | task_done | task_failed
+	TaskID         string `json:"task_id"`
+	TaskIndex      int    `json:"task_index"`
+	TotalTasks     int    `json:"total_tasks"`
+	Attempt        int    `json:"attempt,omitempty"`
+	MaxRetries     int    `json:"max_retries,omitempty"`
+	TokensUsed     int    `json:"tokens_used,omitempty"`
+	IterationsUsed int    `json:"iterations_used,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // MessageDeltaPayload carries live streaming deltas (WU3).
@@ -143,6 +198,29 @@ const (
 	MethodMemoryDelete = "memory.delete"
 	// RF-9.3: multi-model fanout.
 	MethodFanout = "session.fanout"
+	// RNF-6.3: estimated cost metrics.
+	MethodSessionCost = "session.cost"
+	MethodCostSummary = "cost.summary"
+	// Provider discovery and switching: list configured providers, list one
+	// provider's LIVE model catalog (forces a refresh — includes models not
+	// declared in providers.<name>.models), and switch the default
+	// provider+model together. MethodSwitchModel (session.switch_model)
+	// already accepts "provider/model" as an alternative to these two.
+	MethodProviderList       = "provider.list"
+	MethodProviderListModels = "provider.list_models"
+	MethodProviderSwitch     = "provider.switch"
+	// RF-11 daemon migration (hojaDeRuta-multiagente.md Fase 3): manifest
+	// runs as a first-class RPC concept, same run.* naming convention
+	// session.*/job.*/provider.* already use. The engine (StartRun,
+	// ResumeRun, GetRun, ListRuns, CancelRun, ApproveRunCheckpoint) has
+	// existed since Fase 1/2 (internal/daemon/runs.go) — these are its
+	// first public callers.
+	MethodRunStart             = "run.start"
+	MethodRunStatus            = "run.status"
+	MethodRunList              = "run.list"
+	MethodRunResume            = "run.resume"
+	MethodRunCancel            = "run.cancel"
+	MethodRunApproveCheckpoint = "run.approve_checkpoint"
 )
 
 // CreateSessionParams for session.create.
@@ -175,6 +253,13 @@ type ExecuteTurnParams struct {
 	EnableAnchoring  bool   `json:"enable_anchoring,omitempty"`
 	EnableRouting    bool   `json:"enable_routing,omitempty"`
 	EnableSkills     bool   `json:"enable_skills,omitempty"`
+	// ModelHint pins this turn to a router role ("cheap"/"generation"/
+	// "reasoning" — routing.ModelRole) instead of the session's default
+	// model, resolved server-side via the registry's ModelRouter. Empty
+	// (the default for every existing caller) behaves exactly as before.
+	// Wired from run.Task.ModelHint for RF-11 manifest task execution
+	// (client.ManifestExecutor) — see SessionManager.ExecuteTurnWithModelHint.
+	ModelHint string `json:"model_hint,omitempty"`
 }
 
 // GetMessagesParams for session.get_messages.
@@ -201,9 +286,47 @@ type ResumeSessionParams struct {
 	SessionID string `json:"session_id"`
 }
 
-// SwitchModelParams for session.switch_model.
+// SwitchModelParams for session.switch_model. Model accepts a bare name
+// (searched in the current provider, then every other one) or an explicit
+// "provider/model" — see SessionManager.SwitchModel.
 type SwitchModelParams struct {
 	SessionID string `json:"session_id"` // session whose metadata records the choice
+	Model     string `json:"model"`
+}
+
+// ProviderListResult for provider.list.
+type ProviderListResult struct {
+	Providers []ProviderResult `json:"providers"`
+}
+
+// ProviderResult is one configured provider's name and kind.
+type ProviderResult struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// ProviderListModelsParams for provider.list_models.
+type ProviderListModelsParams struct {
+	Provider string `json:"provider"`
+}
+
+// ProviderListModelsResult for provider.list_models. Models is the
+// provider's LIVE catalog (freshly refreshed from its own /models endpoint),
+// not just what's declared in providers.<name>.models.
+type ProviderListModelsResult struct {
+	Provider string   `json:"provider"`
+	Models   []string `json:"models"`
+}
+
+// ProviderSwitchParams for provider.switch. Provider and Model are both
+// required — listing without switching is provider.list_models, not this
+// method with an empty model. SessionID is optional: when given, that
+// session's metadata records the choice; a sessionless caller (forge daemon
+// set-provider) still switches the daemon's default, it just isn't tied to
+// any particular session.
+type ProviderSwitchParams struct {
+	SessionID string `json:"session_id,omitempty"`
+	Provider  string `json:"provider"`
 	Model     string `json:"model"`
 }
 
@@ -362,6 +485,8 @@ type MessageResult struct {
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	Name       string           `json:"name,omitempty"`
 	Usage      *UsageResult     `json:"usage,omitempty"`
+	Model      string           `json:"model,omitempty"`       // model that produced this message (assistant only)
+	DurationMs int64            `json:"duration_ms,omitempty"` // LLM call time that produced this message (assistant only)
 	CreatedAt  int64            `json:"created_at"`
 }
 
@@ -519,6 +644,23 @@ type FanoutResult struct {
 	Children        []FanoutChildResult `json:"children"`
 }
 
+// SessionCostParams for session.cost (RNF-6.3).
+type SessionCostParams struct {
+	SessionID string `json:"session_id"`
+}
+
+// CostSummaryParams for cost.summary (RNF-6.3). Limit/Offset page through
+// sessions the same way session.list does; 0 defaults like that method too.
+type CostSummaryParams struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// CostSummaryResult for cost.summary.
+type CostSummaryResult struct {
+	Providers []cost.ProviderCost `json:"providers"`
+}
+
 // NewErrorResponse creates a JSONRPCResponse with an error.
 func NewErrorResponse(id *json.RawMessage, code int, message string, data any) *JSONRPCResponse {
 	err := &JSONRPCError{Code: code, Message: message}
@@ -556,4 +698,42 @@ func NewNotification(method string, params any) (*JSONRPCNotification, error) {
 		Method:  method,
 		Params:  data,
 	}, nil
+}
+
+// RunStartParams for run.start. Manifest travels as content, not a path —
+// the CLI (or any other client) reads/parses the manifest file locally and
+// sends the parsed result, matching Fase 0's flag-mapping table
+// (hojaDeRuta-multiagente.md): "--manifest: CLI sigue leyendo/parseando
+// local, manda el contenido a run.start".
+type RunStartParams struct {
+	Manifest  run.Manifest `json:"manifest"`
+	StateDir  string       `json:"state_dir,omitempty"`
+	Decompose bool         `json:"decompose,omitempty"`
+}
+
+// RunResumeParams for run.resume.
+type RunResumeParams struct {
+	Manifest run.Manifest `json:"manifest"`
+	StateDir string       `json:"state_dir,omitempty"`
+}
+
+// RunStatusParams for run.status.
+type RunStatusParams struct {
+	RunID string `json:"run_id"`
+}
+
+// RunListResult for run.list.
+type RunListResult struct {
+	Runs []RunResult `json:"runs"`
+}
+
+// RunCancelParams for run.cancel.
+type RunCancelParams struct {
+	RunID string `json:"run_id"`
+}
+
+// RunApproveCheckpointParams for run.approve_checkpoint.
+type RunApproveCheckpointParams struct {
+	RunID    string `json:"run_id"`
+	Approved bool   `json:"approved"`
 }

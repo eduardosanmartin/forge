@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/cost"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
@@ -48,6 +49,10 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleMergeSession(ctx, req)
 	case MethodCompareSessions:
 		return h.handleCompareSessions(ctx, req)
+	case MethodSessionCost:
+		return h.handleSessionCost(ctx, req)
+	case MethodCostSummary:
+		return h.handleCostSummary(ctx, req)
 	case MethodExecuteTurn:
 		return h.handleExecuteTurn(ctx, req)
 	case MethodGetMessages:
@@ -64,6 +69,12 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleStatus(ctx, req)
 	case MethodSwitchModel:
 		return h.handleSwitchModel(ctx, req)
+	case MethodProviderList:
+		return h.handleProviderList(ctx, req)
+	case MethodProviderListModels:
+		return h.handleProviderListModels(ctx, req)
+	case MethodProviderSwitch:
+		return h.handleProviderSwitch(ctx, req)
 	case MethodSessionMarkSuccess:
 		return h.handleMarkSuccess(ctx, req)
 	case MethodPluginList:
@@ -100,6 +111,18 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleMemoryDelete(ctx, req)
 	case MethodFanout:
 		return h.handleFanout(ctx, req)
+	case MethodRunStart:
+		return h.handleRunStart(ctx, req)
+	case MethodRunStatus:
+		return h.handleRunStatus(ctx, req)
+	case MethodRunList:
+		return h.handleRunList(ctx, req)
+	case MethodRunResume:
+		return h.handleRunResume(ctx, req)
+	case MethodRunCancel:
+		return h.handleRunCancel(ctx, req)
+	case MethodRunApproveCheckpoint:
+		return h.handleRunApproveCheckpoint(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -297,31 +320,83 @@ func (h *Handler) handleCompareSessions(ctx context.Context, req *JSONRPCRequest
 		SameSession:     cmp.SameSession,
 	}
 	for _, m := range cmp.DivergentA {
-		result.DivergentA = append(result.DivergentA, h.messageToResult(m))
+		result.DivergentA = append(result.DivergentA, messageToResult(m))
 	}
 	for _, m := range cmp.DivergentB {
-		result.DivergentB = append(result.DivergentB, h.messageToResult(m))
+		result.DivergentB = append(result.DivergentB, messageToResult(m))
 	}
 	if len(cmp.DivergentA) > 0 {
-		last := h.messageToResult(cmp.DivergentA[len(cmp.DivergentA)-1])
+		last := messageToResult(cmp.DivergentA[len(cmp.DivergentA)-1])
 		result.LastMessageA = &last
 	} else if cmp.CountA > 0 {
 		// fallback to last of full transcript when no divergent tail (same session)
 		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionA.ID, 0); err == nil && len(msgs) > 0 {
-			last := h.messageToResult(msgs[len(msgs)-1])
+			last := messageToResult(msgs[len(msgs)-1])
 			result.LastMessageA = &last
 		}
 	}
 	if len(cmp.DivergentB) > 0 {
-		last := h.messageToResult(cmp.DivergentB[len(cmp.DivergentB)-1])
+		last := messageToResult(cmp.DivergentB[len(cmp.DivergentB)-1])
 		result.LastMessageB = &last
 	} else if cmp.CountB > 0 {
 		if msgs, err := h.mgr.GetMessagesSince(ctx, cmp.SessionB.ID, 0); err == nil && len(msgs) > 0 {
-			last := h.messageToResult(msgs[len(msgs)-1])
+			last := messageToResult(msgs[len(msgs)-1])
 			result.LastMessageB = &last
 		}
 	}
 	return h.resultResponse(req.ID, result)
+}
+
+// handleSessionCost estimates one session's token cost (RNF-6.3). See
+// internal/cost's package doc for the provider-attribution limitation this
+// inherits: forge does not record which provider produced a message, so the
+// estimate is attributed to the daemon's configured default provider.
+func (h *Handler) handleSessionCost(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params SessionCostParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.SessionID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "session_id is required", nil)
+	}
+	sess, ok := h.mgr.GetSession(ctx, params.SessionID)
+	if !ok {
+		return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+	}
+	messages, err := h.mgr.GetMessagesSince(ctx, params.SessionID, 0)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "get messages failed", err.Error())
+	}
+	result := cost.EstimateSessionCost(params.SessionID, sess.Metadata, messages, h.mgr.cfg.Providers, h.mgr.cfg.DefaultProvider)
+	return h.resultResponse(req.ID, result)
+}
+
+// handleCostSummary aggregates estimated cost across sessions, grouped by
+// (attributed) provider (RNF-6.3).
+func (h *Handler) handleCostSummary(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params CostSummaryParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+		}
+	}
+	if params.Limit <= 0 {
+		params.Limit = 200
+	}
+	sessions, err := h.mgr.ListSessions(ctx, params.Limit, params.Offset)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "list sessions failed", err.Error())
+	}
+
+	costs := make([]cost.SessionCost, 0, len(sessions))
+	for _, sess := range sessions {
+		messages, err := h.mgr.GetMessagesSince(ctx, sess.ID, 0)
+		if err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInternalError, "get messages failed", err.Error())
+		}
+		costs = append(costs, cost.EstimateSessionCost(sess.ID, sess.Metadata, messages, h.mgr.cfg.Providers, h.mgr.cfg.DefaultProvider))
+	}
+	return h.resultResponse(req.ID, CostSummaryResult{Providers: cost.AggregateByProvider(costs)})
 }
 
 func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
@@ -330,7 +405,7 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
 	}
 
-	messages, err := h.mgr.ExecuteTurn(ctx, params.SessionID, params.UserMessage,
+	messages, err := h.mgr.ExecuteTurnWithModelHint(ctx, params.SessionID, params.UserMessage, params.ModelHint,
 		params.EnableRetrieval, params.EnableCompaction, params.EnableAnchoring, params.EnableRouting, params.EnableSkills)
 	if err != nil {
 		switch {
@@ -345,10 +420,19 @@ func (h *Handler) handleExecuteTurn(ctx context.Context, req *JSONRPCRequest) *J
 
 	result := ExecuteTurnResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	summarizeTurn(&result)
+	// Prefer the model actually recorded on the final assistant message (it
+	// reflects overrides/routing for this turn); the registry default is
+	// only a fallback for the rare case a message predates that column.
 	result.Model = h.mgr.DefaultModel()
+	for i := len(result.Messages) - 1; i >= 0; i-- {
+		if result.Messages[i].Role == "assistant" && result.Messages[i].Model != "" {
+			result.Model = result.Messages[i].Model
+			break
+		}
+	}
 	return h.resultResponse(req.ID, result)
 }
 
@@ -426,7 +510,7 @@ func (h *Handler) handleGetMessages(ctx context.Context, req *JSONRPCRequest) *J
 
 	result := GetMessagesResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	return h.resultResponse(req.ID, result)
 }
@@ -444,7 +528,7 @@ func (h *Handler) handleGetMessagesSince(ctx context.Context, req *JSONRPCReques
 
 	result := GetMessagesResult{Messages: make([]MessageResult, len(messages))}
 	for i, msg := range messages {
-		result.Messages[i] = h.messageToResult(msg)
+		result.Messages[i] = messageToResult(msg)
 	}
 	return h.resultResponse(req.ID, result)
 }
@@ -518,6 +602,63 @@ func (h *Handler) handleSwitchModel(ctx context.Context, req *JSONRPCRequest) *J
 	}
 
 	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "model": params.Model})
+}
+
+func (h *Handler) handleProviderList(_ context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	providers, err := h.mgr.ListProviders()
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "list providers failed", err.Error())
+	}
+	out := make([]ProviderResult, len(providers))
+	for i, p := range providers {
+		out[i] = ProviderResult{Name: p.Name, Kind: p.Kind}
+	}
+	return h.resultResponse(req.ID, ProviderListResult{Providers: out})
+}
+
+func (h *Handler) handleProviderListModels(_ context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params ProviderListModelsParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.Provider == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "provider is required", nil)
+	}
+	models, err := h.mgr.ListProviderModels(params.Provider)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "list provider models failed", err.Error())
+	}
+	return h.resultResponse(req.ID, ProviderListModelsResult{Provider: params.Provider, Models: models})
+}
+
+func (h *Handler) handleProviderSwitch(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params ProviderSwitchParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	// Unlike session.switch_model, session_id is OPTIONAL here: a caller
+	// with no session in play at all (forge daemon set-provider) still
+	// switches the daemon's default provider+model — it just skips
+	// recording the choice into any particular session's metadata.
+	if params.Provider == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "provider is required", nil)
+	}
+	if params.Model == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "model is required (use provider.list_models to discover one first)", nil)
+	}
+
+	spec := params.Provider + "/" + params.Model
+	if err := h.mgr.SwitchModel(ctx, params.SessionID, spec); err != nil {
+		switch {
+		case errors.Is(err, store.ErrSessionNotFound):
+			return NewErrorResponse(req.ID, ErrCodeSessionNotFound, "session not found", nil)
+		case errors.As(err, new(*ModelUnavailableError)):
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, "model unavailable", err.Error())
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, "switch provider failed", err.Error())
+		}
+	}
+	return h.resultResponse(req.ID, map[string]any{"session_id": params.SessionID, "provider": params.Provider, "model": params.Model})
 }
 
 func (h *Handler) handleMarkSuccess(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
@@ -755,7 +896,115 @@ func (h *Handler) handleJobCancel(ctx context.Context, req *JSONRPCRequest) *JSO
 	return h.resultResponse(req.ID, JobCancelResult{Canceled: job.Status == JobCanceled, JobID: job.ID, Status: job.Status})
 }
 
-func (h *Handler) messageToResult(msg store.Message) MessageResult {
+// run.* handlers (RF-11 daemon migration, hojaDeRuta-multiagente.md Fase
+// 3) — thin RPC wrappers over the engine SessionManager.StartRun/
+// ResumeRun/GetRun/ListRuns/CancelRun/ApproveRunCheckpoint already
+// implement (internal/daemon/runs.go, Fase 1/2). Manifest travels as
+// content in the request, never a path — the daemon has no reason to read
+// the client's filesystem.
+
+func (h *Handler) handleRunStart(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunStartParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	stateDir := params.StateDir
+	if stateDir == "" {
+		stateDir = "."
+	}
+	exec, err := h.mgr.StartRun(ctx, &params.Manifest, stateDir, params.Decompose)
+	if err != nil {
+		if errors.Is(err, ErrRunAlreadyActive) {
+			return NewErrorResponse(req.ID, ErrCodeRunAlreadyActive, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, exec.snapshot())
+}
+
+func (h *Handler) handleRunStatus(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunStatusParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, ok := h.mgr.GetRun(params.RunID)
+	if !ok {
+		return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleRunList(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	runs := h.mgr.ListRuns()
+	if runs == nil {
+		runs = []RunResult{}
+	}
+	return h.resultResponse(req.ID, RunListResult{Runs: runs})
+}
+
+func (h *Handler) handleRunResume(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunResumeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	stateDir := params.StateDir
+	if stateDir == "" {
+		stateDir = "."
+	}
+	exec, err := h.mgr.ResumeRun(ctx, &params.Manifest, stateDir)
+	if err != nil {
+		if errors.Is(err, ErrRunAlreadyActive) {
+			return NewErrorResponse(req.ID, ErrCodeRunAlreadyActive, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, exec.snapshot())
+}
+
+func (h *Handler) handleRunCancel(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunCancelParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, err := h.mgr.CancelRun(params.RunID)
+	if err != nil {
+		if errors.Is(err, ErrRunNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleRunApproveCheckpoint(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunApproveCheckpointParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id is required", nil)
+	}
+	res, err := h.mgr.ApproveRunCheckpoint(params.RunID, params.Approved)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrRunNotFound):
+			return NewErrorResponse(req.ID, ErrCodeRunNotFound, "run not found", nil)
+		case errors.Is(err, ErrRunNoCheckpointPending):
+			return NewErrorResponse(req.ID, ErrCodeRunNoCheckpointPending, err.Error(), nil)
+		default:
+			return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		}
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func messageToResult(msg store.Message) MessageResult {
 	var toolCalls []ToolCallResult
 	for _, tc := range msg.ToolCalls {
 		toolCalls = append(toolCalls, ToolCallResult{
@@ -789,6 +1038,8 @@ func (h *Handler) messageToResult(msg store.Message) MessageResult {
 		ToolCallID: msg.ToolCallID,
 		Name:       msg.Name,
 		Usage:      usage,
+		Model:      msg.Model,
+		DurationMs: msg.DurationMs,
 		CreatedAt:  msg.CreatedAt,
 	}
 }

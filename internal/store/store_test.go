@@ -45,8 +45,8 @@ func TestOpenCreatesFileAndWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schema_version failed: %v", err)
 	}
-	if version != 4 {
-		t.Fatalf("schema_version = %d, want 4", version)
+	if version != 5 {
+		t.Fatalf("schema_version = %d, want 5", version)
 	}
 }
 

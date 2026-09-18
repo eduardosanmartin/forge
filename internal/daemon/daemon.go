@@ -75,6 +75,17 @@ func New(
 	}
 	handler := NewHandler(mgr, logger, pluginMgr, skillMgr)
 	transport := NewTransport(addr, handler, logger)
+	// RF-7.4/RNF-4.11: wire the configured auth token / TLS pair, if any.
+	// Transport.Start enforces the actual safety floor (non-loopback needs
+	// both); this is just plumbing cfg.Daemon through.
+	if cfg != nil {
+		if cfg.Daemon.AuthTokenHash != "" {
+			transport.SetAuth(cfg.Daemon.AuthTokenHash)
+		}
+		if cfg.Daemon.TLSCertFile != "" && cfg.Daemon.TLSKeyFile != "" {
+			transport.SetTLS(cfg.Daemon.TLSCertFile, cfg.Daemon.TLSKeyFile)
+		}
+	}
 	// Wire live delta bridge (WU3): when llm.streaming is enabled, agent deltas are published
 	// as message.delta.event notifications via the transport's broadcast channel.
 	mgr.SetDeltaPublisher(func(sessionID string, notif *JSONRPCNotification) {

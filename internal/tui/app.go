@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/eduardosanmartin/forge/internal/client"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 )
 
 // ClientAdapter adapts internal/client.Client to TUIClient interface.
@@ -54,6 +56,15 @@ func (a *ClientAdapter) HaltSession(sessionID, reason string) error {
 	ctx := context.Background()
 	return a.c.HaltSession(ctx, sessionID, reason)
 }
+
+// HaltAll triggers the daemon's global emergency stop (emergency.halt_all —
+// every session, not just one). The RPC itself takes no params (same call
+// shape the REPL's /halt with no target uses); reason is accepted for
+// interface symmetry with HaltSession and isn't transmitted today.
+func (a *ClientAdapter) HaltAll(reason string) error {
+	ctx := context.Background()
+	return a.c.Call(ctx, daemon.MethodHaltAll, nil, nil)
+}
 func (a *ClientAdapter) ResumeSession(sessionID string) error {
 	ctx := context.Background()
 	return a.c.ResumeSession(ctx, sessionID)
@@ -78,6 +89,82 @@ func (a *ClientAdapter) Events(ctx context.Context) (<-chan daemon.JSONRPCNotifi
 	return a.c.Events(ctx)
 }
 
+// Run.* methods (Fase 4, hojaDeRuta-multiagente.md): thin wrappers over the
+// RPCs added in Fase 3, same generic a.c.Call shape Status/CreateSession
+// already use above — no bespoke client.Client helper needed.
+func (a *ClientAdapter) RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunStart, daemon.RunStartParams{Manifest: mani, StateDir: stateDir, Decompose: decompose}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunStatus(runID string) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunStatus, daemon.RunStatusParams{RunID: runID}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunApproveCheckpoint, daemon.RunApproveCheckpointParams{RunID: runID, Approved: approved}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+func (a *ClientAdapter) RunCancel(runID string) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	ctx := context.Background()
+	if err := a.c.Call(ctx, daemon.MethodRunCancel, daemon.RunCancelParams{RunID: runID}, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// resolveDefaultModel reads the project config JSON at configPath and returns
+// providers[default_provider].models[0]. Returns "" on any error — the footer
+// already hides an empty model name.
+func resolveDefaultModel(configPath string) string {
+	if configPath == "" {
+		configPath = ".forge/config.json"
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return ""
+	}
+	var dp string
+	if raw, ok := doc["default_provider"]; ok {
+		if err := json.Unmarshal(raw, &dp); err != nil {
+			return ""
+		}
+	}
+	if dp == "" {
+		return ""
+	}
+	rawProv, ok := doc["providers"]
+	if !ok {
+		return ""
+	}
+	var providers map[string]struct {
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rawProv, &providers); err != nil {
+		return ""
+	}
+	if p, ok := providers[dp]; ok && len(p.Models) > 0 && p.Models[0] != "" {
+		return p.Models[0]
+	}
+	return ""
+}
+
 // Run launches the TUI program. It dials the daemon via internal/client and
 // builds the model.
 func Run(ctx context.Context, addr string) error {
@@ -99,6 +186,9 @@ func Run(ctx context.Context, addr string) error {
 	}
 
 	m := NewModel(cfg, pal, cfg.Palette, cfgPath, tuiClient)
+	if m.currentModel == "" {
+		m.currentModel = resolveDefaultModel(cfgPath)
+	}
 	if daemonErr != "" {
 		m.daemonErr = daemonErr
 	}

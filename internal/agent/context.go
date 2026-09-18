@@ -39,7 +39,13 @@ and retry the corrected call. Do not abandon the task after one tool error.
 
 Optional arguments with a default: OMIT them entirely instead of inventing
 values (never guess directories such as /workspace or /tmp). If a call fails
-because of an invented value, retry the identical call without that argument.`
+because of an invented value, retry the identical call without that argument.
+
+Not every request needs a tool call. If the user's message doesn't reference
+this project, its files, or its state, answer directly from your own
+knowledge — do not explore the filesystem "just in case." Use tools when the
+request actually requires reading, writing, or inspecting this project (or
+anything else a tool exists for).`
 
 // ContextAssembler builds the LLM message context with a stable prefix ordering
 // that maximizes prompt-cache/KV-cache hits (RNF-2.2/2.4).
@@ -94,14 +100,14 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		Content: systemPrompt,
 	})
 
-	// 2. Tool definitions (fixed order: fs_read, fs_write, fs_list, shell_exec, git)
-	toolDefs := c.toolsReg.List()
-	for _, t := range toolDefs {
-		messages = append(messages, llm.Message{
-			Role:    "system",
-			Content: fmt.Sprintf("TOOL: %s - %s", t.Name(), t.Description()),
-		})
-	}
+	// 2. Tool definitions travel ONLY via ChatRequest.Tools (see ToolDefs
+	// below), which OpenAI-compatible providers consume natively as
+	// structured function schemas. This used to ALSO inject one
+	// "TOOL: name - description" system message per tool here, restating
+	// the same name+description the structured schema already carries —
+	// pure duplication (confirmed: ~1.5-2K wasted prompt tokens per turn
+	// with the default 16-tool registry), and especially costly for small
+	// local models already fighting a tight context window.
 
 	// 3. Session-scoped context: v0 anchored facts plus the v1 feature
 	// injections (anchoring, retrieval, compaction), all gated by the
@@ -222,25 +228,34 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			return nil, fmt.Errorf("get recent messages: %w", err)
 		}
 
-		// Reverse to get chronological order (oldest first)
+		// Reverse to get chronological order (oldest first), then drop any
+		// leading orphaned tool-result message the fixed-size window cut
+		// mid-turn (see dropOrphanedToolPrefix).
+		windowed := make([]llm.Message, 0, len(recentMessages))
 		for i := len(recentMessages) - 1; i >= 0; i-- {
-			msg := recentMessages[i]
-			llmMsg := llm.Message{
-				Role:       msg.Role,
-				Content:    msg.Content,
-				ToolCalls:  msg.ToolCalls,
-				ToolCallID: msg.ToolCallID,
-				Name:       msg.Name,
-			}
-			messages = append(messages, llmMsg)
+			windowed = append(windowed, toLLMMessage(recentMessages[i]))
 		}
+		messages = append(messages, dropOrphanedToolPrefix(windowed)...)
 	}
 
-	// 5. Current user message
-	messages = append(messages, llm.Message{
-		Role:    "user",
-		Content: userMessage,
-	})
+	// 5. Current user message. Callers (the agent loop) persist the user
+	// message to the store BEFORE calling Build, so step 4's history window
+	// already ends with it — appending it again here would duplicate it in
+	// every request (confirmed in production: the same user text appeared
+	// twice in one LLM call). Skip the append when the last message already
+	// assembled is that exact user turn; on tool-result continuation
+	// iterations userMessage is "" and nothing is appended here at all (the
+	// continuation's own history window, ending in tool results, is enough).
+	if userMessage != "" {
+		last := len(messages) - 1
+		alreadyPresent := last >= 0 && messages[last].Role == "user" && messages[last].Content == userMessage
+		if !alreadyPresent {
+			messages = append(messages, llm.Message{
+				Role:    "user",
+				Content: userMessage,
+			})
+		}
+	}
 
 	return messages, nil
 }
@@ -306,16 +321,44 @@ func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID
 	if window > len(transcript) {
 		window = len(transcript)
 	}
+	tail := make([]llm.Message, 0, window)
 	for _, msg := range transcript[len(transcript)-window:] {
-		*messages = append(*messages, llm.Message{
-			Role:       msg.Role,
-			Content:    msg.Content,
-			ToolCalls:  msg.ToolCalls,
-			ToolCallID: msg.ToolCallID,
-			Name:       msg.Name,
-		})
+		tail = append(tail, toLLMMessage(msg))
 	}
+	*messages = append(*messages, dropOrphanedToolPrefix(tail)...)
 	return true
+}
+
+// toLLMMessage converts a persisted store.Message into the llm.Message shape
+// ChatRequest consumes.
+func toLLMMessage(msg store.Message) llm.Message {
+	return llm.Message{
+		Role:       msg.Role,
+		Content:    msg.Content,
+		ToolCalls:  msg.ToolCalls,
+		ToolCallID: msg.ToolCallID,
+		Name:       msg.Name,
+	}
+}
+
+// dropOrphanedToolPrefix removes leading "tool" role messages from a
+// chronologically-ordered (oldest-first) history window. A fixed-size
+// sliding window can cut a turn's assistant message (the one carrying
+// ToolCalls) while keeping a later "tool" message that answers one of those
+// calls, leaving that tool result's ToolCallID with no matching ToolCalls
+// entry anywhere in the request. Providers that validate this pairing
+// strictly (observed against OpenCode Zen's "Console Go": HTTP 400 "tool
+// result's tool id ... not found") reject the whole request; providers that
+// don't validate it accept a malformed conversation silently instead.
+// Dropping the orphan is correct either way — without its originating
+// tool_calls entry in the same request, the model has no way to make sense
+// of a bare tool result.
+func dropOrphanedToolPrefix(msgs []llm.Message) []llm.Message {
+	i := 0
+	for i < len(msgs) && msgs[i].Role == "tool" {
+		i++
+	}
+	return msgs[i:]
 }
 
 // ToolDefs returns the tool definitions in fixed order for ChatRequest.

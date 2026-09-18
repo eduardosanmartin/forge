@@ -7,6 +7,154 @@
 
 ---
 
+## Estado de cobertura de requerimientos
+
+> Lista de verificación de los 96 requerimientos (RF + RNF) de este documento. **Protocolo de mantenimiento:** se actualiza a medida que los requerimientos quedan cubiertos por la implementación; cada actualización queda versionada en el historial de git de este archivo (RF-8.4). El estado lo marca la verificación humana; `forge spec validate` (RF-8.3) aporta las señales mecánicas de evidencia, pero no distingue "implementado sin documentar" de "no implementado" — esa distinción se registra aquí.
+>
+> Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
+>
+> Última actualización: 2026-09-14 — **93/96 cubiertos**.
+
+**RF-1. Núcleo de ejecución**
+- [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
+- [x] RF-1.2 Agentes concurrentes por sesión (scheduler acotado, `max_parallel_children`)
+- [x] RF-1.3 Subagentes con contexto propio (`spawn_subagent`, sesiones branchadas)
+- [x] RF-1.4 Background jobs sobreviven al cliente (daemon RPC + `forge jobs`)
+
+**RF-2. Conectividad con proveedores de LLM**
+- [x] RF-2.1 Proveedores OpenAI-compatibles (Ollama, llama.cpp, vLLM, LM Studio)
+- [x] RF-2.2 Adaptadores propios: Anthropic y Gemini
+- [x] RF-2.3 Cambio de proveedor/modelo sin reiniciar sesión
+- [x] RF-2.4 Ruteo por costo/complejidad (`model_roles`)
+- [x] RF-2.5 Ruteo por tipo de paso (`ModelForStepSelector`)
+- [x] RF-2.6 Streaming opt-in (default OFF, TTFT, falla vinculante)
+
+**RF-3. Gestión de contexto y memoria**
+- [x] RF-3.1 Memoria persistente entre sesiones (anchors)
+- [x] RF-3.2 Recuperación selectiva de contexto (retrieval)
+- [x] RF-3.3 Compactación jerárquica progresiva
+- [x] RF-3.4 Inspección/edición manual de memoria (`forge memory`)
+- [x] RF-3.5 Anclaje explícito (tools + write floor RNF-4.12)
+
+**RF-4. Skills y auto-aprendizaje**
+- [x] RF-4.1 Creación, carga e instalación de skills
+- [x] RF-4.1.1 Wizard interactivo `forge skill new`
+- [x] RF-4.2 Lazy-load por relevancia a la tarea
+- [x] RF-4.3 Propuesta por minería de patrones (`forge skill mine`)
+- [x] RF-4.4 Aprobación humana antes de activar skills auto-generadas
+
+**RF-5. Plugins y extensibilidad**
+- [x] RF-5.1 Plugins de terceros (tools, providers, comandos, paneles)
+- [x] RF-5.2 Ejecución en sandbox aislado (WASM)
+- [x] RF-5.3 Manifiesto de plugin
+- [x] RF-5.3.1 Wizard interactivo `forge plugin new`
+- [x] RF-5.4 Habilitar/deshabilitar sin recompilar
+
+**RF-6. CLI**
+- [x] RF-6.1 Comandos core (sesiones, plugins, skills, proveedores)
+- [x] RF-6.2 Modo interactivo (TUI) y no interactivo (one-shot)
+- [x] RF-6.3 Salida JSON con envelope estable
+
+**RF-7. GUI web (opcional, desacoplada)**
+- [x] RF-7.1 Modo servidor exponiendo API para GUI web (`forge serve`, JSON-RPC 2.0 sobre WebSocket, `internal/daemon`)
+- [x] RF-7.2 GUI como cliente de la misma API que el CLI (`internal/webui`, sin lógica propia — consume `session.*` como el CLI/TUI)
+- [x] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
+- [x] RF-7.4 Acceso remoto protegible con autenticación (token compartido: header Bearer para el CLI, cookie de sesión vía `POST /auth/login` para la GUI — `forge daemon set-password`)
+
+**RF-8. Desarrollo guiado por especificación**
+- [x] RF-8.1 Spec como artefacto de primera clase (`forge spec`)
+- [x] RF-8.2 Descomposición de spec en tareas trackeables (Runner)
+- [x] RF-8.3 Señales de divergencia implementación vs spec (`forge spec validate`)
+- [x] RF-8.4 Versionado de cambios de spec (git-native, `forge spec log/diff`)
+
+**RF-9. Gestión de sesiones**
+- [x] RF-9.1 Branching de sesiones
+- [x] RF-9.2 Fusión de resultados de ramas (merge)
+- [x] RF-9.3 Misma tarea en paralelo multi-modelo + comparación (`forge fanout`)
+
+**RF-10. Integración con control de versiones y entorno**
+- [x] RF-10.1 Integración git (diffs, commits, branches por tarea, worktrees)
+- [x] RF-10.2 Shell dentro del workspace con visibilidad completa (perm-gated)
+- [x] RF-10.3 Issues/PRs GitHub — solo lectura (tool `github`, envuelve el `gh` CLI del usuario, permission-gated como `git`)
+
+**RF-11. Ejecución autónoma de principio a fin**
+- [x] RF-11.1 Run manifest como único punto de entrada
+- [x] RF-11.2 Declaración de objetivo/SPEC/checkpoints HITL en el manifest
+- [x] RF-11.3 Descomposición en tareas atómicas verificables
+- [x] RF-11.4 Ciclo de auto-corrección acotado por tarea
+- [x] RF-11.5 Agotar reintentos = checkpoint HITL implícito
+- [x] RF-11.6 Continuar solo con criterio de "hecho" cumplido
+- [x] RF-11.7 Checkpoint HITL: detener, resumir, esperar input humano
+- [x] RF-11.8 Log/auditoría reanudable (`RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
+- [x] RF-11.9 Niveles de autonomía configurables
+- [x] RF-11.10 Reporte final de corrida
+
+**RNF-1. Rendimiento**
+- [x] RNF-1.1 Cold start < 200ms (bench: ~19-21ms mediana)
+- [x] RNF-1.2 Overhead < 50ms por turno (bench: p50 1ms)
+- [x] RNF-1.3 Memoria en reposo < 100MB (bench: ~3.3MB heap+stack)
+- [x] RNF-1.4 Sesiones de larga duración sin degradación (`internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
+- [x] RNF-1.5 Concurrencia realista Perfil A (scheduler asumiendo cero paralelismo físico)
+- [x] RNF-1.6 Reserva de núcleos (`llm.cores`, default NumCPU-2)
+
+**RNF-2. Eficiencia de contexto/tokens**
+- [x] RNF-2.1 Medición y reporte de tokens por turno/sesión/proveedor (TurnMetrics)
+- [x] RNF-2.2 Orden estable para maximizar prompt-caching
+- [x] RNF-2.3 Reducción ≥40% vs naive en sesiones >20 turnos (bench)
+- [x] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión)
+- [x] RNF-2.5 Techo de contexto objetivo 4-8k tokens
+
+**RNF-3. Modularidad y mantenibilidad**
+- [x] RNF-3.1 Core independiente de proveedor de LLM
+- [x] RNF-3.2 Nueva funcionalidad vía plugin sin tocar el core
+- [x] RNF-3.3 Tests de integración sobre el contrato de la API interna
+
+**RNF-4. Seguridad**
+- [x] RNF-4.1 Permisos deny-by-default para shell/fs/git (+ custom write floor)
+- [x] RNF-4.2 Plugins con privilegios mínimos y permisos declarados
+- [x] RNF-4.3 Datos no salen del entorno local sin acción explícita
+- [x] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM
+- [x] RNF-4.5 Contenido no confiable tratado como datos, nunca instrucciones
+- [x] RNF-4.6 Procedencia verificada (checksum/firma) para plugins/skills externos
+- [x] RNF-4.7 Aislamiento de SO para shell del core (seccomp/Landlock en Linux; matiz macOS aceptado por spec)
+- [x] RNF-4.8 Parada de emergencia desde cualquier cliente
+- [x] RNF-4.9 Allowlist de red explícita por defecto en adaptadores
+- [x] RNF-4.10 Log/auditoría a prueba de manipulación (hash-chain append-only en `.forge/runs/<run_id>/audit.jsonl`, activo con sensibilidad `regulado`/`datos-sensibles`; `forge run --manifest ... --verify-audit` verifica la cadena)
+- [x] RNF-4.11 Transporte cifrado para GUI remota (TLS obligatorio para bind no-loopback — `--tls-cert/--tls-key` o `--tls-self-signed`; safety floor en `internal/daemon` rechaza bindear fuera de loopback sin auth+TLS)
+- [x] RNF-4.12 Anclaje derivado de contenido no confiable nunca automático (custom write floor; pendiente como item propio: checkpoint de aprobación para el opt-in)
+
+**RNF-5. Portabilidad**
+- [x] RNF-5.1 Linux, macOS y Windows
+- [x] RNF-5.2 Sin dependencia de servicios de infraestructura externos
+
+**RNF-6. Observabilidad**
+- [x] RNF-6.1 Logging estructurado JSON con niveles configurables
+- [x] RNF-6.2 Grabación y replay de sesiones completas
+- [x] RNF-6.3 Métricas de costo estimado por sesión/proveedor (`forge session cost <id>` / `forge cost summary`; atribuido al proveedor default del daemon — ver limitación documentada en `internal/cost`, forge no registra qué proveedor produjo cada mensaje)
+
+**RNF-7. Usabilidad / adaptabilidad**
+- [x] RNF-7.1 Cambio de dirección a mitad de tarea sin perder estado
+- [x] RNF-7.2 Configuración por proyecto versionable junto al código
+
+**RNF-8. Autonomía segura (ligado a RF-11)**
+- [x] RNF-8.1 Worktree/branch aislado en modo autónomo
+- [x] RNF-8.2 Piso de seguridad no configurable (git floor, budget walls)
+- [x] RNF-8.3 Criterio de "tarea completada" con verificación positiva (criterio declarado por tarea en manifest)
+- [x] RNF-8.4 Commits atómicos y reversibles por tarea
+
+**RNF-9. Clasificación de sensibilidad (techo de autonomía)**
+- [x] RNF-9.1 Clasificación única en config versionada (`general`/`regulado`/`datos-sensibles`)
+- [x] RNF-9.2 Clasificación como techo sobre la autonomía
+- [x] RNF-9.3 Manifest sobre el techo = rechazado, nunca degradado
+- [x] RNF-9.4 Cambio de clasificación requiere acción humana explícita y registrada
+
+**RNF-10. Validación empírica de rendimiento**
+- [ ] RNF-10.1 Banco de pruebas repetible (parcial: bench offline de tokens existe; faltan tokens/s, TTFT y prefill sobre modelo real)
+- [ ] RNF-10.2 Corrida sobre los dos perfiles de hardware de referencia, métricas separadas
+- [ ] RNF-10.3 Objetivos cuantitativos de RNF-1/RNF-2 validados contra el banco en vivo
+
+---
+
 ## 0. VisiÃ³n y motivaciÃ³n
 
 Herramientas como OpenCode y Claude Code resuelven bien el caso general, pero:

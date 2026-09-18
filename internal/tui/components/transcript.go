@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
@@ -161,7 +163,18 @@ func BuildContent(entries []Entry, pal Palette, width int) string {
 					avail = 10
 				}
 			}
-			lines := renderAssistantLines(e.Content, avail, pal)
+			// e.Streaming entries mutate on every delta (~14fps, see
+			// handleMessageDelta), so caching them would never hit and would
+			// just leak one cache entry per intermediate partial state —
+			// only a finished message's rendering (content now immutable)
+			// is worth memoizing. This is the actual fix for a real
+			// slowdown/hang reported live in `forge tui`: BuildContent
+			// re-renders the WHOLE transcript on every streaming tick, and
+			// chroma's per-token tokenization is far more expensive than the
+			// old flat-tint styling it replaced — without caching, every
+			// historical code block/table got fully re-highlighted ~14
+			// times a second for the entire duration of any later reply.
+			lines := renderAssistantLines(e.Content, avail, pal, !e.Streaming)
 			if e.Streaming && len(lines) > 0 {
 				lines[len(lines)-1] += pal.AccentStyle().Render("▌")
 			}
@@ -293,17 +306,64 @@ func styledLines(wrapped string, st lipgloss.Style) []string {
 	return out
 }
 
-// renderAssistantLines renders assistant text, tinting fenced code blocks
-// with the elevated background so code reads as code. Fences are consumed;
-// an opening-fence language tag renders as a dim label line. Content without
-// fences renders exactly as before (plain text style per line).
-func renderAssistantLines(content string, avail int, pal Palette) []string {
-	if !strings.Contains(content, "```") {
-		return styledLines(wrapPlain(content, avail), pal.TextStyle())
+// assistantRenderCache memoizes renderAssistantLinesCompute's (content,
+// avail, pal) -> rendered lines, so BuildContent's per-tick re-render of the
+// WHOLE transcript (every ~70ms while any message streams — see
+// scheduleDeltaRebuild) doesn't re-run chroma tokenization/table layout for
+// every historical message that hasn't changed. Only cacheable=true calls
+// (finished messages) touch it; a streaming message's content changes every
+// tick and would never hit anyway.
+var (
+	assistantRenderCache  sync.Map // assistantRenderKey -> []string
+	assistantRenderCacheN atomic.Int64
+)
+
+// assistantRenderCacheMax bounds memory over a very long session (many
+// distinct completed messages, or many terminal resizes changing avail).
+// Crude eviction — drop the whole cache and start over — rather than a real
+// LRU: hitting this cap at all should be rare, so the simplest correct fix
+// beats a more precise one that's more code to get right.
+const assistantRenderCacheMax = 500
+
+type assistantRenderKey struct {
+	content string
+	avail   int
+	pal     Palette
+}
+
+// renderAssistantLines renders assistant text: syntax-highlighting fenced
+// code blocks (chroma) with a line-number gutter so code reads as code, and
+// box-drawing any GFM tables in the surrounding prose so columns stay
+// aligned instead of wrapping mid-row. Fences are consumed; an opening-fence
+// language tag renders as a dim label line above its block. cacheable should
+// be false for an in-progress streaming entry (see the comment at the call
+// site) and true for a finished message.
+func renderAssistantLines(content string, avail int, pal Palette, cacheable bool) []string {
+	if !cacheable {
+		return renderAssistantLinesCompute(content, avail, pal)
 	}
-	codeStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color(pal.Text)).
-		Background(lipgloss.Color(pal.BGElevated))
+	key := assistantRenderKey{content: content, avail: avail, pal: pal}
+	if cached, ok := assistantRenderCache.Load(key); ok {
+		return cached.([]string)
+	}
+	lines := renderAssistantLinesCompute(content, avail, pal)
+	if assistantRenderCacheN.Load() >= assistantRenderCacheMax {
+		assistantRenderCache.Range(func(k, _ any) bool {
+			assistantRenderCache.Delete(k)
+			return true
+		})
+		assistantRenderCacheN.Store(0)
+	}
+	if _, loaded := assistantRenderCache.LoadOrStore(key, lines); !loaded {
+		assistantRenderCacheN.Add(1)
+	}
+	return lines
+}
+
+func renderAssistantLinesCompute(content string, avail int, pal Palette) []string {
+	if !strings.Contains(content, "```") {
+		return renderProseWithTables(content, avail, pal)
+	}
 	var out []string
 	parts := strings.Split(content, "```")
 	for i, part := range parts {
@@ -313,7 +373,7 @@ func renderAssistantLines(content string, avail int, pal Palette) []string {
 			if strings.TrimSpace(part) == "" {
 				continue
 			}
-			out = append(out, styledLines(wrapPlain(part, avail), pal.TextStyle())...)
+			out = append(out, renderProseWithTables(part, avail, pal)...)
 			continue
 		}
 		lang := ""
@@ -328,9 +388,7 @@ func renderAssistantLines(content string, avail int, pal Palette) []string {
 			out = append(out, pal.DimStyle().Render(lang))
 		}
 		body = strings.Trim(body, "\n")
-		for _, ln := range strings.Split(wrapPlain(body, avail), "\n") {
-			out = append(out, codeStyle.Render(ln))
-		}
+		out = append(out, renderHighlightedCodeBlock(lang, body, avail, pal)...)
 	}
 	if len(out) == 0 {
 		out = append(out, "")

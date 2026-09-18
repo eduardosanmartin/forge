@@ -51,6 +51,37 @@ type ModelForStepSelector interface {
 	GetModelForStep(step routing.StepType) string
 }
 
+// chatFailover matches LLM registries that support automatic failover on a
+// retryable failure (llm.Registry implements it via its config-driven
+// fallback_chain — see llm.Registry.ChatWithFallback). Type-asserted rather
+// than added to LLMRegistryInterface so a registry without failover support
+// (test doubles, a future provider kind) just uses the plain resolved
+// provider directly, unchanged. Only applied on the plain-default
+// resolution path (see usingDefault in ExecuteTurnWithOptions) — an
+// explicit override (spawn_subagent provider/model, a manifest task's
+// model_hint, a routed step model) names one exact model on purpose, and
+// silently substituting a different one on failure would ignore that
+// choice instead of surfacing the error.
+type chatFailover interface {
+	ChatWithFallback(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
+}
+
+// fallbackAttemptsSource matches LLM registries that expose sticky+cooldown
+// failover bookkeeping (llm.Registry, via ResolveAttempts/RecordSuccess/
+// RecordFailure) for the streaming path to drive directly — see
+// callLLMStreamWithFailover. Streaming can't use chatFailover/
+// ChatWithFallback itself: that method only sees a synchronous
+// request/response, but a streaming failure must be classified as
+// pre-first-token (safe to retry) or mid-stream (already shown to the
+// caller, must not retry) by consuming the channel, which only the caller
+// of ChatStream can do — so the streaming path walks the same resolved
+// candidates and reports its own outcomes back into the registry.
+type fallbackAttemptsSource interface {
+	ResolveAttempts() []llm.FallbackTarget
+	RecordSuccess(providerName, model string)
+	RecordFailure(providerName, model string, err error)
+}
+
 // TurnOptions controls optional per-turn behavior (additive, backward compatible).
 //
 // StreamingEnabled enables the streaming path (ChatStream) when true. When false
@@ -66,6 +97,43 @@ type TurnOptions struct {
 	StreamingEnabled bool
 	OnDelta          func(delta string)
 	Timeout          time.Duration
+	// NoTools strips tool definitions from the ChatRequest for this turn,
+	// forcing a plain-text answer. Used for turns that must never call a
+	// tool no matter how capable/compliant the model is — e.g. the RF-11
+	// manifest decomposition turn (internal/run/decompose.go), which asks
+	// for a JSON task list and previously could exhaust max_iterations
+	// exploring the filesystem instead of answering when the model chose to
+	// use the tools it technically had available despite being told not to.
+	NoTools bool
+	// OverrideModel pins this single turn to a specific model name, taking
+	// priority over the agent's own overrideModel (set only for spawn_subagent
+	// children — see SpawnChild) and over the session's v1 routing flag.
+	// Empty means "no override for this call" — the existing resolution
+	// chain applies unchanged. Wired from a manifest Task.ModelHint resolved
+	// through the registry's ModelRouter (internal/daemon/session_mgr.go's
+	// ExecuteTurnWithModelHint) so per-task model sizing (RF-11 decomposition,
+	// sugerenciasDeClaude.md §5.6) actually reaches the LLM call instead of
+	// staying a purely declarative field.
+	OverrideModel string
+	// OverrideProvider pins this single turn's LLM calls to a specific
+	// provider client, taking priority over the agent's own overrideProvider
+	// (spawn_subagent children) and the registry's default provider. Wired
+	// alongside OverrideModel from the registry's ModelRouter resolution
+	// (internal/llm.Registry.ProviderForRole) so a role resolved to a model
+	// declared by a NON-default provider actually calls that provider — the
+	// model name alone doesn't imply which provider's client understands it.
+	// Nil means "no override for this call".
+	OverrideProvider llm.Provider
+	// OnToolEvent, when set, is called synchronously around each tool
+	// invocation: once with status "started" right before execution, once
+	// more with "finished" or "error" right after. Purely observational
+	// (never affects control flow or the persisted transcript) — wired by
+	// SessionManager to broadcast daemon.MethodToolCallEvent regardless of
+	// whether text-delta streaming is enabled, since manifest-driven task
+	// turns (the daemon's own manifestExecutor, internal/daemon/runs.go)
+	// never enable streaming but still benefit from live tool-call
+	// visibility. errMsg is "" except on status "error".
+	OnToolEvent func(toolCallID, name, status, errMsg string)
 }
 
 // ChatStreamer matches providers/registries that support streaming.
@@ -255,8 +323,12 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			break
 		}
 
-		// Get tool definitions
-		toolDefs := a.ctxAssembler.ToolDefs()
+		// Get tool definitions — empty when this turn must never call a tool
+		// (opts.NoTools), regardless of what the registry has available.
+		var toolDefs []llm.ToolDef
+		if !opts.NoTools {
+			toolDefs = a.ctxAssembler.ToolDefs()
+		}
 
 		// Call LLM
 		llmStartTime := time.Now()
@@ -268,8 +340,21 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		// override is user-directed and routes nothing further. Overrides
 		// are applied before the nil-provider check so a child pinned to a
 		// named provider still runs when the registry has no usable default.
-		if a.overrideProvider != nil {
+		// usingDefault tracks whether model resolution fell all the way
+		// through to "the registry's plain default" with no override or
+		// routing decision along the way — that's the ONLY case
+		// ChatWithFallback applies to below. An explicit pin (spawn_subagent
+		// provider/model, a manifest task's model_hint, or a routed step
+		// model) is deliberate caller intent: it names one exact model, and
+		// falling back to something else on failure would silently ignore
+		// that choice instead of surfacing the error.
+		usingDefault := true
+		if opts.OverrideProvider != nil {
+			provider = opts.OverrideProvider
+			usingDefault = false
+		} else if a.overrideProvider != nil {
 			provider = a.overrideProvider
+			usingDefault = false
 		}
 		if provider == nil {
 			result.Error = errors.New("no LLM provider available")
@@ -277,8 +362,12 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			break
 		}
 
-		if a.overrideModel != "" {
+		if opts.OverrideModel != "" {
+			model = opts.OverrideModel
+			usingDefault = false
+		} else if a.overrideModel != "" {
 			model = a.overrideModel
+			usingDefault = false
 		} else if routingEnabled {
 			// v1 routing: when the session flag is on and the registry can
 			// resolve step models, the main generation call uses the router's
@@ -292,31 +381,53 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			if sel, ok := a.llmReg.(ModelForStepSelector); ok {
 				if routed := sel.GetModelForStep(routing.StepGenerate); routed != "" {
 					model = routed
+					usingDefault = false
 				}
 			}
 		}
 
 		req := llm.ChatRequest{
-			Model:    model,
-			Messages: llmMessages,
-			Tools:    toolDefs,
-			Stream:   false,
+			Model:     model,
+			Messages:  llmMessages,
+			Tools:     toolDefs,
+			Stream:    false,
+			SessionID: sessionID,
 		}
 
 		var resp llm.ChatResponse
 		if opts.StreamingEnabled {
 			var ttftMs int64
-			resp, ttftMs, err = a.callLLMStream(ctx, provider, req, opts.OnDelta, llmStartTime)
-			if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
-				// Provider does not support streaming: exact Chat fallback (WU3).
-				// Only this sentinel may fallback; mid-stream failures (stream error) must fail the turn.
-				resp, err = provider.Chat(ctx, req)
-				ttftMs = 0
-			} else if ttftMs > 0 && firstTTFTMs == 0 {
+			if usingDefault {
+				// Same failover eligibility as the non-streaming path
+				// (usingDefault — see its comment above), but walked here
+				// rather than via chatFailover: only callLLMStreamWithFailover
+				// can tell a pre-first-token failure (safe to retry) from a
+				// mid-stream one (already shown to the caller, must not retry).
+				resp, ttftMs, err = a.callLLMStreamWithFailover(ctx, provider, model, req, opts.OnDelta, llmStartTime)
+			} else {
+				resp, ttftMs, err = a.callLLMStream(ctx, provider, req, opts.OnDelta, llmStartTime)
+				if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
+					// Provider does not support streaming: exact Chat fallback (WU3).
+					// Only this sentinel may fallback; mid-stream failures (stream error) must fail the turn.
+					resp, err = provider.Chat(ctx, req)
+					ttftMs = 0
+				}
+			}
+			if ttftMs > 0 && firstTTFTMs == 0 {
 				firstTTFTMs = ttftMs
 				RecordTTFT(ttftMs)
 				// Log TTFT for observability (best-effort).
 				a.logger.Debug("stream ttft", "session_id", sessionID, "ttft_ms", ttftMs, "iteration", iterationCount)
+			}
+		} else if usingDefault {
+			// Only the plain-default path gets failover — see usingDefault's
+			// comment above. A registry without ChatWithFallback support
+			// (e.g. a test double) falls through to the exact same call as
+			// before this feature existed.
+			if fo, ok := a.llmReg.(chatFailover); ok {
+				resp, err = fo.ChatWithFallback(ctx, req)
+			} else {
+				resp, err = provider.Chat(ctx, req)
 			}
 		} else {
 			resp, err = provider.Chat(ctx, req)
@@ -353,11 +464,13 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		if len(choice.Message.ToolCalls) > 0 {
 			// Append assistant message with tool calls
 			assistantMsg := &store.Message{
-				SessionID: sessionID,
-				Role:      "assistant",
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
-				Usage:     resp.Usage,
+				SessionID:  sessionID,
+				Role:       "assistant",
+				Content:    choice.Message.Content,
+				ToolCalls:  choice.Message.ToolCalls,
+				Usage:      resp.Usage,
+				Model:      model,
+				DurationMs: llmElapsed,
 			}
 			_, _, err = a.store.AppendMessage(ctx, assistantMsg)
 			if err != nil {
@@ -397,11 +510,30 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 					result.Halted = true
 				}
 				if !result.Halted {
+					// executeToolCallsParallel has no per-child progress hook of
+					// its own, so "started" fires for the whole batch up front
+					// here rather than as each child actually begins.
+					if opts.OnToolEvent != nil {
+						for _, tc := range choice.Message.ToolCalls {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
+						}
+					}
 					// Bounded parallel dispatch lives in scheduler.go
 					// (executeToolCallsParallel); tool results are appended
 					// serially here, after the join.
 					for _, out := range a.executeToolCallsParallel(ctx, sessionID, choice.Message.ToolCalls) {
 						totalToolCallCount++
+						if opts.OnToolEvent != nil {
+							// executeToolCallsParallel folds a tool error into
+							// result.Content ("ERROR: ...") rather than a
+							// separate error value — same convention the
+							// serial path below follows.
+							if strings.HasPrefix(out.result.Content, "ERROR: ") {
+								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "error", out.result.Content)
+							} else {
+								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "finished", "")
+							}
+						}
 						toolResultMsg := &store.Message{
 							SessionID:  sessionID,
 							Role:       "tool",
@@ -441,11 +573,28 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 
 					// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
 					// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
+					if opts.OnToolEvent != nil {
+						opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
+					}
 					toolCtx := tools.WithSessionID(ctx, sessionID)
 					toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
 					if err != nil {
 						toolResult = tools.Result{
 							Content: "ERROR: " + err.Error(),
+						}
+					}
+					if opts.OnToolEvent != nil {
+						// Execute reports most failures (unknown tool, bad
+						// args, permission denial) as Result{Content: "ERROR:
+						// ..."} with a NIL error — err != nil is the rarer
+						// case. Check both so a live progress display sees
+						// "error" for both.
+						if err != nil {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", err.Error())
+						} else if strings.HasPrefix(toolResult.Content, "ERROR: ") {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", toolResult.Content)
+						} else {
+							opts.OnToolEvent(tc.ID, tc.Function.Name, "finished", "")
 						}
 					}
 					totalToolCallCount++
@@ -480,11 +629,25 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		}
 
 		// No tool calls - final response
+		//
+		// A reasoning-capable model can spend its entire completion-token
+		// budget "thinking" and stop before ever writing a final answer —
+		// observed live via OpenRouter (nvidia/nemotron-3.5-lightning:free):
+		// Content arrived empty while Reasoning carried real generated text
+		// and Usage billed real completion_tokens. Falling back to the
+		// reasoning text (clearly labeled) beats showing a silent blank
+		// reply for tokens that were, in fact, spent producing something.
+		finalContent := choice.Message.Content
+		if finalContent == "" && choice.Message.Reasoning != "" {
+			finalContent = "⚠ The model did not produce a final answer — it spent its entire response reasoning internally before stopping. Here is what it reasoned:\n\n" + choice.Message.Reasoning
+		}
 		finalMsg := &store.Message{
-			SessionID: sessionID,
-			Role:      "assistant",
-			Content:   choice.Message.Content,
-			Usage:     resp.Usage,
+			SessionID:  sessionID,
+			Role:       "assistant",
+			Content:    finalContent,
+			Usage:      resp.Usage,
+			Model:      model,
+			DurationMs: llmElapsed,
 		}
 		_, _, err = a.store.AppendMessage(ctx, finalMsg)
 		if err != nil {
@@ -522,10 +685,80 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	return result, result.Error
 }
 
+// callLLMStreamWithFailover wraps callLLMStream with the same sticky+cooldown
+// walk as Registry.ChatWithFallback, restricted to failures that happen
+// before any token reaches the caller (ttftMs == 0): once onDelta has fired
+// once, the caller has already been shown partial output, and silently
+// restarting on a different model would splice two half-answers together —
+// so a mid-stream failure (ttftMs > 0) always stops here, exactly like plain
+// callLLMStream. A pre-first-token failure is indistinguishable in effect
+// from a non-streaming failure (nothing shown yet), so it's retried the same
+// way: only on IsRetryable, one candidate at a time (from ResolveAttempts,
+// so cooldown/sticky state is shared with the non-streaming path), stopping
+// immediately on a non-retryable error or once candidates are exhausted.
+// Requires the registry to implement fallbackAttemptsSource; without it (or
+// with no candidates resolved) this degrades to a single callLLMStream
+// attempt against the caller-supplied default (mirrors chatFailover's
+// degrade behavior).
+func (a *Agent) callLLMStreamWithFailover(ctx context.Context, defaultProvider llm.Provider, defaultModel string, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
+	attempt := func(provider llm.Provider, model string) (llm.ChatResponse, int64, error) {
+		attemptReq := req
+		attemptReq.Model = model
+		resp, ttftMs, err := a.callLLMStream(ctx, provider, attemptReq, onDelta, startTime)
+		if err != nil && errors.Is(err, llm.ErrStreamingNotSupported) {
+			// Provider does not support streaming: exact Chat fallback (WU3),
+			// same as the non-failover streaming path.
+			resp, err = provider.Chat(ctx, attemptReq)
+			ttftMs = 0
+		}
+		return resp, ttftMs, err
+	}
+
+	src, ok := a.llmReg.(fallbackAttemptsSource)
+	if !ok {
+		return attempt(defaultProvider, defaultModel)
+	}
+	attempts := src.ResolveAttempts()
+	if len(attempts) == 0 {
+		return attempt(defaultProvider, defaultModel)
+	}
+
+	first := attempts[0]
+	resp, ttftMs, err := attempt(first.Provider, first.Model)
+	if err == nil {
+		src.RecordSuccess(first.ProviderName, first.Model)
+		return resp, ttftMs, nil
+	}
+	if ttftMs > 0 || !llm.IsRetryable(err) || len(attempts) == 1 {
+		return resp, ttftMs, err
+	}
+	src.RecordFailure(first.ProviderName, first.Model, err)
+
+	errs := []error{fmt.Errorf("%s/%s: %w", first.ProviderName, first.Model, err)}
+	for _, target := range attempts[1:] {
+		fbResp, fbTTFT, fbErr := attempt(target.Provider, target.Model)
+		if fbErr == nil {
+			src.RecordSuccess(target.ProviderName, target.Model)
+			a.logger.Warn("fell back to next model in fallback_chain (streaming)",
+				"from_provider", first.ProviderName, "from_model", first.Model,
+				"to_provider", target.ProviderName, "to_model", target.Model)
+			return fbResp, fbTTFT, nil
+		}
+		errs = append(errs, fmt.Errorf("%s/%s: %w", target.ProviderName, target.Model, fbErr))
+		if fbTTFT > 0 || !llm.IsRetryable(fbErr) {
+			return llm.ChatResponse{}, fbTTFT, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
+		}
+		src.RecordFailure(target.ProviderName, target.Model, fbErr)
+	}
+	return llm.ChatResponse{}, 0, fmt.Errorf("fallback_chain exhausted: %w", errors.Join(errs...))
+}
+
 // callLLMStream attempts streaming and assembles a ChatResponse.
 // On any mid-stream failure it returns an error and the caller must fail the turn
 // (documented contract: no fallback within the same turn; the next turn may be non-streaming).
-// Only ErrStreamingNotSupported before first token may fallback to Chat.
+// Only ErrStreamingNotSupported before first token may fallback to Chat — or, when called
+// through callLLMStreamWithFailover, a pre-first-token retryable failure may fall
+// to the next fallback_chain entry instead.
 // It returns TTFT (time-to-first-token) in milliseconds, 0 if no token was emitted.
 func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req llm.ChatRequest, onDelta func(string), startTime time.Time) (llm.ChatResponse, int64, error) {
 	streamer, ok := provider.(ChatStreamer)
@@ -541,7 +774,7 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 	if ch == nil {
 		return llm.ChatResponse{}, 0, errors.New("nil stream channel")
 	}
-	content, toolCalls, usage, finishReason, ttftMs, cErr := consumeStream(ctx, ch, onDelta, startTime)
+	content, reasoning, toolCalls, usage, finishReason, ttftMs, cErr := consumeStream(ctx, ch, onDelta, startTime)
 	if cErr != nil {
 		return llm.ChatResponse{}, ttftMs, cErr
 	}
@@ -554,6 +787,7 @@ func (a *Agent) callLLMStream(ctx context.Context, provider llm.Provider, req ll
 			Message: llm.Message{
 				Role:      "assistant",
 				Content:   content,
+				Reasoning: reasoning,
 				ToolCalls: toolCalls,
 			},
 			FinishReason: finishReason,
@@ -596,19 +830,20 @@ func mergeToolCallDelta(calls []llm.ToolCall, frag llm.ToolCall) []llm.ToolCall 
 // A chunk with Error != "" is treated as terminal mid-stream failure (fails turn).
 // TTFT is measured as time from startTime to first non-empty text delta; 0 if none.
 // Context cancellation is respected and produces a context error.
-func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string), startTime time.Time) (string, []llm.ToolCall, *llm.Usage, string, int64, error) {
+func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(string), startTime time.Time) (string, string, []llm.ToolCall, *llm.Usage, string, int64, error) {
 	var (
-		contentBuilder strings.Builder
-		toolCalls      []llm.ToolCall
-		usage          *llm.Usage
-		finishReason   string
-		ttftMs         int64
-		ttftSet        bool
+		contentBuilder   strings.Builder
+		reasoningBuilder strings.Builder
+		toolCalls        []llm.ToolCall
+		usage            *llm.Usage
+		finishReason     string
+		ttftMs           int64
+		ttftSet          bool
 	)
 	for {
 		select {
 		case <-ctx.Done():
-			return "", nil, nil, "", ttftMs, ctx.Err()
+			return "", "", nil, nil, "", ttftMs, ctx.Err()
 		case chunk, ok := <-ch:
 			if !ok {
 				// Channel closed: final assembly.
@@ -619,10 +854,10 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 						finishReason = "stop"
 					}
 				}
-				return contentBuilder.String(), toolCalls, usage, finishReason, ttftMs, nil
+				return contentBuilder.String(), reasoningBuilder.String(), toolCalls, usage, finishReason, ttftMs, nil
 			}
 			if chunk.Error != "" {
-				return "", nil, nil, "", ttftMs, fmt.Errorf("stream error: %s", chunk.Error)
+				return "", "", nil, nil, "", ttftMs, fmt.Errorf("stream error: %s", chunk.Error)
 			}
 			if chunk.Usage != nil {
 				usage = chunk.Usage
@@ -641,6 +876,14 @@ func consumeStream(ctx context.Context, ch <-chan llm.StreamChunk, onDelta func(
 					if onDelta != nil {
 						onDelta(choice.Delta.Content)
 					}
+				}
+				// Reasoning-capable providers (observed live from OpenRouter)
+				// stream "thinking" text in delta.reasoning, separate from
+				// delta.content — accumulated but never forwarded to onDelta:
+				// it isn't the answer, so it shouldn't appear as if it were
+				// live response text.
+				if choice.Delta.Reasoning != "" {
+					reasoningBuilder.WriteString(choice.Delta.Reasoning)
 				}
 				if len(choice.Delta.ToolCalls) > 0 {
 					for _, frag := range choice.Delta.ToolCalls {

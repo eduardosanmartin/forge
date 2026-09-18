@@ -2,8 +2,9 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,12 +15,13 @@ import (
 
 // streamingMockProvider implements both Chat and ChatStream delivering same final response via different paths.
 type streamingMockProvider struct {
-	content   string
-	toolCalls []llm.ToolCall
-	usage     *llm.Usage
-	finish    string
-	fragmented bool
-	streamError string
+	content      string
+	reasoning    string // set to simulate a reasoning-capable provider's separate "thinking" field
+	toolCalls    []llm.ToolCall
+	usage        *llm.Usage
+	finish       string
+	fragmented   bool
+	streamError  string
 	notSupported bool
 }
 
@@ -32,6 +34,7 @@ func (m *streamingMockProvider) Chat(ctx context.Context, req llm.ChatRequest) (
 			Message: llm.Message{
 				Role:      "assistant",
 				Content:   m.content,
+				Reasoning: m.reasoning,
 				ToolCalls: m.toolCalls,
 			},
 			FinishReason: m.finish,
@@ -53,6 +56,19 @@ func (m *streamingMockProvider) ChatStream(ctx context.Context, req llm.ChatRequ
 	ch := make(chan llm.StreamChunk, 16)
 	go func() {
 		defer close(ch)
+		if m.reasoning != "" {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- llm.StreamChunk{
+				ID:    "stream-id",
+				Model: req.Model,
+				Choices: []llm.StreamChoice{{
+					Delta: llm.Message{Role: "assistant", Reasoning: m.reasoning},
+				}},
+			}:
+			}
+		}
 		if m.fragmented && m.content != "" {
 			for _, chb := range m.content {
 				select {
@@ -119,7 +135,7 @@ func (m *streamingMockProvider) ChatStream(ctx context.Context, req llm.ChatRequ
 }
 
 func (m *streamingMockProvider) ListModels() ([]string, error) { return []string{"test-model"}, nil }
-func (m *streamingMockProvider) Close() error                   { return nil }
+func (m *streamingMockProvider) Close() error                  { return nil }
 
 type streamingMockRegistry struct {
 	provider llm.Provider
@@ -164,7 +180,7 @@ func TestAgent_StreamingParity_NoTool(t *testing.T) {
 	agentStream := NewAgent(cfgStreaming, store2, &streamingMockRegistry{provider: prov}, toolsReg2, engine, newTestLogger())
 	resStream, err := agentStream.ExecuteTurnWithOptions(ctx, "session-1", "hi", TurnOptions{
 		StreamingEnabled: true,
-		OnDelta: func(d string) { deltas = append(deltas, d) },
+		OnDelta:          func(d string) { deltas = append(deltas, d) },
 	})
 	if err != nil {
 		t.Fatalf("streaming: %v", err)
@@ -206,12 +222,12 @@ func TestAgent_StreamingParity_WithToolCall(t *testing.T) {
 			if callCountNon == 1 {
 				return llm.ChatResponse{
 					Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "calling tool", ToolCalls: toolCalls}, FinishReason: "tool_calls"}},
-					Usage: &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+					Usage:   &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 				}, nil
 			}
 			return llm.ChatResponse{
 				Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "done"}, FinishReason: "stop"}},
-				Usage: &llm.Usage{PromptTokens: 15, CompletionTokens: 5, TotalTokens: 20},
+				Usage:   &llm.Usage{PromptTokens: 15, CompletionTokens: 5, TotalTokens: 20},
 			}, nil
 		},
 		onStream: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
@@ -320,8 +336,10 @@ func (m *streamingMockProviderWithCount) Chat(ctx context.Context, req llm.ChatR
 func (m *streamingMockProviderWithCount) ChatStream(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamChunk, error) {
 	return m.onStream(ctx, req)
 }
-func (m *streamingMockProviderWithCount) ListModels() ([]string, error) { return []string{"test-model"}, nil }
-func (m *streamingMockProviderWithCount) Close() error                   { return nil }
+func (m *streamingMockProviderWithCount) ListModels() ([]string, error) {
+	return []string{"test-model"}, nil
+}
+func (m *streamingMockProviderWithCount) Close() error { return nil }
 
 func streamContains(s, substr string) bool {
 	return len(s) >= len(substr) && (func() bool {
@@ -351,7 +369,7 @@ func TestConsumeStream_MergesToolCallFragments(t *testing.T) {
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{tail}}}}}
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
 	}()
-	_, calls, _, finish, _, err := consumeStream(ctx, ch, nil, time.Now())
+	_, _, calls, _, finish, _, err := consumeStream(ctx, ch, nil, time.Now())
 	if err != nil {
 		t.Fatalf("consumeStream: %v", err)
 	}
@@ -389,7 +407,7 @@ func TestConsumeStream_KeepsDistinctCallsSeparate(t *testing.T) {
 		fr := "tool_calls"
 		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}}}
 	}()
-	_, calls, _, _, _, err := consumeStream(ctx, ch, nil, time.Now())
+	_, _, calls, _, _, _, err := consumeStream(ctx, ch, nil, time.Now())
 	if err != nil {
 		t.Fatalf("consumeStream: %v", err)
 	}
@@ -502,8 +520,10 @@ func (m *streamingTTFTErrorProvider) ChatStream(ctx context.Context, req llm.Cha
 	}()
 	return ch, nil
 }
-func (m *streamingTTFTErrorProvider) ListModels() ([]string, error) { return []string{"test-model"}, nil }
-func (m *streamingTTFTErrorProvider) Close() error                  { return nil }
+func (m *streamingTTFTErrorProvider) ListModels() ([]string, error) {
+	return []string{"test-model"}, nil
+}
+func (m *streamingTTFTErrorProvider) Close() error { return nil }
 
 func TestConfig_StreamingMode_Parsing(t *testing.T) {
 	cases := []struct {
@@ -572,3 +592,70 @@ func trimSpace(s string) string {
 }
 
 var _ = json.RawMessage{}
+
+// TestConsumeStream_AccumulatesReasoningSeparateFromContent is a regression
+// lock for a real bug: OpenRouter (observed live from
+// nvidia/nemotron-3.5-lightning:free) streams "thinking" text in
+// delta.reasoning, a field separate from delta.content. consumeStream must
+// accumulate it into its own return value — and never forward it to onDelta,
+// since it isn't the answer and showing it live as if it were would be
+// misleading.
+func TestConsumeStream_AccumulatesReasoningSeparateFromContent(t *testing.T) {
+	ctx := context.Background()
+	ch := make(chan llm.StreamChunk, 8)
+	go func() {
+		defer close(ch)
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Reasoning: "Let"}}}}
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Reasoning: " me think"}}}}
+		ch <- llm.StreamChunk{Choices: []llm.StreamChoice{{Delta: llm.Message{Content: "answer"}}}}
+	}()
+	var deltas []string
+	content, reasoning, _, _, _, _, err := consumeStream(ctx, ch, func(d string) { deltas = append(deltas, d) }, time.Now())
+	if err != nil {
+		t.Fatalf("consumeStream: %v", err)
+	}
+	if reasoning != "Let me think" {
+		t.Fatalf("reasoning = %q, want %q", reasoning, "Let me think")
+	}
+	if content != "answer" {
+		t.Fatalf("content = %q, want %q", content, "answer")
+	}
+	if len(deltas) != 1 || deltas[0] != "answer" {
+		t.Fatalf("onDelta should only see content, got %v", deltas)
+	}
+}
+
+// TestAgent_EmptyContentWithReasoningFallsBackInsteadOfBlank is the
+// regression lock for the reported bug: a real turn against
+// nvidia/nemotron-3.5-lightning:free (OpenRouter, free tier) came back with
+// Content empty and real completion_tokens billed — the model spent its
+// whole budget on reasoning and never wrote a final answer. The stored
+// final message must surface the reasoning instead of a silent blank reply.
+func TestAgent_EmptyContentWithReasoningFallsBackInsteadOfBlank(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Defaults()
+	cfg.LLM.Streaming = config.StreamingConfig{Mode: config.StreamingModeOn}
+	usage := &llm.Usage{PromptTokens: 5552, CompletionTokens: 1883, TotalTokens: 7435}
+	prov := &streamingMockProvider{
+		content:   "",
+		reasoning: "The user wants Go and JS versions of the algorithm...",
+		usage:     usage,
+		finish:    "stop",
+	}
+	store := newMockStore()
+	engine := newTestPermsEngine(t)
+	toolsReg := tools.NewDefaultRegistry(engine, "", nil)
+	ag := NewAgent(cfg, store, &streamingMockRegistry{provider: prov}, toolsReg, engine, newTestLogger())
+
+	res, err := ag.ExecuteTurnWithOptions(ctx, "session-1", "dame la versión en Go y JS", TurnOptions{StreamingEnabled: true})
+	if err != nil {
+		t.Fatalf("ExecuteTurnWithOptions: %v", err)
+	}
+	final := res.Messages[len(res.Messages)-1].Content
+	if final == "" {
+		t.Fatal("final message must not be blank when the model billed real completion tokens")
+	}
+	if !strings.Contains(final, prov.reasoning) {
+		t.Fatalf("final message should surface the reasoning text, got %q", final)
+	}
+}

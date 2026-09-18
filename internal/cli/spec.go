@@ -54,6 +54,7 @@ func newSpecCommand() *cobra.Command {
 	cmd.AddCommand(newSpecShowCommand())
 	cmd.AddCommand(newSpecLogCommand())
 	cmd.AddCommand(newSpecDiffCommand())
+	cmd.AddCommand(newSpecValidateCommand())
 	return cmd
 }
 

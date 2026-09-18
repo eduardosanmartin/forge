@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
 
@@ -136,14 +137,20 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 		wantToast  string
 		wantHelp   bool
 		shouldPersist bool
+		// wantNoToast asserts the toast is empty instead of checking
+		// wantToast — used for the rail-toggle cases: the footer's Layout
+		// field already shows "rail on"/"rail off" persistently, so a
+		// toast here would duplicate it on the same frame (the bug fixed
+		// in toggleSidebar).
+		wantNoToast bool
 	}{
-		{"layout toggles rail", "/layout minimal", "", "", "rail", false, true},
-		{"layout args ignored", "/layout bad", "", "", "rail", false, false},
-		{"valid palette", "/palette ember", "", "ember", "palette", false, true},
-		{"invalid palette", "/palette unknown", "", "", "unknown palette", false, false},
-		{"help", "/help", "", "", "", true, false},
-		{"unknown", "/unknown", "", "", "unknown command", false, false},
-		{"bare layout toggles rail", "/layout", "", "", "rail", false, false},
+		{"layout toggles rail", "/layout minimal", "", "", "", false, true, true},
+		{"layout args ignored", "/layout bad", "", "", "", false, false, true},
+		{"valid palette", "/palette ember", "", "ember", "palette", false, true, false},
+		{"invalid palette", "/palette unknown", "", "", "unknown palette", false, false, false},
+		{"help", "/help", "", "", "", true, false, false},
+		{"unknown", "/unknown", "", "", "unknown command", false, false, false},
+		{"bare layout toggles rail", "/layout", "", "", "", false, false, true},
 	}
 
 	for _, tc := range cases {
@@ -162,6 +169,10 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 			if tc.wantHelp {
 				if !mm.IsHelpVisible() {
 					t.Fatal("help should be visible after /help")
+				}
+			} else if tc.wantNoToast {
+				if mm.Toast() != "" {
+					t.Fatalf("toast should be empty (rail state lives in the footer only), got %q", mm.Toast())
 				}
 			} else if tc.wantToast != "" && !strings.Contains(strings.ToLower(mm.Toast()), strings.ToLower(tc.wantToast)) {
 				t.Fatalf("toast %q should contain %q", mm.Toast(), tc.wantToast)
@@ -261,8 +272,13 @@ func TestConfigPersistenceFailureShowsToast(t *testing.T) {
 	m.input.SetValue("/layout minimal")
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
-	if !strings.Contains(mm.Toast(), "disk full") {
-		t.Fatalf("toast should show save error, got %q", mm.Toast())
+	// Errors open the floating error panel (esc to close) instead of the
+	// footer toast — a raw error can be long and unreadable as one line.
+	if !mm.IsMessagePanelVisible() {
+		t.Fatal("save error should open the error panel")
+	}
+	if !strings.Contains(mm.MessagePanelText(), "disk full") {
+		t.Fatalf("error panel should show save error, got %q", mm.MessagePanelText())
 	}
 }
 
@@ -320,6 +336,9 @@ type fakeClient struct {
 	haltCalled    bool
 	haltReason    string
 	haltErr       error
+	haltAllCalled bool
+	haltAllReason string
+	haltAllErr    error
 	resumeCalled  bool
 	resumeErr     error
 	switchModel   string
@@ -334,6 +353,24 @@ type fakeClient struct {
 	skillErr      error
 	pluginCalled  bool
 	skillCalled   bool
+
+	// Fase 4 run panel fakes.
+	runStartRes    *daemon.RunResult
+	runStartErr    error
+	runStartMani   run.Manifest
+	runStatusRes   *daemon.RunResult
+	runStatusErr   error
+	runStatusCalls []string
+	runApproveRes  *daemon.RunResult
+	runApproveErr  error
+	runApproveCall struct {
+		runID    string
+		approved bool
+		called   bool
+	}
+	runCancelRes  *daemon.RunResult
+	runCancelErr  error
+	runCancelCall string
 }
 
 func (f *fakeClient) Status() (*daemon.StatusResult, error) {
@@ -363,6 +400,11 @@ func (f *fakeClient) HaltSession(sessionID, reason string) error {
 	f.haltReason = reason
 	return f.haltErr
 }
+func (f *fakeClient) HaltAll(reason string) error {
+	f.haltAllCalled = true
+	f.haltAllReason = reason
+	return f.haltAllErr
+}
 func (f *fakeClient) ResumeSession(sessionID string) error {
 	f.resumeCalled = true
 	return f.resumeErr
@@ -388,6 +430,24 @@ func (f *fakeClient) SkillList() (*daemon.SkillListResult, error) {
 		return f.skillRes, f.skillErr
 	}
 	return &daemon.SkillListResult{Skills: []daemon.SkillInfoResult{}}, nil
+}
+func (f *fakeClient) RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error) {
+	f.runStartMani = mani
+	return f.runStartRes, f.runStartErr
+}
+func (f *fakeClient) RunStatus(runID string) (*daemon.RunResult, error) {
+	f.runStatusCalls = append(f.runStatusCalls, runID)
+	return f.runStatusRes, f.runStatusErr
+}
+func (f *fakeClient) RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error) {
+	f.runApproveCall.runID = runID
+	f.runApproveCall.approved = approved
+	f.runApproveCall.called = true
+	return f.runApproveRes, f.runApproveErr
+}
+func (f *fakeClient) RunCancel(runID string) (*daemon.RunResult, error) {
+	f.runCancelCall = runID
+	return f.runCancelRes, f.runCancelErr
 }
 func (f *fakeClient) Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error) {
 	if f.eventsErr != nil {

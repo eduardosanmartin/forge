@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/lipgloss/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
@@ -58,6 +59,22 @@ func TestM2_RailOnOffDistinct(t *testing.T) {
 	}
 }
 
+// TestRailVisible_InputSpansFullWidth confirms the input box always spans
+// the full frame width, matching the separator/footer above and below it —
+// not the rail-narrowed transcript width. Regression test: the input used
+// to get sized via effectiveTranscriptWidth() (same narrower width as the
+// transcript column beside the rail), leaving ~33 columns of the input row
+// unrepainted at a typical 80-col terminal — the rail's own background
+// color visibly bled into that gap since nothing else overwrote it.
+func TestRailVisible_InputSpansFullWidth(t *testing.T) {
+	m := newTestModel()
+	m.SetSize(80, 24)
+	m.showSidebar = true
+	if got := lipgloss.Width(m.input.View()); got != m.width {
+		t.Fatalf("input width = %d, want %d (full frame width) with the rail shown", got, m.width)
+	}
+}
+
 func TestM2_CtrlOAndCtrlLToggleRail(t *testing.T) {
 	m := newTestModel()
 	initial := m.ShowSidebar()
@@ -67,8 +84,12 @@ func TestM2_CtrlOAndCtrlLToggleRail(t *testing.T) {
 	if mm.ShowSidebar() == initial {
 		t.Fatalf("ctrl+o should toggle rail")
 	}
-	if !strings.Contains(mm.Toast(), "rail") {
-		t.Fatalf("toast should mention rail, got %q", mm.Toast())
+	// No toast: the footer's Layout field already shows "rail on"/"rail
+	// off" persistently — a toast here would duplicate that same text
+	// right below it on the same frame (the bug this test now guards
+	// against).
+	if mm.Toast() != "" {
+		t.Fatalf("toggling the rail should not set a toast (footer already shows layout state), got %q", mm.Toast())
 	}
 	// ctrl+l alias toggles back
 	model, _ = mm.Update(keyPress("ctrl+l"))
@@ -102,11 +123,13 @@ func TestFooterHeight_NoClippingAtSmallHeight(t *testing.T) {
 		t.Fatalf("footer height %d too small", fh)
 	}
 	// Mirror SetSize accounting: title box + separator + input + measured
-	// footer + 1 toast-appearance headroom (no toast shown). No pending
-	// headroom: the spinner lives inside the footer bar.
-	transH := 20 - titleHeightRows - fh - 1 - 4 - 1
-	if transH < 5 {
-		transH = 5
+	// footer for the CURRENT toast state (no toast-appearance headroom —
+	// View() self-heals this sizing every render, see SetSize's doc
+	// comment). No pending headroom either: the spinner lives inside the
+	// footer bar.
+	transH := 20 - titleHeightRows - fh - 1 - inputAreaHeight
+	if transH < 3 {
+		transH = 3
 	}
 	if m.viewport.Height() != transH {
 		t.Fatalf("transcript height %d want %d (footer %d)", m.viewport.Height(), transH, fh)
@@ -278,7 +301,7 @@ func TestSidecar_MergeOnReload(t *testing.T) {
 	for _, e := range mm.Entries() {
 		if e.Seq == 10 && e.Role == "assistant" {
 			found = true
-			if !strings.Contains(e.Meta, "27.6s") && !strings.Contains(e.Meta, "27600ms") {
+			if !strings.Contains(e.Meta, "27,6s") {
 				t.Fatalf("reloaded entry should contain elapsed from sidecar, got Meta %q", e.Meta)
 			}
 		}
@@ -381,7 +404,7 @@ func TestFooterClickOpensDropdownAndModelPanel(t *testing.T) {
 	m.configPath = cfgPath
 	m.rebuildTranscript()
 	footerH := m.measureFooterHeight(80)
-	footerTop := titleHeightRows + m.viewport.Height() + 1 + 4
+	footerTop := titleHeightRows + m.viewport.Height() + 1 + inputAreaHeight
 	// Click session hotspot (session zone below the copy zone)
 	mouseSession := tea.Mouse{X: 60, Y: footerTop + 1}
 	m.handleMouseClick(mouseSession)
@@ -495,6 +518,55 @@ func TestWorkingMarker_ShowsLiveElapsed(t *testing.T) {
 	}
 }
 
+// TestWorkingMarker_ShowsLiveTokenEstimate confirms the Working marker adds
+// an estimated token count ("7,0s · Nk tokens") once a streaming preview
+// has accumulated some text, and stays elapsed-only when there's no
+// streaming content to estimate from (matches the example in the request:
+// "◌ Working… (7,0s · 1,4k tokens)"). Asserted against the entry's Meta
+// directly rather than the rendered (scroll-windowed) view, which the long
+// streaming content used here would push out of frame.
+func TestWorkingMarker_ShowsLiveTokenEstimate(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-tokens"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Now())
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	// Meta now starts with the send timestamp ("DD/MM HH:MM · ◌ Working…
+	// (7,0s)"), so the marker sits after a prefix instead of at position 0 —
+	// Contains to find the entry, HasSuffix/Contains against the marker
+	// onward instead of an exact/prefix match on the whole Meta.
+	workingMeta := func(mm Model) string {
+		for _, e := range mm.Entries() {
+			if e.Role == "user" && strings.Contains(e.Meta, workingMarker) {
+				return e.Meta
+			}
+		}
+		return ""
+	}
+
+	// No streaming content yet: elapsed alone, same as before this feature.
+	fc.Advance(7000 * time.Millisecond)
+	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
+	mm = model.(Model)
+	if got := workingMeta(mm); !strings.HasSuffix(got, workingMarker+" (7,0s)") {
+		t.Fatalf("no streaming content yet: meta = %q, want suffix %q", got, workingMarker+" (7,0s)")
+	}
+
+	// A streaming preview lands with some accumulated text.
+	mm.entries = append(mm.entries, components.Entry{Role: "assistant", Content: strings.Repeat("hola ", 100), Streaming: true})
+	model, _ = mm.Update(spinner.TickMsg{Time: fc.Now(), ID: mm.spinnerModel.ID()})
+	mm = model.(Model)
+	got := workingMeta(mm)
+	if !strings.Contains(got, workingMarker+" (7,0s · ") || !strings.HasSuffix(got, "tokens)") {
+		t.Fatalf("streaming content present: meta = %q, want an estimated token count next to elapsed", got)
+	}
+}
+
 // ---------- 8. Retest-4: title bar box, selection default, Working marker ----------
 
 func TestTitleBarBoxedLikeFooter(t *testing.T) {
@@ -515,6 +587,131 @@ func TestTitleBarBoxedLikeFooter(t *testing.T) {
 	}
 }
 
+// TestWorkingMarker_TimestampAppearsImmediatelyOnSend is the regression lock
+// for a real gap reported live: the timestamp only appeared once the turn
+// finished (or later, once tokens were counted) — not right when the
+// message was actually sent. The echo entry's Meta must carry the send
+// timestamp from the very first render, before any tick or response.
+func TestWorkingMarker_TimestampAppearsImmediatelyOnSend(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-immediate"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 16, 53, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+
+	// No advance, no tick, no response yet — this is the state right after
+	// the enter keypress that sent the message.
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	found := false
+	for _, e := range mm.Entries() {
+		if e.Role == "user" && e.Local {
+			if e.Meta != "17/09 16:53 · "+workingMarker {
+				t.Fatalf("echo Meta right after send = %q, want %q", e.Meta, "17/09 16:53 · "+workingMarker)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a local user echo entry, entries = %+v", mm.Entries())
+	}
+}
+
+// TestWorkingMarker_UserMessageGetsTimestampPrefix is the regression lock
+// for a real gap reported live: the user's own message meta ("elapsed ·
+// tokens") had no timestamp, unlike the assistant summary right below it.
+// Uses a fixed fake-clock start time (not time.Now()) so the exact
+// "DD/MM HH:MM" prefix can be asserted precisely.
+func TestWorkingMarker_UserMessageGetsTimestampPrefix(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-stamp"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 15, 19, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("hola")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	fc.Advance(9 * time.Second)
+	res := &daemon.ExecuteTurnResult{
+		Messages: []daemon.MessageResult{
+			{Seq: 1, Role: "user", Content: "hola"},
+			{Seq: 2, Role: "assistant", Content: "hola!"},
+		},
+		Usage: &daemon.UsageResult{TotalTokens: 8938},
+	}
+	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
+	mm = model.(Model)
+
+	found := false
+	for _, e := range mm.Entries() {
+		if e.Role == "user" && e.Meta == "17/09 15:19 · 9,0s · 8,938 tokens" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the user message meta to be exactly %q, entries = %+v",
+			"17/09 15:19 · 9,0s · 8,938 tokens", mm.Entries())
+	}
+}
+
+// TestWorkingMarker_LongTurn_AssistantTimestampDiffersFromUser is the
+// regression lock for a real bug reported live: a ~4m44s turn showed the
+// SAME "17/09 16:27" timestamp on both the user message and the assistant
+// summary below it, reading as if they happened simultaneously — and the
+// assistant's elapsed showed as "284.6s" instead of "4m44s". The assistant
+// line must stamp ARRIVAL time (send + elapsed), not send time, and use the
+// same "XmYYs" formatting as the user line.
+func TestWorkingMarker_LongTurn_AssistantTimestampDiffersFromUser(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessionID = "sess-long"
+	m.SetSize(80, 24)
+	fc := newFakeClock(time.Date(2026, 9, 17, 16, 27, 0, 0, time.UTC))
+	m.SetClock(fc)
+	m.input.SetValue("tarea larga")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+
+	fc.Advance(4*time.Minute + 44*time.Second) // 284s
+	res := &daemon.ExecuteTurnResult{
+		Model: "qwen3:1.7b",
+		Messages: []daemon.MessageResult{
+			{Seq: 1, Role: "user", Content: "tarea larga"},
+			{Seq: 2, Role: "assistant", Content: "listo"},
+		},
+		Usage: &daemon.UsageResult{TotalTokens: 100},
+	}
+	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
+	mm = model.(Model)
+
+	var userMeta, assistantMeta string
+	for _, e := range mm.Entries() {
+		if e.Role == "user" {
+			userMeta = e.Meta
+		}
+		if e.Role == "assistant" && e.Summary {
+			assistantMeta = e.Meta
+		}
+	}
+	if !strings.Contains(userMeta, "4m44s") {
+		t.Fatalf("user meta should show 4m44s (not 284.x s), got %q", userMeta)
+	}
+	if !strings.Contains(assistantMeta, "4m44s") {
+		t.Fatalf("assistant summary should show 4m44s (not 284.6s), got %q", assistantMeta)
+	}
+	if !strings.HasPrefix(userMeta, "17/09 16:27") {
+		t.Fatalf("user timestamp should be send time 16:27, got %q", userMeta)
+	}
+	if !strings.HasPrefix(assistantMeta, "17/09 16:31") {
+		t.Fatalf("assistant timestamp should be arrival time 16:31 (16:27 + 4m44s), not the send time, got %q", assistantMeta)
+	}
+}
+
 func TestWorkingMarker_SendAndClear(t *testing.T) {
 	m := newTestModel()
 	m.SetClient(&fakeClient{})
@@ -525,10 +722,11 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 	m.input.SetValue("list the files")
 	model, _ := m.Update(keyPress("enter"))
 	mm := model.(Model)
-	// Echo carries the Working marker while the turn is in flight.
+	// Echo carries the Working marker (now prefixed with the send timestamp)
+	// while the turn is in flight.
 	found := false
 	for _, e := range mm.Entries() {
-		if e.Role == "user" && e.Local && e.Meta == workingMarker {
+		if e.Role == "user" && e.Local && strings.Contains(e.Meta, workingMarker) {
 			found = true
 		}
 	}
@@ -539,7 +737,9 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 		t.Fatal("view should show Working marker next to the sent message")
 	}
 	// Turn completes after 33,5s with 1345 tokens: the user message keeps
-	// "33,5s :: 1,345 tokens" instead of the marker.
+	// "33,5s · 1,345 tokens" instead of the marker; the final assistant
+	// reply carries the turn summary "elapsed · N tokens" (no model here —
+	// m.currentModel is unset in this test).
 	fc.Advance(33500 * time.Millisecond)
 	res := &daemon.ExecuteTurnResult{
 		Messages: []daemon.MessageResult{
@@ -551,19 +751,29 @@ func TestWorkingMarker_SendAndClear(t *testing.T) {
 	model, _ = mm.Update(executeTurnMsg{res: res, err: nil})
 	mm = model.(Model)
 	foundStats := false
+	foundSummary := false
 	for _, e := range mm.Entries() {
 		if e.Meta == workingMarker {
 			t.Fatalf("Working marker should be finalized after turn, entries = %+v", mm.Entries())
 		}
-		if e.Role == "user" && e.Meta == "33,5s :: 1,345 tokens" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "33,5s · 1,345 tokens") {
 			foundStats = true
 		}
-		if e.Role == "assistant" && e.Meta == "tokens 1345 · 33,5s" && !e.Summary {
-			t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
+		// Meta is now prefixed with a "DD/MM HH:MM" timestamp (when the turn
+		// was sent) ahead of "elapsed · tokens" — not asserted exactly since
+		// it comes from time.Now() at test-run time; suffix match is enough.
+		if e.Role == "assistant" && strings.HasSuffix(e.Meta, "33,5s · 1,3k tokens") {
+			if !e.Summary {
+				t.Fatalf("turn summary meta should be flagged Summary, entries = %+v", mm.Entries())
+			}
+			foundSummary = true
 		}
 	}
 	if !foundStats {
 		t.Fatalf("user message should keep turn stats, entries = %+v", mm.Entries())
+	}
+	if !foundSummary {
+		t.Fatalf("assistant reply should carry the turn summary, entries = %+v", mm.Entries())
 	}
 }
 
@@ -597,7 +807,7 @@ func TestWorkingMarker_ErrorKeepsElapsed(t *testing.T) {
 		if e.Meta == workingMarker {
 			t.Fatal("Working marker should be finalized on turn error")
 		}
-		if e.Role == "user" && e.Meta == "12,1s" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "12,1s") {
 			found = true
 		}
 	}
@@ -621,7 +831,7 @@ func TestWorkingMarker_HaltKeepsElapsed(t *testing.T) {	m := newTestModel()
 		if e.Meta == workingMarker {
 			t.Fatal("Working marker should be finalized on halt")
 		}
-		if e.Role == "user" && e.Meta == "8,0s" {
+		if e.Role == "user" && strings.HasSuffix(e.Meta, "8,0s") {
 			found = true
 		}
 	}
@@ -643,14 +853,19 @@ func TestWatchdog_HaltsGhostTurn(t *testing.T) {
 	m.turnStart = fclk.Now()
 	m.lastDaemonMsg = fclk.Now()
 	m.entries = []components.Entry{{Role: "user", Content: "hi"}}
-	fclk.Advance(241 * time.Second)
+	fclk.Advance(watchdogSilence + time.Second)
 	model, cmd := m.Update(spinner.TickMsg{Time: fclk.Now(), ID: m.spinnerModel.ID()})
 	mm := model.(Model)
 	if cmd == nil {
-		t.Fatal("watchdog should fire ghost protocol after 4m of silence")
+		t.Fatal("watchdog should fire ghost protocol after watchdogSilence")
 	}
-	if !strings.Contains(mm.Toast(), "ghost") {
-		t.Fatalf("toast should name the ghost turn, got %q", mm.Toast())
+	// A real ghost-turn halt opens the message panel (item 11), not a
+	// toast that can be missed below the input.
+	if !mm.IsMessagePanelVisible() || mm.MessagePanelKind() != "error" {
+		t.Fatalf("expected an error message panel naming the ghost turn, visible=%v kind=%q", mm.IsMessagePanelVisible(), mm.MessagePanelKind())
+	}
+	if !strings.Contains(mm.MessagePanelText(), "ghost") {
+		t.Fatalf("message panel should name the ghost turn, got %q", mm.MessagePanelText())
 	}
 	// Execute the protocol like tea does: halt + refetch, then feed back.
 	var runCmd func(c tea.Cmd)
@@ -693,11 +908,13 @@ func TestWatchdog_SuppressedWhileToolRuns(t *testing.T) {
 	m.turnStart = fclk.Now()
 	m.lastDaemonMsg = fclk.Now()
 	m.pendingTools["call-1"] = pendingTool{name: "shell_exec"}
-	fclk.Advance(600 * time.Second)
+	// Well past watchdogSilence: proves suppression actually matters here,
+	// not just that this much time happens to be under the threshold.
+	fclk.Advance(watchdogSilence * 2)
 	model, _ := m.Update(spinner.TickMsg{Time: fclk.Now(), ID: m.spinnerModel.ID()})
 	mm := model.(Model)
-	if strings.Contains(mm.Toast(), "ghost") {
-		t.Fatalf("watchdog must not halt a turn with a running tool, toast %q", mm.Toast())
+	if mm.IsMessagePanelVisible() {
+		t.Fatalf("watchdog must not halt a turn with a running tool, message panel text %q", mm.MessagePanelText())
 	}
 	if !mm.IsSpinner() {
 		t.Fatal("spinner must survive while a tool runs")
@@ -787,6 +1004,45 @@ func TestSlashSession_OpensPanelNavigateSelect(t *testing.T) {
 	}
 }
 
+// TestSlashSession_NKeyStartsNewSession is the regression lock for a real
+// gap reported live: before this, the only way to start a fresh session was
+// forge chat's REPL /new command — forge tui had no way to do it once past
+// startup (Ctrl+G only ever let you switch to an EXISTING session).
+func TestSlashSession_NKeyStartsNewSession(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	m.sessions = []daemon.SessionResult{{ID: "sess-aaa11111"}}
+	m.sessionID = "sess-aaa11111"
+	m.entries = []components.Entry{{Role: "user", Content: "old conversation"}}
+	m.SetSize(80, 24)
+
+	m.input.SetValue("/session")
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+	if !mm.IsSessionsDropdownVisible() {
+		t.Fatal("/session should open the sessions panel")
+	}
+
+	model, cmd := mm.Update(keyPress("n"))
+	mm = model.(Model)
+	if mm.IsSessionsDropdownVisible() {
+		t.Fatal("'n' should close the sessions panel")
+	}
+	if cmd == nil {
+		t.Fatal("'n' should dispatch session creation")
+	}
+	msg := cmd()
+	model, _ = mm.Update(msg)
+	mm = model.(Model)
+
+	if mm.SessionID() != "sess-fake" {
+		t.Fatalf("expected the newly created session id, got %q", mm.SessionID())
+	}
+	if len(mm.entries) != 0 {
+		t.Fatalf("a new session must start with an empty transcript, got %d entries", len(mm.entries))
+	}
+}
+
 // ---------- 12. Copy last response (/copy + footer hotspot) ----------
 
 func TestSlashCopy_CopiesLastResponse(t *testing.T) {
@@ -846,7 +1102,7 @@ func TestFooterClickCopy(t *testing.T) {
 	old := copyText
 	copyText = func(s string) error { got = s; return nil }
 	defer func() { copyText = old }()
-	footerTop := titleHeightRows + m.viewport.Height() + 1 + 4
+	footerTop := titleHeightRows + m.viewport.Height() + 1 + inputAreaHeight
 	m.handleMouseClick(tea.Mouse{X: 75, Y: footerTop + 1})
 	if got != "copy me" {
 		t.Fatalf("footer [copiar] click should copy last response, got %q", got)
@@ -896,7 +1152,10 @@ func TestOverlay_SessionsDropdownInFrame(t *testing.T) {
 func TestOverlay_ModelPanelInFrame(t *testing.T) {
 	m := newTestModel()
 	m.SetSize(80, 24)
-	m.modelPanelList = []string{"m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"}
+	m.modelPanelList = []modelPanelEntry{
+		{Provider: "p", Model: "m1"}, {Provider: "p", Model: "m2"}, {Provider: "p", Model: "m3"}, {Provider: "p", Model: "m4"},
+		{Provider: "p", Model: "m5"}, {Provider: "p", Model: "m6"}, {Provider: "p", Model: "m7"}, {Provider: "p", Model: "m8"},
+	}
 	m.modelPanelIdx = 7
 	m.modelPanelVisible = true
 	m.rebuildTranscript()

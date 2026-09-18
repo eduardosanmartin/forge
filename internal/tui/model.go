@@ -3,9 +3,11 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 
 	"github.com/eduardosanmartin/forge/internal/clipboard"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 	"github.com/eduardosanmartin/forge/internal/version"
 )
@@ -40,6 +43,19 @@ var layoutOrder = []string{LayoutHybrid, LayoutSession, LayoutMinimal}
 
 // M2 rail constants
 const railWidth = 32 // ~250px at ~8px per cell; permanent rail width when visible
+
+// escDoubleTapWindow is the max gap between two CONSECUTIVE esc presses
+// (no other key in between — see lastEscAt) that counts as the emergency
+// stop gesture. Short enough that a deliberate double-tap doesn't collide
+// with someone pressing esc, thinking, then pressing esc again to close a
+// second unrelated panel a while later.
+const escDoubleTapWindow = 600 * time.Millisecond
+
+// inputAreaHeight is the input textarea's row count (border-inclusive rows
+// of the box, e.g. rows 17-19 of a full frame dump: the typed-text row plus
+// 2 blank rows below it for wrapping/multi-line input). Was 4; reduced by
+// one row on request, reclaiming that row for the transcript.
+const inputAreaHeight = 3
 
 // TUI version for title bar — from internal/version.Version; fallback "dev" if empty or "0.0.0-dev".
 func tuiVersion() string {
@@ -98,7 +114,7 @@ type Model struct {
 	currentModel string    // from ExecuteTurnResult.Model (when present)
 	turnStart    time.Time // clock time when turn was sent
 	// pendingUserText snapshots the sent text so the turn's final stats
-	// ("34,4s :: 1,345 tokens") land on its message at turn end even if
+	// ("34,4s · 1,345 tokens") land on its message at turn end even if
 	// live events already swapped the local echo for the confirmed copy.
 	pendingUserText string
 	// lastWorkingElapsed is the last stamped elapsed second ("34,4s");
@@ -124,17 +140,50 @@ type Model struct {
 	sessionsDropdownIdx     int
 	modelPanelVisible       bool
 	modelPanelIdx           int
-	modelPanelList          []string
+	modelPanelList          []modelPanelEntry
 	turnCount               int
 	latencyTotalMs          int64
 	latencyCount            int
 	lastError               string
 	plugins                 []daemon.PluginInfoResult
 	skills                  []daemon.SkillInfoResult
+	// msgPanelVisible/msgPanelText/msgPanelKind back the floating message
+	// panel (see showError/showSuccess): reused for both action failures
+	// (kind "error", red border) and action confirmations (kind "success",
+	// green border) — a raw RPC error, or a clear confirmation, is worth
+	// more than the footer's single toast line can hold or draw attention
+	// to. lastError above still gets the short/truncated copy for the
+	// rail's Turn Stats card.
+	msgPanelVisible bool
+	msgPanelText    string
+	msgPanelKind    messagePanelKind
+	// lastEscAt backs the double-Esc emergency stop (see keyMsg handling):
+	// two esc presses within escDoubleTapWindow halt every session, not
+	// just the current one.
+	lastEscAt time.Time
+	// sentHistory/historyIdx/historyDraft back up/down message-history
+	// recall (item 20), like a shell: up/down move within the input's own
+	// text first — see the "up"/"down" handling right before the textarea
+	// delegation — and only once the cursor is already at the input's
+	// first/last line do they walk sentHistory instead. historyIdx -1
+	// means "not currently browsing" (editing fresh, or nothing typed
+	// yet); historyDraft holds whatever was being typed before the first
+	// "up" so pressing "down" back past the newest history entry restores
+	// it instead of leaving the input blank.
+	sentHistory  []string
+	historyIdx   int
+	historyDraft string
 
 	// Deprecated: retained for test compatibility; proxies to sessionsDropdown
 	sessionFocus    bool
 	sessionFocusIdx int
+
+	// explicitSessionCreate distinguishes a user-triggered "n" (new session)
+	// from the automatic session created once at startup (see the
+	// listSessionsMsg handler) — only the former should toast, or every
+	// launch of `forge tui` would show a "nueva sesión → ..." toast the
+	// user never asked for.
+	explicitSessionCreate bool
 
 	// TUI-7: M2 rail, mouse capture, rail panels, sidecar duration
 	mouseCapture bool   // true = MouseModeCellMotion, false = off (selection free)
@@ -144,6 +193,20 @@ type Model struct {
 	// needs no reload on session switch.
 	sidecar     map[string]int64 // map[compositeKey]durationMs
 	sidecarPath string           // .forge/tui-state.json
+
+	// TUI-8 (Fase 4): daemon-hosted manifest run observation panel. runID/
+	// runResult track whichever run this TUI is currently watching (started
+	// locally via /run, or picked up from an incoming run.checkpoint.event
+	// for a run this client didn't start itself). runPanelVisible is purely
+	// a display toggle — closing it (esc) does not stop tracking, so a
+	// later checkpoint event, or ctrl+4, can still reopen it on the same
+	// run. runPollPending guards against scheduling more than one status
+	// poll tick in flight, same shape as deltaPending.
+	runPanelVisible bool
+	runID           string
+	runResult       *daemon.RunResult
+	runErr          string
+	runPollPending  bool
 }
 
 type pendingTool struct {
@@ -167,6 +230,7 @@ var allSlashSuggestions = []slashSuggestion{
 	{"/resume", "resume current session"},
 	{"/model", "switch model"},
 	{"/mark", "mark session as success"},
+	{"/run", "start a manifest run (/run <manifest.json>)"},
 }
 
 // TUIClient abstracts daemon RPC for the model.
@@ -177,12 +241,20 @@ type TUIClient interface {
 	ExecuteTurn(sessionID, message string) (*daemon.ExecuteTurnResult, error)
 	GetMessagesSince(sessionID string, sinceSeq int) (*daemon.GetMessagesResult, error)
 	HaltSession(sessionID, reason string) error
+	HaltAll(reason string) error
 	ResumeSession(sessionID string) error
 	SwitchModel(sessionID, model string) error
 	MarkSuccess(sessionID string) error
 	Events(ctx context.Context) (<-chan daemon.JSONRPCNotification, error)
 	PluginList() (*daemon.PluginListResult, error)
 	SkillList() (*daemon.SkillListResult, error)
+	// Run.* methods (hojaDeRuta-multiagente.md Fase 4): thin wrappers over
+	// the RPCs added in Fase 3 — see ClientAdapter for the actual call
+	// shapes. stateDir "" lets the daemon apply its own default (".").
+	RunStart(mani run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error)
+	RunStatus(runID string) (*daemon.RunResult, error)
+	RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error)
+	RunCancel(runID string) (*daemon.RunResult, error)
 }
 
 // Messages for async daemon responses.
@@ -194,6 +266,7 @@ type messagesSinceMsg struct{ res *daemon.GetMessagesResult; err error }
 
 // TUI-2 daemon control result messages.
 type haltResultMsg struct{ err error }
+type haltAllResultMsg struct{ err error }
 type resumeResultMsg struct{ err error }
 type switchModelResultMsg struct {
 	model string
@@ -202,6 +275,29 @@ type switchModelResultMsg struct {
 type markSuccessResultMsg struct{ err error }
 type pluginListMsg struct{ res *daemon.PluginListResult; err error }
 type skillListMsg struct{ res *daemon.SkillListResult; err error }
+
+// Run panel messages (Fase 4). runStatusTickMsg carries the run_id it was
+// scheduled for so a stale in-flight tick from a previously tracked run
+// (e.g. the user started a second /run before the first tick fired) is
+// dropped instead of clobbering the newer run's state — same guard shape
+// as deltaPending/scheduleDeltaRebuild uses for transcript rebuilds.
+type runStartMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runStatusMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runApproveMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runCancelMsg struct {
+	res *daemon.RunResult
+	err error
+}
+type runStatusTickMsg struct{ runID string }
 
 // Event streaming messages.
 type daemonEventMsg struct{ notif daemon.JSONRPCNotification }
@@ -241,6 +337,7 @@ func NewModel(cfg TUIConfig, pal Palette, palName, configPath string, client TUI
 		// shows "mouse off" while capture is off.
 		mouseCapture: true,
 		sidecar:      make(map[string]int64),
+		historyIdx:   -1,
 	}
 	if configPath != "" {
 		m.sidecarPath = filepath.Join(filepath.Dir(configPath), "tui-state.json")
@@ -289,6 +386,9 @@ func (m Model) ShowSidebar() bool               { return m.showSidebar }
 func (m Model) PaletteName() string             { return m.paletteName }
 func (m Model) SessionID() string               { return m.sessionID }
 func (m Model) Toast() string                   { return m.toast }
+func (m Model) IsMessagePanelVisible() bool     { return m.msgPanelVisible }
+func (m Model) MessagePanelText() string        { return m.msgPanelText }
+func (m Model) MessagePanelKind() string        { return string(m.msgPanelKind) }
 func (m Model) Entries() []components.Entry     { return m.entries }
 func (m Model) TotalTokens() int                { return m.totalTokens }
 func (m Model) MarkedIDs() map[string]bool      { return m.markedIDs }
@@ -314,7 +414,17 @@ func (m Model) ViewportAtBottom() bool          { return m.viewport.AtBottom() }
 func (m Model) IsSessionsDropdownVisible() bool { return m.sessionsDropdownVisible }
 func (m Model) SessionsDropdownIdx() int        { return m.sessionsDropdownIdx }
 func (m Model) IsModelPanelVisible() bool       { return m.modelPanelVisible }
-func (m Model) ModelPanelList() []string        { return m.modelPanelList }
+
+// ModelPanelList returns the /model panel's entries as qualified
+// "provider/model" strings (test accessor) — matching exactly what a
+// selection actually submits (see the "enter" key handling).
+func (m Model) ModelPanelList() []string {
+	out := make([]string, len(m.modelPanelList))
+	for i, e := range m.modelPanelList {
+		out[i] = e.Spec()
+	}
+	return out
+}
 func (m Model) ModelPanelIdx() int              { return m.modelPanelIdx }
 func (m Model) TurnCount() int                  { return m.turnCount }
 func (m Model) LastError() string               { return m.lastError }
@@ -374,34 +484,37 @@ func (m Model) IsRailVisible() bool  { return m.showSidebar }
 //	                content, bottom border)
 //	transcript    remainder (this value)
 //	separator     1
-//	input         4 (+ suggestion box lines while suggestions are visible,
-//	                + 1 per inline overlay hint line: sessions dropdown,
-//	                model select)
-//	footer        lipgloss.Height of the rendered footer (the footer content
-//	                line and toast line are hard-truncated to the width so the
-//	                measurement can never go stale via wrapping) + 1 headroom
-//	                row while no toast is shown (a toast renders one extra line
-//	                above the footer bar and can appear at runtime without a
-//	                WindowSizeMsg)
+//	input         inputAreaHeight (+ suggestion box lines while suggestions
+//	                are visible, + 1 per inline overlay hint line: sessions
+//	                dropdown, model select)
+//	footer        lipgloss.Height of the rendered footer for the CURRENT
+//	                m.toast (the footer content line and toast line are
+//	                hard-truncated to the width so the measurement can never
+//	                go stale via wrapping) — no extra headroom row: View()
+//	                calls relayout() on every render (see View()'s first
+//	                line), so this is always recomputed against the toast
+//	                that is actually about to be drawn, never a stale or
+//	                merely-anticipated one. A prior version reserved a
+//	                permanent +1 row "in case a toast appears without a
+//	                WindowSizeMsg" — since every render now self-heals this
+//	                sizing, that reservation only produced a permanently
+//	                blank row below the footer while idle (the common case)
+//	                and has been removed.
 //
 // The animated spinner lives inside the footer bar, so no headroom row is
 // reserved for it; the pending message carries the static Working marker.
 //
 // Overlay toggles that change the input-area height (suggestions, sessions
-// dropdown, model panel) call relayout() so the footer's top position stays
-// pinned to (height - footerHeight) instead of drifting off-screen. Known
-// transient overflow outside this guarantee: none in the base frame; the
-// floating overlays (/help, dropdown list, model panel, rail panels) are
+// dropdown, model panel) also still call relayout() directly for the same
+// self-healing reason (harmless, if now redundant with View()'s own call).
+// Floating overlays (/help, dropdown list, model panel, rail panels) are
 // marker-stacked below the frame for TTY-free test determinism, matching the
 // documented TUI-4..6 rendering approach.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	footerH := m.measureFooterHeight(w)
-	if m.toast == "" {
-		footerH++ // toast appearance headroom (see comment above)
-	}
-	inputH := 4
+	inputH := inputAreaHeight
 	if m.suggestionsVisible && len(m.suggestions) > 0 {
 		if sugg := m.renderSuggestions(); sugg != "" {
 			inputH += lipgloss.Height(sugg) + 1 // suggestion box + join line
@@ -420,7 +533,14 @@ func (m *Model) SetSize(w, h int) {
 	tw := m.effectiveTranscriptWidth()
 	m.viewport.SetWidth(tw)
 	m.viewport.SetHeight(transH)
-	m.input.SetSize(tw, 4)
+	// Input spans the FULL frame width (w), like the separator and footer
+	// below/above it — it has no side-by-side rail the way the transcript
+	// does, so it must NOT use tw (the rail-narrowed transcript width).
+	// Bug found live: with the rail shown, tw is ~33 cols short of w at a
+	// typical 80-col terminal, and those columns went unrepainted by the
+	// (too-narrow) input row, leaving the rail's own background color
+	// visibly bleeding into part of the input area below it.
+	m.input.SetSize(w, inputAreaHeight)
 	// Help overlay should stay within terminal width with padding
 	hw := w - 4
 	if hw < 40 {
@@ -467,6 +587,7 @@ func (m Model) measureFooterHeight(w int) int {
 		DaemonErr:     m.daemonErr,
 		ShowSpinner:   m.spinner,
 		SpinnerView:   m.spinnerModel.View(),
+		WorkingStats:  m.lastWorkingElapsed,
 		Layout:        m.footerLayoutLabel(),
 		ModelName:     m.currentModel,
 		Tokens:        m.totalTokens,
@@ -488,11 +609,13 @@ func (m Model) footerLayoutLabel() string {
 }
 
 // renderTitleBar renders the M2 full-width title bar: "forge <tui-version> ·
-// daemon <daemon-version>" left, cwd right. Rendered as a bordered box in the
-// same style as the footer bar (NormalBorder + BGElevated) so the version is
-// always visible as top chrome. The box is EXACTLY 3 rows (top border,
-// content, bottom border) — SetSize and handleMouseClick account for
-// titleHeightRows, and the cwd is hard-truncated so the content never wraps.
+// daemon <daemon-version>". Rendered as a bordered box in the same style as
+// the footer bar (NormalBorder + BGElevated) so the version is always
+// visible as top chrome. The box is EXACTLY 3 rows (top border, content,
+// bottom border) — SetSize and handleMouseClick account for titleHeightRows.
+// cwd is deliberately NOT shown here: components.FooterModel already
+// renders it on the footer's left side, and repeating it here was pure
+// duplication (reported live — the footer already has the same data).
 func (m Model) renderTitleBar() string {
 	ver := tuiVersion()
 	daemonVer := m.daemonVers
@@ -500,32 +623,17 @@ func (m Model) renderTitleBar() string {
 		daemonVer = "dev"
 	}
 	left := fmt.Sprintf("forge %s · daemon %s", ver, daemonVer)
-	right := m.cwd
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
-	leftLen := lipgloss.Width(left)
-	if gap := width - leftLen - lipgloss.Width(right) - 2; gap < 1 || lipgloss.Width(right) > width-leftLen-2 {
-		// cwd does not fit next to the version block: truncate it to what remains
-		avail := width - leftLen - 2
-		if avail < 1 {
-			avail = 1
-		}
-		right = ansi.Truncate(right, avail, "…")
-	}
-	gap := width - leftLen - lipgloss.Width(right) - 2
-	if gap < 1 {
-		gap = 1
-	}
-	bar := left + strings.Repeat(" ", gap) + right
 	// Box Width includes the borders: cap the inner bar to the content area
 	// (width-2) so it can never wrap to a second row and break the frame.
 	inner := width - 2
 	if inner < 1 {
 		inner = 1
 	}
-	bar = ansi.Truncate(bar, inner, "")
+	bar := ansi.Truncate(left, inner, "…")
 	content := lipgloss.NewStyle().
 		Foreground(lipgloss.Color(m.palette.Text)).
 		Render(bar)
@@ -673,6 +781,20 @@ func (m Model) cmdHalt() tea.Cmd {
 	}
 }
 
+// cmdHaltAll triggers the daemon's global emergency stop (RF-4.8,
+// emergency.halt_all): every session's in-flight turn is cancelled, not
+// just the current one. Wired to a double-Esc press — see the
+// tea.KeyPressMsg handling and lastEscAt.
+func (m Model) cmdHaltAll() tea.Cmd {
+	if m.client == nil {
+		return func() tea.Msg { return haltAllResultMsg{err: fmt.Errorf("not connected")} }
+	}
+	return func() tea.Msg {
+		err := m.client.HaltAll("emergency stop (double esc, TUI)")
+		return haltAllResultMsg{err: err}
+	}
+}
+
 func (m Model) cmdResume() tea.Cmd {
 	if m.client == nil {
 		return func() tea.Msg { return resumeResultMsg{err: fmt.Errorf("not connected")} }
@@ -724,6 +846,75 @@ func (m Model) cmdRefreshSkills() tea.Cmd {
 		res, err := m.client.SkillList()
 		return skillListMsg{res: res, err: err}
 	}
+}
+
+// cmdRunStart parses manifestPath locally (run.ParseFile — same loader the
+// CLI's `forge run` uses, resolving spec_ref and validating before anything
+// goes over the wire) and sends the parsed manifest as content to run.start,
+// per the Fase 0 flag-mapping decision documented on RunStartParams: the
+// daemon never reads the client's filesystem.
+func (m Model) cmdRunStart(manifestPath string) tea.Cmd {
+	if m.client == nil {
+		return func() tea.Msg { return runStartMsg{err: fmt.Errorf("not connected")} }
+	}
+	mani, err := run.ParseFile(manifestPath)
+	if err != nil {
+		return func() tea.Msg { return runStartMsg{err: err} }
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunStart(*mani, "", false)
+		return runStartMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunStatus(runID string) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunStatus(runID)
+		return runStatusMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunApproveCheckpoint(runID string, approved bool) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunApproveCheckpoint(runID, approved)
+		return runApproveMsg{res: res, err: err}
+	}
+}
+
+func (m Model) cmdRunCancel(runID string) tea.Cmd {
+	if m.client == nil || runID == "" {
+		return nil
+	}
+	client := m.client
+	return func() tea.Msg {
+		res, err := client.RunCancel(runID)
+		return runCancelMsg{res: res, err: err}
+	}
+}
+
+// scheduleRunStatusPoll arms a single 1s status-poll tick for runID, guarded
+// by runPollPending so overlapping ticks never stack (mirrors
+// scheduleDeltaRebuild's deltaPending guard). Call this whenever runResult
+// enters or stays in a state that can still change on its own — i.e.
+// RunRunning; a paused-at-checkpoint or terminal run has nothing to poll
+// for until a local action (approve/decline/cancel) changes it.
+func (m *Model) scheduleRunStatusPoll(runID string) tea.Cmd {
+	if m.runPollPending || runID == "" {
+		return nil
+	}
+	m.runPollPending = true
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return runStatusTickMsg{runID: runID}
+	})
 }
 
 func (m Model) cmdSubscribeEvents() tea.Cmd {
@@ -867,6 +1058,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionID = msg.res.ID
 			// refresh sessions list
 			m.sessions = append(m.sessions, *msg.res)
+			// A brand-new session always starts with an empty transcript.
+			// At startup m.entries is already nil (no-op here); triggered
+			// on demand (the sessions dropdown's "n" key) there's a real
+			// prior conversation on screen that must clear, same as
+			// switching to an existing session does.
+			m.lastSeq = 0
+			m.entries = nil
+			m.pendingUserText = ""
+			m.rebuildTranscriptForceBottom()
+			if m.explicitSessionCreate {
+				m.toast = fmt.Sprintf("nueva sesión → %s", msg.res.ID[:8])
+				m.explicitSessionCreate = false
+			}
 		}
 		// Ensure we are subscribed after session creation if not already.
 		if m.eventsCh == nil {
@@ -891,12 +1095,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.latencyCount++
 				}
 			}
-		m.lastError = truncateError(msg.err.Error(), 80)
 		// Turn ended in error: keep the elapsed on the pending message
 		// (no token count is known); without a clock just clear the marker.
 		meta := ""
 		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
 		}
 		if m.finalizeWorkingMarkers(meta) {
 			m.rebuildTranscript()
@@ -914,7 +1117,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.rebuildTranscript()
 			}
-			m.toast = msg.err.Error()
+			m.showError(msg.err)
 			return m, nil
 		}
 		if msg.res != nil {
@@ -927,13 +1130,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Compute CLIENT-side elapsed from send to arrival using injected Clock.
 			elapsedStr := ""
 			var durationMs int64 = -1
+			var turnElapsed time.Duration
 			if !m.turnStart.IsZero() && m.clock != nil {
-				elapsed := m.clock.Now().Sub(m.turnStart)
-				if elapsed < 0 {
-					elapsed = 0
+				turnElapsed = m.clock.Now().Sub(m.turnStart)
+				if turnElapsed < 0 {
+					turnElapsed = 0
 				}
-				durationMs = elapsed.Milliseconds()
-				elapsedStr = formatDurationMs(durationMs)
+				durationMs = turnElapsed.Milliseconds()
+				// formatWorkingElapsed, not formatDurationMs: same "0,3s" /
+				// "4m44s" shape as the user message's own elapsed line right
+				// above this one — formatDurationMs's raw "%.1fs" (e.g.
+				// "284.6s" for what should read "4m44s") read as a different,
+				// inconsistent unit next to it.
+				elapsedStr = formatWorkingElapsed(turnElapsed)
 			}
 			// Turn stats: count and latency
 			m.turnCount++
@@ -968,9 +1177,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
-		// Turn summary on the FINAL assistant entry: "tokens T · model ·
-		// elapsed" in dim. Intermediate entries keep their per-call meta;
-		// the last reply carries the canonical turn totals.
+		// Turn summary on the FINAL assistant entry: "model · elapsed ·
+		// N tokens" in dim (e.g. "qwen2.5-coder:1.5b · 29.4s · 1,4k
+		// tokens"). Intermediate entries keep their per-call meta; the
+		// last reply carries the canonical turn totals.
 		turnTokens := 0
 		if msg.res.Usage != nil {
 			turnTokens = msg.res.Usage.TotalTokens
@@ -982,14 +1192,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		summaryParts := []string{}
-		if turnTokens > 0 {
-			summaryParts = append(summaryParts, fmt.Sprintf("tokens %d", turnTokens))
+		// Timestamp prefix: when the turn FINISHED (send time + elapsed),
+		// not when it was sent — using send time here made this line show
+		// the exact same timestamp as the user message right above it (both
+		// stamped from m.turnStart) even when minutes had passed generating
+		// the reply, which read as if the two happened simultaneously.
+		if !m.turnStart.IsZero() {
+			summaryParts = append(summaryParts, m.turnStart.Add(turnElapsed).Format("02/01 15:04"))
 		}
 		if m.currentModel != "" {
 			summaryParts = append(summaryParts, m.currentModel)
 		}
 		if elapsedStr != "" {
 			summaryParts = append(summaryParts, elapsedStr)
+		}
+		if turnTokens > 0 {
+			summaryParts = append(summaryParts, formatTokensAbbrev(turnTokens)+" tokens")
 		}
 		if len(summaryParts) > 0 {
 			summary := strings.Join(summaryParts, " · ")
@@ -1065,12 +1283,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.lastSeq = mr.Seq
 				}
 			}
-			// Turn completed: stamp "elapsed :: tokens" onto its user
+			// Turn completed: stamp "elapsed · tokens" onto its user
 			// message (the echo was replaced by its confirmed copy above;
-			// the stats survive on whichever copy remains).
+			// the stats survive on whichever copy remains). Same " · "
+			// separator as the live Working estimate and the assistant's
+			// summary line (items 4/5/17) — this used "::" until reported
+			// as an inconsistency with those.
 			stats := ""
 			if durationMs >= 0 {
-				stats = formatWorkingElapsed(time.Duration(durationMs) * time.Millisecond)
+				stats = m.turnStampPrefix() + formatWorkingElapsed(time.Duration(durationMs)*time.Millisecond)
 				turnTokens := 0
 				if msg.res.Usage != nil {
 					turnTokens = msg.res.Usage.TotalTokens
@@ -1082,7 +1303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				if turnTokens > 0 {
-					stats += " :: " + formatTokens(turnTokens) + " tokens"
+					stats += " · " + formatTokens(turnTokens) + " tokens"
 				}
 			}
 			m.finalizeWorkingMarkers(stats)
@@ -1134,42 +1355,68 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the echo survived (no token count is known on halt).
 		meta := ""
 		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
 		}
 		if m.finalizeWorkingMarkers(meta) {
 			m.rebuildTranscript()
 		}
 		if msg.err != nil {
-			m.toast = msg.err.Error()
+			m.showError(msg.err)
 		} else {
-			m.toast = "halted"
+			m.showSuccess("Turn halted.")
+		}
+		return m, nil
+
+	case haltAllResultMsg:
+		// Stops OUR OWN in-flight turn too (halt-all includes the current
+		// session), so finalize the local Working marker exactly like a
+		// plain halt — the daemon's own message.event/emergency.halt
+		// broadcast will update every OTHER open client.
+		m.spinner = false
+		m.deltaPending = false
+		meta := ""
+		if !m.turnStart.IsZero() && m.clock != nil {
+			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+		}
+		if m.finalizeWorkingMarkers(meta) {
+			m.rebuildTranscript()
+		}
+		if msg.err != nil {
+			m.showError(msg.err)
+		} else {
+			m.showSuccess("Emergency stop — all sessions halted.")
 		}
 		return m, nil
 
 	case resumeResultMsg:
 		if msg.err != nil {
-			m.toast = msg.err.Error()
+			m.showError(msg.err)
 		} else {
-			m.toast = "resumed"
+			m.showSuccess("Session resumed.")
 		}
 		return m, nil
 
 	case switchModelResultMsg:
 		if msg.err != nil {
-			m.toast = msg.err.Error()
-			m.lastError = truncateError(msg.err.Error(), 80)
+			m.showError(msg.err)
 		} else {
-			m.toast = fmt.Sprintf("model → %s", msg.model)
+			// The footer's ModelName field also shows m.currentModel
+			// persistently once set below, but that's a quiet, easy-to-miss
+			// signal on its own — the panel is the actual "this action
+			// succeeded" confirmation (item 11). Not a duplicate of the
+			// removed "model → X" toast: that toast rendered in the exact
+			// same slot as the (also-visible) footer text; this is a
+			// distinct, dismissible overlay.
+			m.showSuccess(fmt.Sprintf("Model switched to %s.", msg.model))
 			m.currentModel = msg.model
 		}
 		return m, nil
 
 	case markSuccessResultMsg:
 		if msg.err != nil {
-			m.toast = msg.err.Error()
-			m.lastError = truncateError(msg.err.Error(), 80)
+			m.showError(msg.err)
 		} else {
-			m.toast = "marked success"
+			m.showSuccess("Session marked as success.")
 			if m.sessionID != "" {
 				m.markedIDs[m.sessionID] = true
 				// Update local sessions slice metadata if present.
@@ -1187,8 +1434,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pluginListMsg:
 		if msg.err != nil {
-			m.toast = msg.err.Error()
-			m.lastError = truncateError(msg.err.Error(), 80)
+			m.showError(msg.err)
 		} else if msg.res != nil {
 			m.plugins = msg.res.Plugins
 		}
@@ -1196,14 +1442,111 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case skillListMsg:
 		if msg.err != nil {
-			m.toast = msg.err.Error()
-			m.lastError = truncateError(msg.err.Error(), 80)
+			m.showError(msg.err)
 		} else if msg.res != nil {
 			m.skills = msg.res.Skills
 		}
 		return m, nil
 
+	case runStartMsg:
+		if msg.err != nil {
+			m.runErr = msg.err.Error()
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runID = msg.res.ID
+		m.runResult = msg.res
+		m.runErr = ""
+		m.runPanelVisible = true
+		m.toast = fmt.Sprintf("run %s started", msg.res.ID)
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runStatusTickMsg:
+		m.runPollPending = false
+		if msg.runID != m.runID {
+			// A newer /run (or the panel losing its run entirely) superseded
+			// this tick while it was in flight — drop it.
+			return m, nil
+		}
+		return m, m.cmdRunStatus(msg.runID)
+
+	case runStatusMsg:
+		if msg.err != nil {
+			m.runErr = msg.err.Error()
+			return m, nil
+		}
+		if msg.res == nil || msg.res.ID != m.runID {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runApproveMsg:
+		if msg.err != nil {
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		if msg.res.Status == daemon.RunRunning {
+			return m, m.scheduleRunStatusPoll(m.runID)
+		}
+		return m, nil
+
+	case runCancelMsg:
+		if msg.err != nil {
+			m.showError(msg.err)
+			return m, nil
+		}
+		if msg.res == nil {
+			return m, nil
+		}
+		m.runResult = msg.res
+		m.runErr = ""
+		m.toast = fmt.Sprintf("run %s canceled", msg.res.ID)
+		return m, nil
+
 	case tea.KeyPressMsg:
+		// Emergency stop: two CONSECUTIVE esc presses (no other key between
+		// them, within escDoubleTapWindow) halt every session, not just the
+		// current one — checked before any panel-closing logic below so it
+		// fires regardless of what's open. A single esc still does its
+		// normal job (closing whatever panel below); it only escalates to
+		// halt-all when the SAME key lands twice in a row, fast.
+		if msg.String() == "esc" {
+			if m.clock == nil {
+				m.clock = realClock{}
+			}
+			now := m.clock.Now()
+			if !m.lastEscAt.IsZero() && now.Sub(m.lastEscAt) <= escDoubleTapWindow {
+				m.lastEscAt = time.Time{}
+				return m, m.cmdHaltAll()
+			}
+			m.lastEscAt = now
+		} else {
+			m.lastEscAt = time.Time{}
+		}
+		// Message panel intercepts: esc closes it (highest priority among
+		// the floating panels — it's carrying a message the user needs to see).
+		if m.msgPanelVisible {
+			if msg.String() == "esc" {
+				m.msgPanelVisible = false
+				return m, nil
+			}
+		}
 		// Rail panel intercepts: esc closes it, any panel overlay closes on esc
 		if m.railPanel != "" {
 			if msg.String() == "esc" {
@@ -1213,6 +1556,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Any other key when rail panel visible? Let global handle but esc is priority.
 			// For simplicity, allow esc only; other keys close as well? Spec: Esc closes any panel.
 			// Keep rail panel until esc or toggle.
+		}
+		// Run panel (Fase 4) intercepts before help/sessions/model panels —
+		// y/n approve or decline a pending checkpoint, c cancels the run,
+		// esc closes the panel WITHOUT canceling (the run — and its
+		// tracking — keeps going in the background; ctrl+4 reopens it).
+		if m.runPanelVisible {
+			switch msg.String() {
+			case "esc":
+				m.runPanelVisible = false
+				return m, nil
+			case "y":
+				if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+					return m, m.cmdRunApproveCheckpoint(m.runID, true)
+				}
+				return m, nil
+			case "n":
+				if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+					return m, m.cmdRunApproveCheckpoint(m.runID, false)
+				}
+				return m, nil
+			case "c":
+				return m, m.cmdRunCancel(m.runID)
+			default:
+				if key.Matches(msg, m.keyMap.ShowRunPanel) {
+					// ctrl+4 while already open closes it — same toggle feel
+					// as ctrl+1/2/3 on the rail panels.
+					m.runPanelVisible = false
+				}
+				return m, nil
+			}
 		}
 		// Help overlay intercepts everything: esc or any key closes it.
 		if m.helpVisible {
@@ -1293,6 +1666,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				m.relayout()
 				return m, nil
+			case "n":
+				// New session (RF: there was previously no way to start a
+				// fresh session from the TUI at all once past startup — only
+				// forge chat's REPL had /new). createSessionMsg's handler
+				// resets the transcript itself, so this only needs to close
+				// the dropdown and dispatch the create.
+				m.sessionsDropdownVisible = false
+				m.sessionFocus = false
+				m.input.Focus()
+				m.relayout()
+				m.toast = "creando nueva sesión…"
+				m.explicitSessionCreate = true
+				return m, m.cmdCreateSession()
 			case "esc":
 				m.sessionsDropdownVisible = false
 				m.sessionFocus = false
@@ -1329,7 +1715,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				if len(m.modelPanelList) > 0 && m.modelPanelIdx >= 0 && m.modelPanelIdx < len(m.modelPanelList) {
-					chosen := m.modelPanelList[m.modelPanelIdx]
+					// Always submit the qualified "provider/model" form —
+					// never the bare model name — so a model declared
+					// under more than one provider is never ambiguous
+					// (items 13/14/15).
+					chosen := m.modelPanelList[m.modelPanelIdx].Spec()
 					m.modelPanelVisible = false
 					m.relayout() // model select hint row leaves the input area
 					if m.sessionID == "" {
@@ -1409,14 +1799,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, m.keyMap.ToggleSidebar):
 			m.toggleSidebar()
 			if err := m.persistConfig(); err != nil {
-				m.toast = err.Error()
+				m.showError(err)
 			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.CycleLayout):
 			m.cycleLayout()
 			// persist
 			if err := m.persistConfig(); err != nil {
-				m.toast = err.Error()
+				m.showError(err)
 			}
 			return m, nil
 		case key.Matches(msg, m.keyMap.ToggleMouse):
@@ -1447,6 +1837,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.railPanel = "turnstats"
 			}
+			return m, nil
+		case key.Matches(msg, m.keyMap.ShowRunPanel):
+			if m.runID == "" {
+				m.toast = "no active run — start one with /run <manifest.json>"
+				return m, nil
+			}
+			m.runPanelVisible = !m.runPanelVisible
 			return m, nil
 		case key.Matches(msg, m.keyMap.GrabSession):
 			// TUI-6: ctrl+g opens sessions dropdown (floating overlay like /help)
@@ -1539,21 +1936,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
 					}
 				}
+			// turnStart set before the echo entry (not after, as before) so
+			// the echo's Meta can carry the send timestamp immediately —
+			// reported live: it previously only appeared once the turn
+			// finished, well after the message was actually sent.
+			if m.clock == nil {
+				m.clock = realClock{}
+			}
+			m.turnStart = m.clock.Now()
 			// Normal turn: optimistic local echo, clear input, spinner, execute.
 			// The daemon-confirmed copy replaces this echo in executeTurnMsg.
 			// The echo carries the Working marker so the pending message is
 			// visibly marked for the whole turn (finalized on turn end).
-			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: workingMarker})
+			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: m.turnStampPrefix() + workingMarker})
 			m.pendingUserText = text
 			m.lastWorkingElapsed = ""
+			// Message history recall (item 20): record every sent message
+			// (skip an exact consecutive repeat, same nicety as shell
+			// history) and stop browsing — the next "up" starts a fresh
+			// walk from the newest entry.
+			if len(m.sentHistory) == 0 || m.sentHistory[len(m.sentHistory)-1] != text {
+				m.sentHistory = append(m.sentHistory, text)
+			}
+			m.historyIdx = -1
 				m.rebuildTranscriptForceBottom()
 				m.input.Reset()
 				m.suggestionsVisible = false
 				m.spinner = true
-				if m.clock == nil {
-					m.clock = realClock{}
-				}
-			m.turnStart = m.clock.Now()
 			m.touchDaemon()
 			m.toast = ""
 			// Animated spinner: single driver. tickImmediate primes the
@@ -1561,6 +1970,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// so no second re-arm here (that forked exponentially).
 			tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
 			return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate)
+			}
+		}
+		// Message history recall (item 20): up/down move within the
+		// input's own (possibly multi-line) text first, exactly like
+		// normal textarea editing — only once the cursor is already at
+		// the first/last line do they walk sentHistory instead, like a
+		// shell. Every panel with its own up/down (rail detail, sessions
+		// dropdown, model panel, suggestions) already returned earlier
+		// above, so this only ever sees plain-editing up/down. Must stay
+		// inside this case: msg is tea.KeyPressMsg only within it (the
+		// switch above narrows it via "switch msg := msg.(type)").
+		if len(m.sentHistory) > 0 {
+			switch msg.String() {
+			case "up":
+				if m.input.TA.Line() == 0 {
+					if m.historyIdx == -1 {
+						m.historyDraft = m.input.Value()
+						m.historyIdx = len(m.sentHistory) - 1
+					} else if m.historyIdx > 0 {
+						m.historyIdx--
+					}
+					m.input.SetValue(m.sentHistory[m.historyIdx])
+					m.input.TA.CursorEnd()
+					return m, nil
+				}
+			case "down":
+				if m.historyIdx != -1 && m.input.TA.Line() == m.input.TA.LineCount()-1 {
+					if m.historyIdx < len(m.sentHistory)-1 {
+						m.historyIdx++
+						m.input.SetValue(m.sentHistory[m.historyIdx])
+					} else {
+						m.historyIdx = -1
+						m.input.SetValue(m.historyDraft)
+					}
+					m.input.TA.CursorEnd()
+					return m, nil
+				}
 			}
 		}
 	}
@@ -1581,7 +2027,7 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 	case daemon.MethodMessageEvent:
 		var payload daemon.MessageEventPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 			return nil
 		}
 		// Filter by session if we have one.
@@ -1626,7 +2072,7 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 	case daemon.MethodMessageDelta:
 		var payload daemon.MessageDeltaPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 			return nil
 		}
 		return m.handleMessageDelta(payload)
@@ -1634,7 +2080,7 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 	case daemon.MethodToolCallEvent:
 		var payload daemon.ToolCallEventPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 			return nil
 		}
 		if m.sessionID != "" && payload.SessionID != "" && payload.SessionID != m.sessionID {
@@ -1645,7 +2091,7 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 	case daemon.MethodSessionEvent:
 		var payload daemon.SessionEventPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 			return nil
 		}
 		// Could update session list toast etc. For now just ensure sidebar reflects changes if needed.
@@ -1667,10 +2113,28 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 		}
 		return nil
 
+	case daemon.MethodRunCheckpointEvent:
+		// Fase 4: "notificación entrante → el panel se abre solo" — this
+		// fires the instant a daemon-hosted run blocks on a required
+		// checkpoint (see publishRunCheckpointEvent, Fase 2), whether or
+		// not this TUI is the client that started the run. Opens/updates
+		// the panel unconditionally: a run this client already knows about
+		// gets its checkpoint surfaced immediately; a run started elsewhere
+		// (another TUI, the CLI, a script) gets picked up and tracked from
+		// here on, same as if /run had started it locally.
+		var payload daemon.RunCheckpointEventPayload
+		if err := json.Unmarshal(notif.Params, &payload); err != nil {
+			m.showError(err)
+			return nil
+		}
+		m.runID = payload.RunID
+		m.runPanelVisible = true
+		return m.cmdRunStatus(payload.RunID)
+
 	case daemon.MethodEmergencyHalt:
 		var payload daemon.EmergencyHaltPayload
 		if err := json.Unmarshal(notif.Params, &payload); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 			return nil
 		}
 		m.spinner = false
@@ -1773,11 +2237,10 @@ func (m *Model) toggleSidebar() {
 	// showSidebar now means rail visible.
 	m.showSidebar = !m.showSidebar
 	m.config.Sidebar = m.showSidebar
-	if m.showSidebar {
-		m.toast = "rail on"
-	} else {
-		m.toast = "rail off"
-	}
+	// No toast here: the footer's Layout field (footerLayoutLabel) already
+	// shows "rail on"/"rail off" persistently, right below where a toast
+	// would render — a transient toast duplicated that exact text on the
+	// same frame instead of adding information.
 	// relayout recomputes effective width (rail steals 33 cols from the
 	// transcript) and re-measures the footer at the current size.
 	m.relayout()
@@ -1814,7 +2277,7 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		// something sensible instead of failing.
 		m.toggleSidebar()
 		if err := m.persistConfig(); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 		}
 		return true, nil
 	case "/palette":
@@ -1831,7 +2294,7 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		m.palette = pal
 		m.paletteName = name
 		if err := m.persistConfig(); err != nil {
-			m.toast = err.Error()
+			m.showError(err)
 		} else {
 			m.toast = fmt.Sprintf("palette → %s", name)
 		}
@@ -1878,10 +2341,10 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		return true, nil
 	case "/model":
 		if len(parts) < 2 {
-			// TUI-6: /model with no argument opens floating selection panel listing available models
-			// Model list source: READ .forge/config.json providers.*.models directly
-			// (the TUI already reads that file for the tui section — reuse same read) + current model first
-			// Documented limitation: plugin-providers are not listed yet (deferred).
+			// TUI-6: /model with no argument opens floating selection panel
+			// listing available models, grouped by provider — see
+			// loadAvailableModels. Documented limitation: plugin-providers
+			// are not listed yet (deferred).
 			list := m.loadAvailableModels()
 			if len(list) == 0 {
 				m.toast = "usage: /model <name> — no models configured"
@@ -1922,6 +2385,22 @@ func (m *Model) handleSlash(text string) (bool, tea.Cmd) {
 		// Closed by esc or any key; replaces toast-based help (keep toast for command errors).
 		m.openHelp()
 		return true, nil
+	case "/run":
+		// Fase 4: first TUI consumer of the daemon-hosted run engine
+		// (Fase 1-3). The manifest path is resolved and parsed locally
+		// (cmdRunStart) exactly like the CLI's `forge run` does; only the
+		// parsed content crosses the wire.
+		if len(parts) < 2 {
+			m.toast = "usage: /run <manifest.json>"
+			return true, nil
+		}
+		if m.client == nil {
+			m.toast = "not connected"
+			return true, nil
+		}
+		manifestPath := parts[1]
+		m.toast = "starting run…"
+		return true, m.cmdRunStart(manifestPath)
 	default:
 		m.toast = fmt.Sprintf("unknown command %q (/help for list)", cmd)
 		return true, nil
@@ -2116,8 +2595,10 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 		if e.Role != "user" {
 			continue
 		}
-		// Match the bare marker or a tick-stamped one ("◌ Working… (34,4s)").
-		if strings.HasPrefix(e.Meta, workingMarker) || (m.pendingUserText != "" && strings.TrimSpace(e.Content) == m.pendingUserText) {
+		// Match the bare marker or a tick-stamped one ("DD/MM HH:MM · ◌
+		// Working… (34,4s)") — Contains, not HasPrefix: the entry's Meta now
+		// starts with the send timestamp, so the marker itself sits after it.
+		if strings.Contains(e.Meta, workingMarker) || (m.pendingUserText != "" && strings.TrimSpace(e.Content) == m.pendingUserText) {
 			target = i
 			break
 		}
@@ -2132,7 +2613,7 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 				m.entries[i].Meta = meta
 				changed = true
 			}
-		} else if strings.HasPrefix(m.entries[i].Meta, workingMarker) {
+		} else if strings.Contains(m.entries[i].Meta, workingMarker) {
 			m.entries[i].Meta = ""
 			changed = true
 		}
@@ -2140,6 +2621,18 @@ func (m *Model) finalizeWorkingMarkers(meta string) bool {
 	m.pendingUserText = ""
 	m.lastWorkingElapsed = ""
 	return changed
+}
+
+// turnStampPrefix returns "DD/MM HH:MM · " for the current turnStart, or ""
+// when unknown (no clock, or no turn sent yet) — the shared timestamp
+// prefix for every place a turn's final stats land on the user's own
+// message (success, error, halt), matching the assistant summary's own
+// "DD/MM HH:MM · elapsed · tokens" shape.
+func (m Model) turnStampPrefix() string {
+	if m.turnStart.IsZero() {
+		return ""
+	}
+	return m.turnStart.Format("02/01 15:04") + " · "
 }
 
 // formatWorkingElapsed renders a duration for the Working marker:
@@ -2154,6 +2647,22 @@ func formatWorkingElapsed(d time.Duration) string {
 	return strings.Replace(fmt.Sprintf("%.1f", d.Seconds()), ".", ",", 1) + "s"
 }
 
+// formatTokensAbbrev formats a token count compactly for inline display:
+// the plain number below 1000 ("850"), abbreviated with one decimal and a
+// comma separator above it ("1,4k" for 1400 — comma decimal, matching
+// formatWorkingElapsed's locale convention). Used for the live Working
+// estimate and the final turn summary, both of which need to stay short
+// enough to sit inline next to the model name and elapsed time.
+func formatTokensAbbrev(n int) string {
+	if n < 0 {
+		n = 0
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return strings.Replace(fmt.Sprintf("%.1fk", float64(n)/1000), ".", ",", 1)
+}
+
 // touchDaemon records successful daemon contact for the ghost-turn
 // watchdog. No clock (tests constructing Model bare) means no tracking.
 func (m *Model) touchDaemon() {
@@ -2165,9 +2674,16 @@ func (m *Model) touchDaemon() {
 
 // watchdogSilence bounds silent turns: spinner on, no tool running, and no
 // daemon traffic for this long means the turn is a ghost (finished or dead
-// daemon-side, lost in delivery). Kept comfortably below the daemon-side
-// turn timeout so the UI recovers first with a visible halt + refetch.
-const watchdogSilence = 240 * time.Second
+// daemon-side, lost in delivery). Was 240s (4min) — too short for a slow
+// local model's prefill phase, which can legitimately run several minutes
+// with zero intermediate signal reaching the client (no tool call, no
+// delta — see MessageDeltaPayload) before the first token arrives; a
+// turn that was making real, if slow, progress got auto-halted as a false
+// positive. 30 minutes comfortably covers that case while still catching
+// a truly dead daemon in bounded time (not instant, but this is a
+// recovery mechanism, not a hard limit — the cost of noticing a real
+// hang 30 minutes late is low next to killing a live turn early).
+const watchdogSilence = 30 * time.Minute
 
 // checkWatchdog halts a ghost turn visibly and refetches anything missed.
 // Returns nil unless all hold: spinner on, no outstanding tool call (a
@@ -2184,33 +2700,54 @@ func (m *Model) checkWatchdog() tea.Cmd {
 	if m.clock.Now().Sub(m.lastDaemonMsg) < watchdogSilence {
 		return nil
 	}
-	m.toast = "no daemon activity for 4m — halting ghost turn"
+	// A real ghost-turn halt is an actionable warning worth the message
+	// panel (item 11), not a toast that can be missed below the input.
+	m.showError(errors.New("no daemon activity for 4m — halting ghost turn"))
 	return tea.Batch(m.cmdHalt(), m.cmdGetMessagesSince(m.lastSeq))
 }
 
 // stampWorkingElapsed refreshes the in-bubble Working elapsed ("◌ Working…
-// (34,4s)") at most once per displayed second. The entry Meta is
+// (7,0s · 1,4k tokens)") on each spinner tick (~100ms). The entry Meta is
 // width-wrapped at build time, so the bubble box never breaks. Returns true
-// if the transcript changed (caller rebuilds). Ticks that land inside the
-// same displayed second are no-ops, keeping the TUI-6 no-rebuild-per-tick
-// invariant for steady state.
+// if the transcript changed (caller rebuilds). Ticks that produce the exact
+// same displayed string (elapsed AND token estimate both unchanged) are
+// no-ops, keeping the TUI-6 no-rebuild-per-tick invariant for steady state.
+//
+// The token count is an ESTIMATE (estimateTokens' chars/4 heuristic) over
+// whatever the active streaming preview has accumulated so far — the
+// server has no live token count to offer (message.delta.event carries
+// only text, see MessageDeltaPayload), and the exact figure only exists
+// once the turn completes and the provider's usage field arrives. With no
+// streaming preview active (streaming disabled, or no provider content
+// yet), only the elapsed time is shown, matching the pre-existing marker.
 func (m *Model) stampWorkingElapsed() bool {
 	if m.turnStart.IsZero() || m.clock == nil {
 		return false
 	}
 	s := formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+	if idx := m.findStreamingIndex(); idx != -1 && m.entries[idx].Content != "" {
+		s += " · " + formatTokensAbbrev(estimateTokens(m.entries[idx].Content)) + " tokens"
+	}
 	if s == m.lastWorkingElapsed {
 		return false
 	}
 	m.lastWorkingElapsed = s
 	stamped := false
 	for i := range m.entries {
-		if m.entries[i].Role == "user" && strings.HasPrefix(m.entries[i].Meta, workingMarker) {
-			m.entries[i].Meta = workingMarker + " (" + s + ")"
+		if m.entries[i].Role == "user" && strings.Contains(m.entries[i].Meta, workingMarker) {
+			m.entries[i].Meta = m.turnStampPrefix() + workingMarker + " (" + s + ")"
 			stamped = true
 		}
 	}
 	return stamped
+}
+
+// estimateTokens roughly approximates text's token count via a chars/4
+// heuristic (same shape as internal/bench's tokensFor) — a live, in-flight
+// indicator only; see stampWorkingElapsed for why an exact count isn't
+// available yet at this point.
+func estimateTokens(text string) int {
+	return (len(text)+3)/4 + 4
 }
 
 func (m *Model) rebuildTranscriptInternal(forceBottom bool) {
@@ -2381,6 +2918,15 @@ func (m *Model) openHelp() {
 		help := b.Help()
 		sb.WriteString(dimStyle.Render("  "+help.Key) + textStyle.Render("  "+help.Desc) + "\n")
 	}
+	sb.WriteString("\n")
+	sb.WriteString(textStyle.Render("Emergency Stop & Errors:"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  esc esc       emergency stop: halts EVERY session, not just this one"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  ctrl+h        halt only the current session's turn"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  action errors open a floating panel with the full message; esc closes it"))
+	sb.WriteString("\n")
 	// Document session focus mode and scroll
 	sb.WriteString(textStyle.Render("Session Focus:"))
 	sb.WriteString("\n")
@@ -2389,6 +2935,8 @@ func (m *Model) openHelp() {
 	sb.WriteString(dimStyle.Render("  ↑/↓ (focus)   navigate sessions"))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("  enter (focus) switch to selected session (lastSeq=0, echo cleared)"))
+	sb.WriteString("\n")
+	sb.WriteString(dimStyle.Render("  n (focus)     start a new session (empty transcript)"))
 	sb.WriteString("\n")
 	sb.WriteString(dimStyle.Render("  esc/ctrl+g    exit focus mode (other keys consumed)"))
 	sb.WriteString("\n")
@@ -2471,6 +3019,12 @@ func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
 // bands, so both drift if card content or footer composition changes; the
 // pure zone functions (HitTestRail, HitTestFooter) are covered by tests.
 func (m Model) View() tea.View {
+	// Self-heal the chrome-height budget (viewport/input/footer split) for
+	// whatever m.toast/overlay-visibility state is ACTUALLY about to be
+	// rendered below — see SetSize's doc comment. m is a local copy (value
+	// receiver), so relayout() (pointer receiver, called on the addressable
+	// local m) only affects this one render; the real model is untouched.
+	m.relayout()
 	// Title bar (full-width, top)
 	titleBar := m.renderTitleBar()
 	// Transcript as rendered (the animated spinner lives only in the
@@ -2485,13 +3039,13 @@ func (m Model) View() tea.View {
 		}
 	}
 	if m.sessionsDropdownVisible {
-		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · esc/ctrl+g close")
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter select · n new session · esc/ctrl+g close")
 		inputView = focusHint + "\n" + inputView
 	} else if m.modelPanelVisible {
 		mpHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ model select: ↑/↓ navigate · enter select · esc close")
 		inputView = mpHint + "\n" + inputView
 	} else if m.sessionFocus {
-		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · esc/ctrl+g back")
+		focusHint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Render("▸ session focus: ↑/↓ navigate · enter switch · n new session · esc/ctrl+g back")
 		inputView = focusHint + "\n" + inputView
 	}
 	compPal := toCompPalette(m.palette)
@@ -2504,6 +3058,8 @@ func (m Model) View() tea.View {
 		footerHint = "session focus"
 	} else if m.modelPanelVisible {
 		footerHint = "model select"
+	} else if m.runPanelVisible {
+		footerHint = "run panel"
 	} else if m.railPanel != "" {
 		footerHint = m.railPanel + " panel"
 	}
@@ -2527,6 +3083,7 @@ func (m Model) View() tea.View {
 		DaemonErr:     m.daemonErr,
 		ShowSpinner:   m.spinner,
 		SpinnerView:   m.spinnerModel.View(),
+		WorkingStats:  m.lastWorkingElapsed,
 		Layout:        m.footerLayoutLabel(),
 		ModelName:     m.currentModel,
 		Tokens:        m.totalTokens,
@@ -2556,10 +3113,18 @@ func (m Model) View() tea.View {
 		Plugins:       m.plugins,
 		Skills:        m.skills,
 	}
+	// railHeight MUST equal the transcript viewport's own height exactly —
+	// no independent floor. A prior version floored this at 5 while the
+	// viewport itself floors at 3 (SetSize); at terminal heights where the
+	// computed transcript height landed in [3,5), the rail (always exactly
+	// railHeight tall via RenderColumnCapped) ended up taller than the
+	// transcript, lipgloss.JoinHorizontal stretched the whole main row to
+	// match it, and the extra rows pushed the footer past the bottom of the
+	// frame (visible as "the footer moves down" when the rail is shown).
+	// Small terminals now degrade by truncating the rail's card content
+	// more aggressively (RenderColumnCapped already handles that) instead
+	// of breaking the frame's total height.
 	railHeight := m.viewport.Height()
-	if railHeight < 5 {
-		railHeight = 5
-	}
 	sidebar := components.SidebarModel{
 		Data:   sidebarData,
 		Width:  railWidth,
@@ -2623,6 +3188,33 @@ func (m Model) View() tea.View {
 		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Accent)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
 		float(boxStyle.Render(capLines(panel, maxOverlayRows-2)))
 	}
+	if m.runPanelVisible {
+		panel := m.renderRunPanel()
+		borderColor := m.palette.Accent
+		if m.runResult != nil && m.runResult.PendingCheckpoint != nil {
+			// A pending checkpoint needs a decision — the accent-vs-warning
+			// border distinguishes "just watching progress" from "blocked,
+			// awaiting you" at a glance, same idea as the message panel's
+			// error/success border color swap.
+			borderColor = m.palette.Warning
+		}
+		boxStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(borderColor)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+		float(boxStyle.Render(capLines(panel, maxOverlayRows-2)))
+	}
+	// Message panel (error or success confirmation) renders LAST (highest
+	// z-order among floats — see also its esc-priority in tea.KeyPressMsg)
+	// so it's never hidden behind another panel open at the same time.
+	// Narrower than the other overlays and centered (see
+	// messagePanelWidth) — a short confirmation/error reads like a focused
+	// notification, not another full-screen panel.
+	if m.msgPanelVisible {
+		content, color := m.renderMessagePanel()
+		msgStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(color)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.messagePanelWidth()).Padding(0, 2)
+		box := msgStyle.Render(capLines(content, maxOverlayRows-2))
+		centered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, box,
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BG))))
+		float(centered)
+	}
 	bg := lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BG)).Foreground(lipgloss.Color(m.palette.Text)).Width(m.width).Height(m.height).Render(content)
 	v := tea.NewView(bg)
 	v.AltScreen = true
@@ -2672,57 +3264,110 @@ func truncateError(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
-// loadAvailableModels reads .forge/config.json providers.*.models directly.
-// The TUI already reads that file for the tui section — reuse the same read path.
-// Returns current model first, then unique models from all providers. Plugin-providers are not listed yet (deferred).
-func (m Model) loadAvailableModels() []string {
+// messagePanelKind selects the floating message panel's border color and
+// heading (see renderMessagePanel): red "Error" or green "Confirmado".
+type messagePanelKind string
+
+const (
+	messagePanelError   messagePanelKind = "error"
+	messagePanelSuccess messagePanelKind = "success"
+)
+
+// showError opens the floating message panel (red border) with err's full,
+// untruncated message and records the short/truncated copy in m.lastError
+// for the rail's Turn Stats card, exactly as before. Replaces the old
+// "m.toast = err.Error()" pattern for action-result failures (turn
+// execution, model switch, resume, mark, halt, plugin/skill list, copy):
+// a raw RPC error can be a full sentence-plus-detail (e.g. `rpc error
+// -32602: model unavailable (model "X" not available in provider "Y")`)
+// that doesn't fit, or read well, on the footer's single toast line.
+// Connectivity-status errors (event stream closed, daemon unreachable) are
+// deliberately NOT routed here: those already have a persistent home in
+// the footer's DaemonErr field, and popping a panel for an ongoing
+// condition would be worse, not better.
+func (m *Model) showError(err error) {
+	if err == nil {
+		return
+	}
+	m.lastError = truncateError(err.Error(), 80)
+	m.msgPanelText = err.Error()
+	m.msgPanelKind = messagePanelError
+	m.msgPanelVisible = true
+}
+
+// showSuccess opens the same floating message panel (green border) to
+// confirm an action actually succeeded — a model switch, halt, resume,
+// mark — instead of leaving the user to notice a quieter, persistent
+// signal (the footer's model name changing) as the only evidence.
+func (m *Model) showSuccess(text string) {
+	m.msgPanelText = text
+	m.msgPanelKind = messagePanelSuccess
+	m.msgPanelVisible = true
+}
+
+// modelPanelEntry is one selectable row in the /model panel: a provider and
+// one of its models, always submitted together as "provider/model" on
+// selection — never a bare name. Fixes a real bug (items 13/15 of the live
+// report): a bare name is ambiguous whenever the same model name is
+// declared under more than one provider ("minimax-m3" in both "go" and
+// "zen"), and the daemon correctly refuses to guess — but the OLD list
+// showed the bare name exactly once (deduped across every provider) with
+// no way to tell, from the panel, which of several providers you'd get.
+// Submitting the qualified form makes that ambiguity structurally
+// impossible from this panel.
+type modelPanelEntry struct {
+	Provider string
+	Model    string
+}
+
+// Spec renders the entry as the "provider/model" string SwitchModel expects.
+func (e modelPanelEntry) Spec() string { return e.Provider + "/" + e.Model }
+
+// loadAvailableModels reads .forge/config.json providers.*.models directly
+// (the TUI already reads that file for the tui section — reuse the same
+// read path) and returns every declared model, GROUPED BY PROVIDER
+// (providers sorted by name; a provider's own models keep their declared
+// config order — first model in providers.<name>.models is usually that
+// provider's own default, worth keeping first). Deliberately does NOT
+// validate against any provider's live catalog (opt-in choice, see
+// manual_usuario.md) or pin the current model first — every entry already
+// carries its own provider, so ambiguity (item 13/14/15) is impossible
+// regardless of list order. Plugin-providers are not listed yet (deferred).
+func (m Model) loadAvailableModels() []modelPanelEntry {
 	path := m.configPath
 	if path == "" {
 		path = ".forge/config.json"
 	}
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) == 0 {
-		if m.currentModel != "" {
-			return []string{m.currentModel}
-		}
 		return nil
 	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(data, &doc); err != nil {
-		if m.currentModel != "" {
-			return []string{m.currentModel}
-		}
 		return nil
 	}
 	rawProv, ok := doc["providers"]
 	if !ok {
-		if m.currentModel != "" {
-			return []string{m.currentModel}
-		}
 		return nil
 	}
 	var providers map[string]struct {
 		Models []string `json:"models"`
 	}
 	if err := json.Unmarshal(rawProv, &providers); err != nil {
-		if m.currentModel != "" {
-			return []string{m.currentModel}
-		}
 		return nil
 	}
-	seen := map[string]bool{}
-	var out []string
-	if m.currentModel != "" {
-		out = append(out, m.currentModel)
-		seen[m.currentModel] = true
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
 	}
-	for _, p := range providers {
-		for _, mdl := range p.Models {
-			if mdl == "" || seen[mdl] {
+	sort.Strings(names)
+	var out []modelPanelEntry
+	for _, name := range names {
+		for _, mdl := range providers[name].Models {
+			if mdl == "" {
 				continue
 			}
-			seen[mdl] = true
-			out = append(out, mdl)
+			out = append(out, modelPanelEntry{Provider: name, Model: mdl})
 		}
 	}
 	return out
@@ -2847,34 +3492,64 @@ func (m Model) renderSessionsDropdown(maxRows int) string {
 	return sb.String()
 }
 
+// modelPanelRow is one line of the rendered /model panel: either a provider
+// group header (entryIdx -1, not selectable) or a model entry (entryIdx
+// indexes m.modelPanelList). Headers are interspersed wherever the
+// provider changes between consecutive entries in the (already
+// provider-sorted) list — see loadAvailableModels.
+type modelPanelRow struct {
+	text     string
+	entryIdx int
+}
+
 func (m Model) renderModelPanel(maxRows int) string {
 	if len(m.modelPanelList) == 0 {
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint)).Render("(no models)")
 	}
 	var sb strings.Builder
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("Select Model")
-	// Window the list so the panel fits the transcript area: title +
-	// deferred note + hint take 3 rows, the caller box adds 2 border rows.
+
+	rows := make([]modelPanelRow, 0, len(m.modelPanelList)+4)
+	lastProvider := ""
+	cursorRow := 0
+	for i, e := range m.modelPanelList {
+		if e.Provider != lastProvider {
+			rows = append(rows, modelPanelRow{text: e.Provider, entryIdx: -1})
+			lastProvider = e.Provider
+		}
+		if i == m.modelPanelIdx {
+			cursorRow = len(rows)
+		}
+		rows = append(rows, modelPanelRow{text: e.Model, entryIdx: i})
+	}
+
+	// Window by RENDERED ROW (header rows count too, so a group heading
+	// never scrolls away from the entries it labels), keyed to the
+	// cursor's row rather than its entry index.
 	budget := maxRows - 5
 	if budget < 1 {
 		budget = 1
 	}
-	n := len(m.modelPanelList)
-	start, end := windowRange(n, m.modelPanelIdx, budget)
-	if n > budget {
+	start, end := windowRange(len(rows), cursorRow, budget)
+	if len(m.modelPanelList) > budget {
 		title += lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render(
-			fmt.Sprintf(" (%d/%d)", m.modelPanelIdx+1, n))
+			fmt.Sprintf(" (%d/%d)", m.modelPanelIdx+1, len(m.modelPanelList)))
 	}
 	sb.WriteString(title + "\n")
 	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Render("plugin-providers not listed yet (deferred)") + "\n")
-	for i := start; i < end; i++ {
-		mdl := m.modelPanelList[i]
-		line := "  " + mdl
-		if mdl == m.currentModel {
-			line = "● " + mdl
+	for r := start; r < end; r++ {
+		row := rows[r]
+		if row.entryIdx == -1 {
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim)).Bold(true).Render(row.text) + "\n")
+			continue
 		}
-		if i == m.modelPanelIdx {
-			line = lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BGElevated)).Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("▶ " + mdl)
+		e := m.modelPanelList[row.entryIdx]
+		line := "    " + e.Model
+		if e.Model == m.currentModel {
+			line = "  ● " + e.Model
+		}
+		if row.entryIdx == m.modelPanelIdx {
+			line = lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BGElevated)).Foreground(lipgloss.Color(m.palette.Accent)).Bold(true).Render("  ▶ " + e.Model)
 		} else {
 			line = lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text)).Render(line)
 		}
@@ -2964,6 +3639,94 @@ func (m Model) renderTurnStatsPanel() string {
 	return sb.String()
 }
 
+// renderRunPanel renders the Fase 4 run-observation panel: current status,
+// progress counters, and — when the run is genuinely blocked live in
+// OnCheckpoint (see internal/daemon/runs.go's newDaemonManifestRunner) — the
+// pending checkpoint with the y/n approve/decline hint. Values come from
+// m.runResult, refreshed by /run, the poll tick, or an incoming
+// run.checkpoint.event; a nil m.runResult (start RPC in flight, or a
+// checkpoint event arrived before the first status fetch landed) renders a
+// "loading" line instead of guessing.
+func (m Model) renderRunPanel() string {
+	var sb strings.Builder
+	accent := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Accent)).Bold(true)
+	text := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Text))
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim))
+	faint := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Faint))
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Warning)).Bold(true)
+
+	sb.WriteString(accent.Render("Run: "+m.runID) + "\n")
+	if m.runErr != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Error)).Render("error: "+m.runErr) + "\n")
+	}
+	if m.runResult == nil {
+		sb.WriteString(faint.Render("(loading status…)") + "\n")
+		sb.WriteString(dim.Render("esc to close") + "\n")
+		return sb.String()
+	}
+	res := m.runResult
+	sb.WriteString(dim.Render("status: ") + text.Render(res.Status) + "\n")
+	if res.CurrentTask != "" {
+		sb.WriteString(dim.Render("current task: ") + text.Render(res.CurrentTask) + "\n")
+	}
+	sb.WriteString(dim.Render(fmt.Sprintf("tokens: %s · iterations: %d", formatTokens(res.TokensUsed), res.IterUsed)) + "\n")
+	if res.PendingCheckpoint != nil {
+		cp := res.PendingCheckpoint
+		sb.WriteString(warn.Render(fmt.Sprintf("⚠ checkpoint pending: %s (%s)", cp.ID, cp.Trigger)) + "\n")
+		sb.WriteString(text.Render("  y approve · n decline") + "\n")
+	}
+	if res.Report != nil {
+		sb.WriteString(dim.Render(fmt.Sprintf("tasks completed: %d/%d", len(res.Report.CompletedTasks), res.Report.TotalTasks)) + "\n")
+		sb.WriteString(dim.Render("validation: ") + text.Render(res.Report.ValidationState) + "\n")
+	}
+	if res.Error != "" {
+		sb.WriteString(faint.Render(truncateError(res.Error, 80)) + "\n")
+	}
+	sb.WriteString(dim.Render("c cancel · esc close") + "\n")
+	return sb.String()
+}
+
+// messagePanelWidth is the message panel's box width — narrower than the
+// full-width overlays (help, sessions, model, rail) used elsewhere: a
+// short confirmation or error doesn't need the whole terminal width, and a
+// centered, modestly narrower box reads more like a focused notification
+// than another full-screen panel.
+func (m Model) messagePanelWidth() int {
+	w := m.width - 10
+	if w < 40 {
+		return m.width
+	}
+	return w
+}
+
+// renderMessagePanel builds the floating message panel's content (see
+// showError/showSuccess) and the border color to pair with it: a bold
+// heading colored by kind (red "Error" / green "Confirmado"), the FULL
+// untruncated message — word-wrapped to the panel's content width via
+// lipgloss's own Width-based wrapping, not the footer toast's hard
+// truncation — and an "esc to close" hint. Every segment sets its own
+// Background explicitly: lipgloss's Width-triggered wrapping does NOT
+// inherit a background from an outer style once applied — found as a real
+// bug where wrapped lines rendered with the terminal's default background
+// (usually black) instead of the panel's BGElevated. innerWidth must match
+// the caller's box Width/Padding in View() (2 border cols + 2×2 padding
+// cols = 6) or the wrap width and the box width drift.
+func (m Model) renderMessagePanel() (content, borderColor string) {
+	innerWidth := m.messagePanelWidth() - 6
+	if innerWidth < 10 {
+		innerWidth = 10
+	}
+	heading, color := "Error", m.palette.Error
+	if m.msgPanelKind == messagePanelSuccess {
+		heading, color = "Confirmado", m.palette.Success
+	}
+	bg := lipgloss.Color(m.palette.BGElevated)
+	title := lipgloss.NewStyle().Bold(true).Background(bg).Foreground(lipgloss.Color(color)).Render(heading)
+	body := lipgloss.NewStyle().Width(innerWidth).Background(bg).Foreground(lipgloss.Color(m.palette.Text)).Render(m.msgPanelText)
+	hint := lipgloss.NewStyle().Background(bg).Foreground(lipgloss.Color(m.palette.Faint)).Render("esc to close")
+	return title + "\n" + body + "\n" + hint, color
+}
+
 // --- Hit testing (pure functions for tests; documented fragility: Y mapping assumes fixed heights) ---
 
 // HitTestRail maps a click Y to a rail card identifier. Pure function for tests.
@@ -3018,7 +3781,7 @@ func (m *Model) handleMouseClick(mouse tea.Mouse) {
 	titleH := titleHeightRows
 	transH := m.viewport.Height()
 	if transH <= 0 {
-		transH = m.height - titleHeightRows - 1 - 4 - m.measureFooterHeight(m.width)
+		transH = m.height - titleHeightRows - 1 - inputAreaHeight - m.measureFooterHeight(m.width)
 		if transH < 5 {
 			transH = 5
 		}
@@ -3026,7 +3789,7 @@ func (m *Model) handleMouseClick(mouse tea.Mouse) {
 	footerH := m.measureFooterHeight(m.width)
 	separatorY := titleH + transH
 	inputY := separatorY + 1
-	footerTop := inputY + 4
+	footerTop := inputY + inputAreaHeight
 	// Rail hit: only if visible and click in rail X region and Y in transcript range
 	if m.showSidebar {
 		railXStart := m.width - railWidth
@@ -3113,7 +3876,10 @@ func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64,
 		if !ok {
 			continue
 		}
-		elapsedStr := formatDurationMs(durMs)
+		// formatWorkingElapsed, not formatDurationMs: matches the live
+		// turn-completion path's format ("4m44s", not "284.6s") so a
+		// reloaded session's elapsed reads the same as one just computed.
+		elapsedStr := formatWorkingElapsed(time.Duration(durMs) * time.Millisecond)
 		switch {
 		case e.Meta == "":
 			if currentModel != "" {
@@ -3126,15 +3892,6 @@ func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64,
 		}
 	}
 	return entries
-}
-
-// formatDurationMs renders a duration in ms for Meta lines ("123ms" under a
-// second, "1.2s" above). Shared by live elapsed injection and sidecar merge.
-func formatDurationMs(durMs int64) string {
-	if durMs < 1000 {
-		return fmt.Sprintf("%dms", durMs)
-	}
-	return fmt.Sprintf("%.1fs", float64(durMs)/1000)
 }
 
 

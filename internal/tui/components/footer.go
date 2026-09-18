@@ -25,6 +25,13 @@ type FooterModel struct {
 	DaemonErr     string
 	ShowSpinner   bool
 	SpinnerView   string
+	// WorkingStats is the live elapsed/token estimate for the in-flight
+	// turn ("8,5s · 612 tokens"), the same string already stamped onto
+	// the sent message's Working marker (item 4/12) — shown here too
+	// (item 21) so it's visible even when the transcript is scrolled away
+	// from the pending message. Empty before the first tick, or once
+	// ShowSpinner is false.
+	WorkingStats  string
 	Layout        string
 	ModelName     string
 	Tokens        int // cumulative session tokens; 0 hides the field
@@ -93,7 +100,11 @@ func (m FooterModel) Render() string {
 		if frame == "" {
 			frame = "⠋"
 		}
-		spinner = styleAccent.Render(" "+frame+" working…") + " "
+		label := " " + frame + " working…"
+		if m.WorkingStats != "" {
+			label += " (" + m.WorkingStats + ")"
+		}
+		spinner = styleAccent.Render(label) + " "
 	}
 	moreBelow := ""
 	if m.ShowMoreBelow {

@@ -1,5 +1,5 @@
 // Package llm implements forge's LLM provider abstraction with an
-// OpenAI-compatible adapter (Ollama) and a model registry supporting hot-swap.
+// OpenAI-compatible adapter and a model registry supporting hot-swap.
 package llm
 
 import (
@@ -74,13 +74,24 @@ func NewGeminiProvider(baseURL, apiKey string, allowedHosts []string, logger *sl
 		httpClient: client,
 		logger:     logger,
 	}
-	if err := p.refreshModels(); err != nil {
+	if err := p.RefreshModels(); err != nil {
 		logger.Warn("failed to fetch gemini models at startup", "error", err)
 	}
 	return p, nil
 }
 
-func (p *GeminiProvider) refreshModels() error {
+// SetRequestTimeout overrides the per-request HTTP timeout (default 15
+// minutes, set above at construction). Ignored when d <= 0.
+func (p *GeminiProvider) SetRequestTimeout(d time.Duration) {
+	if d > 0 {
+		p.httpClient.Timeout = d
+	}
+}
+
+// RefreshModels re-fetches the live model list, exported so a provider
+// switch (daemon.switch_provider) can force a fresh catalog instead of
+// serving whatever was cached at daemon startup.
+func (p *GeminiProvider) RefreshModels() error {
 	models, err := p.fetchModels()
 	if err != nil {
 		p.logger.Debug("gemini fetch models failed", "error", err)
@@ -211,7 +222,7 @@ func (p *GeminiProvider) buildGeminiBody(req ChatRequest) map[string]any {
 				"role": "user",
 				"parts": []map[string]any{
 					{"functionResponse": map[string]any{
-						"name": name,
+						"name":     name,
 						"response": map[string]any{"result": m.Content},
 					}},
 				},
@@ -290,7 +301,7 @@ func (p *GeminiProvider) Chat(ctx context.Context, req ChatRequest) (ChatRespons
 	}
 	p.logger.Debug("gemini chat response", "status", resp.StatusCode, "body", logging.Redact(string(respBody)))
 	if resp.StatusCode != http.StatusOK {
-		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody)
+		return ChatResponse{}, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 	var gr geminiResponse
 	if err := json.Unmarshal(respBody, &gr); err != nil {
@@ -447,7 +458,7 @@ func (p *GeminiProvider) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, p.mapHTTPError(resp.StatusCode, respBody)
+		return nil, p.mapHTTPError(resp.StatusCode, respBody, resp.Header)
 	}
 
 	ch := make(chan StreamChunk, 16)
@@ -685,27 +696,35 @@ func (p *GeminiProvider) Close() error {
 	return nil
 }
 
+// mapError maps network/transport errors to typed errors — see
+// OpenAICompatibleProvider.mapError's doc comment (identical rationale).
 func (p *GeminiProvider) mapError(err error) error {
 	var netErr *url.Error
 	if errors.As(err, &netErr) {
 		if netErr.Timeout() {
-			return fmt.Errorf("request timeout: %w", err)
+			return &RetryableError{Err: fmt.Errorf("request timeout: %w", err)}
 		}
-		return fmt.Errorf("connection error: %w", err)
+		return &RetryableError{Err: fmt.Errorf("connection error: %w", err)}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("request deadline exceeded: %w", err)
+		return &RetryableError{Err: fmt.Errorf("request deadline exceeded: %w", err)}
 	}
 	return fmt.Errorf("request failed: %w", err)
 }
 
-func (p *GeminiProvider) mapHTTPError(statusCode int, body []byte) error {
+// mapHTTPError maps HTTP error status codes to typed errors — see
+// OpenAICompatibleProvider.mapHTTPError's doc comment (identical rationale).
+func (p *GeminiProvider) mapHTTPError(statusCode int, body []byte, headers http.Header) error {
 	bodyStr := logging.Redact(string(body))
 	switch statusCode {
 	case http.StatusNotFound:
 		return fmt.Errorf("model not found (404): %s", bodyStr)
 	case http.StatusTooManyRequests:
-		return fmt.Errorf("rate limited (429): %s", bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("rate limited (429): %s", bodyStr),
+		}
 	case http.StatusUnauthorized:
 		return fmt.Errorf("unauthorized (401): %s", bodyStr)
 	case http.StatusForbidden:
@@ -715,7 +734,11 @@ func (p *GeminiProvider) mapHTTPError(statusCode int, body []byte) error {
 	case http.StatusInternalServerError:
 		return fmt.Errorf("server error (500): %s", bodyStr)
 	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr)
+		return &RetryableError{
+			StatusCode: statusCode,
+			RetryAfter: parseRetryAfter(headers),
+			Err:        fmt.Errorf("upstream unavailable (%d): %s", statusCode, bodyStr),
+		}
 	default:
 		return fmt.Errorf("HTTP %d: %s", statusCode, bodyStr)
 	}

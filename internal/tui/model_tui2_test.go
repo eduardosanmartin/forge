@@ -224,11 +224,15 @@ func TestHaltCtrlHStopsSpinnerAndCallsRPC(t *testing.T) {
 	if !fc.haltCalled || fc.haltReason != "user halt via TUI" {
 		t.Fatalf("halt not called with correct reason, got %q called %v", fc.haltReason, fc.haltCalled)
 	}
-	// Apply result message to get toast
+	// Apply result message — success now opens the message panel (item 11),
+	// not a toast.
 	model, _ = mm.Update(hr)
 	mm = model.(Model)
-	if mm.Toast() != "halted" {
-		t.Fatalf("toast %q want halted", mm.Toast())
+	if !mm.IsMessagePanelVisible() || mm.MessagePanelKind() != "success" {
+		t.Fatalf("expected a success message panel, visible=%v kind=%q", mm.IsMessagePanelVisible(), mm.MessagePanelKind())
+	}
+	if !strings.Contains(mm.MessagePanelText(), "halted") {
+		t.Fatalf("message panel text %q want to mention halted", mm.MessagePanelText())
 	}
 	if mm.IsSpinner() {
 		t.Fatal("spinner should remain off after halt result")
@@ -256,24 +260,37 @@ func TestSlashResumeModelMarkToasts(t *testing.T) {
 		fakeSetup func(*fakeClient)
 		wantToast string
 		check     func(*fakeClient) bool
+		// wantNoToast asserts the toast is empty instead of checking
+		// wantToast.
+		wantNoToast bool
+		// wantErrorPanel/wantSuccessPanel assert wantToast's text shows up
+		// in the floating message panel (red/green border, see
+		// showError/showSuccess) instead of the toast — every action
+		// result (success or RPC-result failure, as opposed to
+		// client-side validation like "usage: ...") routes there now.
+		wantErrorPanel   bool
+		wantSuccessPanel bool
 	}{
 		{
-			name:      "resume success",
-			input:     "/resume",
-			wantToast: "resumed",
-			check:     func(f *fakeClient) bool { return f.resumeCalled },
+			name:             "resume success",
+			input:            "/resume",
+			wantToast:        "resumed",
+			wantSuccessPanel: true,
+			check:            func(f *fakeClient) bool { return f.resumeCalled },
 		},
 		{
-			name:      "resume error",
-			input:     "/resume",
-			fakeSetup: func(f *fakeClient) { f.resumeErr = fakeErr("resume failed") },
-			wantToast: "resume failed",
+			name:           "resume error",
+			input:          "/resume",
+			fakeSetup:      func(f *fakeClient) { f.resumeErr = fakeErr("resume failed") },
+			wantToast:      "resume failed",
+			wantErrorPanel: true,
 		},
 		{
-			name:      "model valid",
-			input:     "/model gpt-4",
-			wantToast: "model → gpt-4",
-			check:     func(f *fakeClient) bool { return f.switchModel == "gpt-4" },
+			name:             "model valid",
+			input:            "/model gpt-4",
+			wantToast:        "gpt-4",
+			wantSuccessPanel: true,
+			check:            func(f *fakeClient) bool { return f.switchModel == "gpt-4" },
 		},
 		{
 			name:      "model invalid empty",
@@ -281,22 +298,25 @@ func TestSlashResumeModelMarkToasts(t *testing.T) {
 			wantToast: "usage:",
 		},
 		{
-			name:      "model error",
-			input:     "/model bad-model",
-			fakeSetup: func(f *fakeClient) { f.switchErr = fakeErr("model unavailable") },
-			wantToast: "model unavailable",
+			name:           "model error",
+			input:          "/model bad-model",
+			fakeSetup:      func(f *fakeClient) { f.switchErr = fakeErr("model unavailable") },
+			wantToast:      "model unavailable",
+			wantErrorPanel: true,
 		},
 		{
-			name:      "mark success",
-			input:     "/mark",
-			wantToast: "marked success",
-			check:     func(f *fakeClient) bool { return f.markCalled },
+			name:             "mark success",
+			input:            "/mark",
+			wantToast:        "marked as success",
+			wantSuccessPanel: true,
+			check:            func(f *fakeClient) bool { return f.markCalled },
 		},
 		{
-			name:      "mark error",
-			input:     "/mark",
-			fakeSetup: func(f *fakeClient) { f.markErr = fakeErr("mark failed") },
-			wantToast: "mark failed",
+			name:           "mark error",
+			input:          "/mark",
+			fakeSetup:      func(f *fakeClient) { f.markErr = fakeErr("mark failed") },
+			wantToast:      "mark failed",
+			wantErrorPanel: true,
 		},
 	}
 
@@ -332,8 +352,29 @@ func TestSlashResumeModelMarkToasts(t *testing.T) {
 				t.Fatalf("unexpected msg type %T", v)
 			}
 			mm = model.(Model)
-			if !strings.Contains(strings.ToLower(mm.Toast()), strings.ToLower(tc.wantToast)) {
-				t.Fatalf("toast %q want %q", mm.Toast(), tc.wantToast)
+			switch {
+			case tc.wantNoToast:
+				if mm.Toast() != "" {
+					t.Fatalf("toast should be empty (footer already shows this state), got %q", mm.Toast())
+				}
+			case tc.wantErrorPanel:
+				if !mm.IsMessagePanelVisible() || mm.MessagePanelKind() != "error" {
+					t.Fatalf("expected an error message panel for %q, visible=%v kind=%q", tc.wantToast, mm.IsMessagePanelVisible(), mm.MessagePanelKind())
+				}
+				if !strings.Contains(strings.ToLower(mm.MessagePanelText()), strings.ToLower(tc.wantToast)) {
+					t.Fatalf("error panel %q want %q", mm.MessagePanelText(), tc.wantToast)
+				}
+			case tc.wantSuccessPanel:
+				if !mm.IsMessagePanelVisible() || mm.MessagePanelKind() != "success" {
+					t.Fatalf("expected a success message panel for %q, visible=%v kind=%q", tc.wantToast, mm.IsMessagePanelVisible(), mm.MessagePanelKind())
+				}
+				if !strings.Contains(strings.ToLower(mm.MessagePanelText()), strings.ToLower(tc.wantToast)) {
+					t.Fatalf("success panel %q want %q", mm.MessagePanelText(), tc.wantToast)
+				}
+			default:
+				if !strings.Contains(strings.ToLower(mm.Toast()), strings.ToLower(tc.wantToast)) {
+					t.Fatalf("toast %q want %q", mm.Toast(), tc.wantToast)
+				}
 			}
 			if tc.check != nil && !tc.check(fc) {
 				t.Fatalf("check failed for %s", tc.name)

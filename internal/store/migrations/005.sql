@@ -1,0 +1,11 @@
+-- Migration v5: track which model produced each assistant message and how
+-- long the LLM call took, so clients can show "model + elapsed time"
+-- alongside token usage for every response (not just the in-flight one).
+-- Version: 5
+--
+-- Not executed directly: ALTER TABLE ADD COLUMN isn't idempotent, so this
+-- migration's actual DDL lives in migrate.go's `case 5` with a
+-- pragma_table_info guard per column (needed so re-running migrations
+-- against an already-migrated DB, e.g. via SetSchemaVersionForTesting,
+-- doesn't fail with "duplicate column name"). This file exists only so the
+-- version has a corresponding entry alongside 001-004.
