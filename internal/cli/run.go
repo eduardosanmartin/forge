@@ -451,15 +451,18 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 		logFile = f
 	}
 
-	var sessID string
 	if resume {
-		// RF-11.8: reuse the interrupted run's own session so the resumed
-		// tasks see the same conversational context the earlier ones built
-		// up, instead of starting the model cold. Resolved before connecting
-		// to the daemon so an unresumable run (or missing state) fails fast
-		// without requiring one to be running. Runner.Resume separately
-		// validates the run itself is actually resumable (not completed/
-		// failed/killed) and loads which tasks are already done.
+		// RF-11.8 fast-fail: confirm locally that there's something to
+		// resume BEFORE even trying to reach a daemon — run.resume
+		// (hojaDeRuta-multiagente.md Fase 5) re-validates the exact same
+		// state.json server-side, but a clear "nothing to resume" error
+		// shouldn't require a daemon to be running at all, and this keeps
+		// that property exactly as it always worked. Fase 3's ResumeRun
+		// assumes the SAME state-dir/cwd convention as the CLI (the daemon
+		// never reads the client's filesystem for anything else, but
+		// --state-dir is a path meaningful only relative to whichever
+		// process resolves it — already true for every run.* RPC since
+		// Fase 1, not a new constraint from this rewrite).
 		prev, lErr := run.LoadState(stateDir, mani.RunID)
 		if lErr != nil {
 			return fmt.Errorf("--resume: load previous state for run %q: %w", mani.RunID, lErr)
@@ -467,14 +470,17 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 		if prev.SessionID == "" {
 			return fmt.Errorf("--resume: run %q has no session recorded in its persisted state, cannot continue its conversation", mani.RunID)
 		}
-		sessID = prev.SessionID
 	}
 
 	// Dry-run needs no daemon and no LLM — UNLESS decomposition was
 	// requested: that needs both to ask the model for a task list, even
 	// though the resulting plan is only previewed, never executed
-	// (Runner.Run decomposes BEFORE its own dry_run short-circuit).
-	if mani.Mode == "dry_run" && !decompose {
+	// (Runner.Run decomposes BEFORE its own dry_run short-circuit). This is
+	// the ONE manifest path Fase 5 deliberately keeps running locally
+	// in-process (newManifestRunner/Runner.Run, no RPC at all) instead of
+	// through run.start: routing it through the daemon would newly REQUIRE
+	// one to be running for a mode that has never needed it.
+	if mani.Mode == run.ModeDryRun && !decompose {
 		r := newManifestRunner(mani, cfg, nil, autoYes, stateDir, "", logFile)
 		rep, _ := r.Run(ctx)
 		return writeManifestReport(activityWriter(os.Stdout, logFile), rep, jsonOut)
@@ -486,59 +492,31 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 	}
 	defer cl.Close()
 
-	if !resume && mani.Mode != "dry_run" {
-		// Create isolated session for the run (RNF-8.1 branch isolation primitive).
-		// Skipped for dry_run: Runner.Run never calls Executor for dry_run
-		// (it short-circuits to the report right after decomposing), so
-		// there's nothing to back with a real session.
-		sessID, err = createRunSession(ctx, cl, mani)
-		if err != nil {
-			return fmt.Errorf("create run session: %w", err)
-		}
-	}
+	// Subscribe to events BEFORE run.start/run.resume, not after: cl.Events
+	// has no history/replay (a notification published before a connection
+	// subscribes is simply dispatched to whichever subscribers exist AT
+	// THAT INSTANT — see internal/client/client.go's Events). A
+	// fast-completing task, or one that reaches its first checkpoint almost
+	// immediately, can publish run.checkpoint.event before run.start's RPC
+	// round trip even returns; subscribing only afterward would silently
+	// miss it forever and leave waitForRunCompletion polling a paused run
+	// nobody ever approved or declined. The channel buffers (64 deep) until
+	// driveManifestRun's watcher goroutine actually starts reading it below.
+	eventsCtx, cancelEvents := context.WithCancel(ctx)
+	defer cancelEvents()
+	events, evErr := cl.Events(eventsCtx)
 
-	var exec run.Executor
-	if mani.Mode != "dry_run" {
-		var toolTickTerminal io.Writer
-		if !jsonOut {
-			toolTickTerminal = os.Stderr
-		}
-		var onToolTick func(daemon.ToolCallEventPayload)
-		if ttw := activityWriter(toolTickTerminal, logFile); ttw != nil {
-			onToolTick = func(ev daemon.ToolCallEventPayload) { printToolCallTick(ttw, ev) }
-		}
-		exec = client.ManifestExecutor(ctx, cl, sessID, onToolTick)
-	}
-	r := newManifestRunner(mani, cfg, exec, autoYes, stateDir, sessID, logFile)
-	if decompose {
-		r.Decompose = true
-		r.Decomposer = client.ManifestDecomposer(cl)
-	}
-
-	// Nivel 2 observability: poll for subagents a task spawns (spawn_subagent
-	// / RF-1.2) while the blocking Run/Resume call is in flight. Purely a
-	// CLI-side session.list poll — no daemon changes, the topology data
-	// already exists (same metadata `forge subagents list` reads). Stopped
-	// via cancel once Run/Resume returns, whatever the outcome.
-	if mani.Mode != "dry_run" {
-		var subagentTerminal io.Writer
-		if !jsonOut {
-			subagentTerminal = os.Stderr
-		}
-		if saw := activityWriter(subagentTerminal, logFile); saw != nil {
-			pollCtx, pollCancel := context.WithCancel(ctx)
-			defer pollCancel()
-			go pollSubagents(pollCtx, cl, sessID, saw)
-		}
-	}
-
-	var rep *run.Report
-	var runErr error
+	var res *daemon.RunResult
 	if resume {
-		rep, runErr = r.Resume(ctx)
+		res, err = callRunResume(ctx, cl, mani, stateDir)
 	} else {
-		rep, runErr = r.Run(ctx)
+		res, err = callRunStart(ctx, cl, mani, stateDir, decompose)
 	}
+	if err != nil {
+		return err
+	}
+
+	rep, runErr := driveManifestRun(ctx, eventsCtx, cl, mani, res, events, evErr, jsonOut, autoYes, logFile, cancelEvents)
 	// Always report, even when paused/killed.
 	if rep != nil {
 		if wErr := writeManifestReport(activityWriter(os.Stdout, logFile), rep, jsonOut); wErr != nil {
@@ -556,6 +534,221 @@ func runManifest(cmd *cobra.Command, manifestPath string, jsonOut, autoYes bool,
 		cmd.SilenceErrors = true
 	}
 	return runErr
+}
+
+// callRunStart sends the parsed manifest (never the path — the daemon
+// never reads the client's filesystem, hojaDeRuta-multiagente.md Fase 0/3)
+// to run.start and returns the initial snapshot (SessionID, in particular,
+// needed to filter tool.call.event next).
+func callRunStart(ctx context.Context, cl *client.Client, mani *run.Manifest, stateDir string, decompose bool) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	if err := cl.Call(ctx, daemon.MethodRunStart, daemon.RunStartParams{Manifest: *mani, StateDir: stateDir, Decompose: decompose}, &res); err != nil {
+		return nil, fmt.Errorf("run.start: %w", err)
+	}
+	return &res, nil
+}
+
+// callRunResume is callRunStart's --resume counterpart (run.resume).
+func callRunResume(ctx context.Context, cl *client.Client, mani *run.Manifest, stateDir string) (*daemon.RunResult, error) {
+	var res daemon.RunResult
+	if err := cl.Call(ctx, daemon.MethodRunResume, daemon.RunResumeParams{Manifest: *mani, StateDir: stateDir}, &res); err != nil {
+		return nil, fmt.Errorf("--resume: %w", err)
+	}
+	return &res, nil
+}
+
+// runStatusPollInterval paces waitForRunCompletion's run.status polling —
+// purely a completion detector (no RPC notification signals "the whole
+// manifest finished", see hojaDeRuta-multiagente.md Fase 5 notes), it
+// never affects what gets PRINTED (that's entirely event-driven, see
+// watchManifestEvents), only how promptly the CLI notices the run is done
+// and exits.
+const runStatusPollInterval = 300 * time.Millisecond
+
+// runEventDrainGrace is a short pause between waitForRunCompletion
+// returning and canceling the event watcher: run.status (a synchronous
+// poll) and run.progress.event/run.checkpoint.event (async notifications)
+// travel over independent channels, so the very last progress line for a
+// just-finished run can still be in flight when the completion poll
+// already sees Report != nil. This narrows that window; it does not close
+// it — a documented, accepted limitation of a push-events + poll design
+// (see driveManifestRun).
+const runEventDrainGrace = 150 * time.Millisecond
+
+// driveManifestRun replaces the old in-process `Runner.Run()`/`Resume()`
+// blocking call (hojaDeRuta-multiagente.md Fase 5): it prints the exact
+// same progress/HITL/tool-tick terminal lines those callbacks used to
+// produce — printManifestProgress/printToolCallTick are reused UNCHANGED —
+// but sourced from run.progress.event/run.checkpoint.event/tool.call.event
+// notifications instead of direct Go callbacks, since the Runner itself now
+// lives in the daemon (see internal/daemon/runs.go's newDaemonManifestRunner).
+// Approving/declining a checkpoint calls run.approve_checkpoint the instant
+// its event arrives, autoYes deciding the direction — the same immediate,
+// non-interactive decision the old OnCheckpoint callback made synchronously
+// (this command has never read stdin for HITL approval; a decline just
+// pauses the run and the CLI reports that and exits, same as always).
+func driveManifestRun(ctx, eventsCtx context.Context, cl *client.Client, mani *run.Manifest, initial *daemon.RunResult, events <-chan daemon.JSONRPCNotification, eventsErr error, jsonOut, autoYes bool, logFile io.Writer, cancelEvents context.CancelFunc) (*run.Report, error) {
+	runID := mani.RunID
+	sessionID := initial.SessionID
+
+	var toolTickTerminal io.Writer
+	if !jsonOut {
+		toolTickTerminal = os.Stderr
+	}
+	ttw := activityWriter(toolTickTerminal, logFile)
+	// Progress/HITL lines go to stderr unconditionally of --json (same
+	// convention as before this rewrite: --json only constrains the final
+	// stdout result, stderr stays human-readable).
+	progressW := activityWriter(os.Stderr, logFile)
+
+	if eventsErr == nil {
+		// eventsCtx, not ctx: this goroutine must stop specifically when
+		// cancelEvents() fires (below, and in runManifest's own defer) —
+		// ctx (the whole command's context) only ends at process exit.
+		go watchManifestEvents(eventsCtx, cl, runID, sessionID, events, progressW, ttw, autoYes)
+	}
+
+	// Nivel 2 observability: poll for subagents a task spawns (spawn_subagent
+	// / RF-1.2) while the run is in flight. Unchanged mechanism from before
+	// this rewrite — a CLI-side session.list poll, independent of where the
+	// Runner itself executes — just fed sessionID from the RPC result
+	// instead of a locally created session.
+	if mani.Mode != run.ModeDryRun {
+		var subagentTerminal io.Writer
+		if !jsonOut {
+			subagentTerminal = os.Stderr
+		}
+		if saw := activityWriter(subagentTerminal, logFile); saw != nil {
+			pollCtx, pollCancel := context.WithCancel(ctx)
+			defer pollCancel()
+			go pollSubagents(pollCtx, cl, sessionID, saw)
+		}
+	}
+
+	final, err := waitForRunCompletion(ctx, cl, runID)
+	if err != nil {
+		cancelEvents()
+		return nil, err
+	}
+	time.Sleep(runEventDrainGrace)
+	cancelEvents()
+	return final.Report, errFromRunResult(final)
+}
+
+// watchManifestEvents is driveManifestRun's event loop, run in its own
+// goroutine for the run's whole lifetime (canceled via eventsCtx). Every
+// notification this connection receives is filtered here — cl.Events never
+// scopes a subscription server-side (see internal/client/run_manifest.go's
+// ManifestExecutor, which relies on the exact same broadcast-to-everyone
+// behavior for tool.call.event today).
+func watchManifestEvents(ctx context.Context, cl *client.Client, runID, sessionID string, events <-chan daemon.JSONRPCNotification, progressW, ttw io.Writer, autoYes bool) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case notif, ok := <-events:
+			if !ok {
+				return
+			}
+			switch notif.Method {
+			case daemon.MethodRunProgressEvent:
+				if progressW == nil {
+					continue
+				}
+				var payload daemon.RunProgressEventPayload
+				if json.Unmarshal(notif.Params, &payload) != nil || payload.RunID != runID {
+					continue
+				}
+				printManifestProgress(progressW, progressEventFromPayload(payload))
+			case daemon.MethodRunCheckpointEvent:
+				var payload daemon.RunCheckpointEventPayload
+				if json.Unmarshal(notif.Params, &payload) != nil || payload.RunID != runID {
+					continue
+				}
+				handleCheckpointEvent(ctx, cl, progressW, runID, payload, autoYes)
+			case daemon.MethodToolCallEvent:
+				if ttw == nil {
+					continue
+				}
+				var payload daemon.ToolCallEventPayload
+				if json.Unmarshal(notif.Params, &payload) != nil || payload.SessionID != sessionID {
+					continue
+				}
+				printToolCallTick(ttw, payload)
+			}
+		}
+	}
+}
+
+// progressEventFromPayload reconstructs a run.ProgressEvent from its wire
+// payload so printManifestProgress's exact format strings (including %v on
+// Err) stay the single source of truth for this output — no duplicated
+// formatting logic between the old in-process path and this one.
+func progressEventFromPayload(p daemon.RunProgressEventPayload) run.ProgressEvent {
+	var errVal error
+	if p.Error != "" {
+		errVal = errors.New(p.Error)
+	}
+	return run.ProgressEvent{
+		Phase: run.ProgressPhase(p.Phase), TaskID: p.TaskID, TaskIndex: p.TaskIndex, TotalTasks: p.TotalTasks,
+		Attempt: p.Attempt, MaxRetries: p.MaxRetries,
+		TokensUsed: p.TokensUsed, IterationsUsed: p.IterationsUsed, Err: errVal,
+	}
+}
+
+// handleCheckpointEvent reproduces the exact HITL lines
+// newManifestRunner's OnCheckpoint callback used to print synchronously,
+// then submits the same immediate decision via run.approve_checkpoint. A
+// failure submitting the decision is a genuinely NEW failure mode this
+// architecture introduces (the old in-process callback could never fail to
+// deliver its own return value) — surfaced to stderr rather than silently
+// leaving the run parked forever with no visible explanation.
+func handleCheckpointEvent(ctx context.Context, cl *client.Client, w io.Writer, runID string, payload daemon.RunCheckpointEventPayload, autoYes bool) {
+	if w != nil {
+		if autoYes {
+			fmt.Fprintf(w, "[HITL auto-approved] %s (%s)\n", payload.Checkpoint, payload.Trigger)
+		} else {
+			fmt.Fprintf(w, "[HITL] checkpoint %q (%s) requires approval — run paused (re-run with --yes to auto-approve)\n", payload.Checkpoint, payload.Trigger)
+		}
+	}
+	var res daemon.RunResult
+	if err := cl.Call(ctx, daemon.MethodRunApproveCheckpoint, daemon.RunApproveCheckpointParams{RunID: runID, Approved: autoYes}, &res); err != nil {
+		fmt.Fprintf(os.Stderr, "[HITL] failed to submit checkpoint decision for run %s: %v\n", runID, err)
+	}
+}
+
+// waitForRunCompletion polls run.status until the run reaches a genuinely
+// terminal state — Report != nil, the same signal
+// internal/daemon/runs_test.go's isRunTerminal uses, since RunPausedCheckpoint
+// is NOT terminal while still live-blocked waiting on a decision (Report is
+// nil until the goroutine actually returns). A transient poll error is
+// swallowed and retried (matches pollSubagents' own best-effort convention)
+// unless ctx itself is done, which is the only way this returns early
+// without a result.
+func waitForRunCompletion(ctx context.Context, cl *client.Client, runID string) (*daemon.RunResult, error) {
+	for {
+		var res daemon.RunResult
+		if err := cl.Call(ctx, daemon.MethodRunStatus, daemon.RunStatusParams{RunID: runID}, &res); err == nil && res.Report != nil {
+			return &res, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(runStatusPollInterval):
+		}
+	}
+}
+
+// errFromRunResult reconstructs the same error Runner.Run()/Resume() used
+// to return alongside its report (pauseReport/killedReport/failReport in
+// internal/run/runner.go all deliberately return report+error together) —
+// finishRun (internal/daemon/runs.go) already preserves that exact text in
+// RunResult.Error, so this just turns "" back into nil.
+func errFromRunResult(res *daemon.RunResult) error {
+	if res.Error == "" {
+		return nil
+	}
+	return errors.New(res.Error)
 }
 
 // printManifestGuidance prints the one human-facing line that used to be
@@ -596,20 +789,6 @@ func printManifestGuidance(w io.Writer, rep *run.Report, manifestPath string) {
 func loadManifest(path string) (*run.Manifest, error) {
 	// Delegates to run.ParseFile so spec_ref resolution and validation stay in one place.
 	return run.ParseFile(path)
-}
-
-func createRunSession(ctx context.Context, cl *client.Client, mani *run.Manifest) (string, error) {
-	meta := map[string]any{
-		"source":      "run_manifest",
-		"run_id":      mani.RunID,
-		"mode":        mani.Mode,
-		"work_branch": mani.Git.WorkBranch,
-	}
-	var res daemon.SessionResult
-	if err := cl.Call(ctx, daemon.MethodCreateSession, daemon.CreateSessionParams{Metadata: meta}, &res); err != nil {
-		return "", err
-	}
-	return res.ID, nil
 }
 
 // newManifestRunner wires the Runner's observability hooks. logFile is

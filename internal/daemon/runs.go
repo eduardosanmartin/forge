@@ -264,6 +264,7 @@ func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, s
 	}
 	r.OnProgress = func(ev run.ProgressEvent) {
 		m.setRunProgress(mani.RunID, ev)
+		m.publishRunProgressEvent(mani.RunID, sessionID, ev)
 	}
 	return r
 }
@@ -460,6 +461,33 @@ func (m *SessionManager) publishRunCheckpointEvent(runID, sessionID string, cp r
 	}
 	payload := RunCheckpointEventPayload{RunID: runID, SessionID: sessionID, Checkpoint: cp.ID, Trigger: cp.Trigger, Reason: reason}
 	if notif, err := NewNotification(MethodRunCheckpointEvent, payload); err == nil {
+		pub(sessionID, notif)
+	}
+}
+
+// publishRunProgressEvent broadcasts run.progress.event for one
+// run.ProgressEvent (Fase 5, hojaDeRuta-multiagente.md) — same best-effort,
+// nil-publisher-skips convention as publishRunCheckpointEvent above; this is
+// what lets internal/cli/run.go reproduce printManifestProgress's exact
+// per-task lines without the Runner living in its own process anymore.
+func (m *SessionManager) publishRunProgressEvent(runID, sessionID string, ev run.ProgressEvent) {
+	m.mu.RLock()
+	pub := m.deltaPublisher
+	m.mu.RUnlock()
+	if pub == nil {
+		return
+	}
+	errMsg := ""
+	if ev.Err != nil {
+		errMsg = ev.Err.Error()
+	}
+	payload := RunProgressEventPayload{
+		RunID: runID, SessionID: sessionID, Phase: string(ev.Phase),
+		TaskID: ev.TaskID, TaskIndex: ev.TaskIndex, TotalTasks: ev.TotalTasks,
+		Attempt: ev.Attempt, MaxRetries: ev.MaxRetries,
+		TokensUsed: ev.TokensUsed, IterationsUsed: ev.IterationsUsed, Error: errMsg,
+	}
+	if notif, err := NewNotification(MethodRunProgressEvent, payload); err == nil {
 		pub(sessionID, notif)
 	}
 }

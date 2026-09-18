@@ -640,3 +640,62 @@ func TestRunRPC_ApproveCheckpointAndNotification(t *testing.T) {
 		t.Fatalf("want ErrCodeRunNoCheckpointPending, got %+v", resp.Error)
 	}
 }
+
+// TestRunProgressEvent_MirrorsPerTaskDetail is the Fase 5 addition: with no
+// public RPC path exercising it yet (that's internal/cli/run.go, outside
+// this package), this confirms directly at the SessionManager level that
+// completing a run publishes one run.progress.event per
+// internal/run.ProgressEvent the Runner's OnProgress hook fires, carrying
+// the SAME per-task detail (phase, task id/index, attempt/retry counts)
+// printManifestProgress needs to reproduce its exact terminal lines — proof
+// that run.status polling alone (current_task/tokens/iterations only) would
+// have been insufficient.
+func TestRunProgressEvent_MirrorsPerTaskDetail(t *testing.T) {
+	m := newTestSessionManagerForRuns()
+	stateDir := t.TempDir()
+	mani := testRunManifest("run-progress-events", run.ModeCheckpoint, false)
+
+	var mu sync.Mutex
+	var events []RunProgressEventPayload
+	m.SetDeltaPublisher(func(sessionID string, notif *JSONRPCNotification) {
+		if notif.Method != MethodRunProgressEvent {
+			return
+		}
+		var payload RunProgressEventPayload
+		if err := json.Unmarshal(notif.Params, &payload); err != nil {
+			t.Fatalf("unmarshal progress event payload: %v", err)
+		}
+		mu.Lock()
+		events = append(events, payload)
+		mu.Unlock()
+	})
+
+	if _, err := m.StartRun(context.Background(), mani, stateDir, false); err != nil {
+		t.Fatalf("StartRun: %v", err)
+	}
+	waitForRunTerminal(t, m, "run-progress-events", 5*time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) == 0 {
+		t.Fatal("expected at least one run.progress.event for a 2-task manifest")
+	}
+	var sawStart, sawDone bool
+	for _, ev := range events {
+		if ev.RunID != "run-progress-events" {
+			t.Fatalf("event run_id = %q, want run-progress-events (event %+v)", ev.RunID, ev)
+		}
+		if ev.TotalTasks != 2 {
+			t.Fatalf("event TotalTasks = %d, want 2 (event %+v)", ev.TotalTasks, ev)
+		}
+		switch ev.Phase {
+		case "task_start":
+			sawStart = true
+		case "task_done":
+			sawDone = true
+		}
+	}
+	if !sawStart || !sawDone {
+		t.Fatalf("expected both task_start and task_done phases, got %+v", events)
+	}
+}

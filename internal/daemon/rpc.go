@@ -76,6 +76,16 @@ const (
 	// (Fase 3) — publishing the notification a phase early costs nothing
 	// and means Fase 3 only has to wire the approve RPC, not this too.
 	MethodRunCheckpointEvent = "run.checkpoint.event"
+	// MethodRunProgressEvent mirrors one internal/run.ProgressEvent
+	// (task_start/task_retry/task_done/task_failed) the instant the
+	// daemon-hosted Runner's OnProgress hook fires (hojaDeRuta-multiagente.md
+	// Fase 5). Added specifically so internal/cli/run.go's thin RPC client
+	// can reproduce the EXACT same per-task progress lines
+	// printManifestProgress always printed when the Runner ran in-process —
+	// run.status polling alone only exposes cumulative current-task/tokens/
+	// iterations, not per-attempt retry/failure detail, which isn't enough
+	// to preserve that output byte-for-byte.
+	MethodRunProgressEvent = "run.progress.event"
 )
 
 // SessionEventPayload carries session lifecycle events.
@@ -116,6 +126,23 @@ type RunCheckpointEventPayload struct {
 	Checkpoint string `json:"checkpoint"` // checkpoint ID
 	Trigger    string `json:"trigger"`
 	Reason     string `json:"reason"`
+}
+
+// RunProgressEventPayload mirrors internal/run.ProgressEvent (see
+// MethodRunProgressEvent) — run.Err isn't JSON-serializable so it travels as
+// Error's formatted string, "" when nil.
+type RunProgressEventPayload struct {
+	RunID          string `json:"run_id"`
+	SessionID      string `json:"session_id"`
+	Phase          string `json:"phase"` // task_start | task_retry | task_done | task_failed
+	TaskID         string `json:"task_id"`
+	TaskIndex      int    `json:"task_index"`
+	TotalTasks     int    `json:"total_tasks"`
+	Attempt        int    `json:"attempt,omitempty"`
+	MaxRetries     int    `json:"max_retries,omitempty"`
+	TokensUsed     int    `json:"tokens_used,omitempty"`
+	IterationsUsed int    `json:"iterations_used,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 // MessageDeltaPayload carries live streaming deltas (WU3).
