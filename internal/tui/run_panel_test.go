@@ -195,6 +195,80 @@ func TestRunPanel_ApproveAndDeclineKeys(t *testing.T) {
 	}
 }
 
+// TestRunPanel_ApproveRacySnapshotStillPolls is a regression lock for a
+// real bug found live driving the TUI through the QA harness
+// (hojaDeRuta-qa-autonomo-tui.md Fase 4, scenarios B3/B6): approving or
+// declining a checkpoint that was the run's LAST one before completion
+// left the panel frozen forever showing the checkpoint as still pending.
+// Root cause: ApproveRunCheckpoint's own returned snapshot is racy by
+// design (internal/daemon/runs.go) — taken right after handing the
+// decision to the run's goroutine, which may not have processed it yet —
+// so it can still legitimately report Status == RunPausedCheckpoint even
+// though the decision already went through server-side. The old code only
+// rescheduled polling when Status == RunRunning, so this exact snapshot
+// never triggered another poll and the panel never learned the real
+// outcome. The fix polls again whenever Report == nil (the same
+// genuinely-terminal signal used everywhere else in this codebase),
+// regardless of which non-terminal Status a racy snapshot happens to show.
+func TestRunPanel_ApproveRacySnapshotStillPolls(t *testing.T) {
+	fc := &fakeClient{
+		// The racy snapshot: still shows the checkpoint pending even though
+		// the decision was already accepted server-side.
+		runApproveRes: &daemon.RunResult{
+			ID: "run-1", Status: daemon.RunPausedCheckpoint,
+			PendingCheckpoint: &run.Checkpoint{ID: "pre-merge", Trigger: run.TriggerBeforeMerge, Required: true},
+			Report:            nil,
+		},
+		runStatusRes: &daemon.RunResult{ID: "run-1", Status: daemon.RunDone, Report: &run.Report{Status: run.StatusCompleted}},
+	}
+	m := newTestModel()
+	m.SetClient(fc)
+	m.runID = "run-1"
+	m.runPanelVisible = true
+	m.runResult = &daemon.RunResult{
+		ID: "run-1", Status: daemon.RunPausedCheckpoint,
+		PendingCheckpoint: &run.Checkpoint{ID: "pre-merge", Trigger: run.TriggerBeforeMerge, Required: true},
+	}
+
+	_, cmd := m.Update(keyPress("y"))
+	if cmd == nil {
+		t.Fatal("expected a cmd from approving")
+	}
+	msg := cmd()
+	ram, ok := msg.(runApproveMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want runApproveMsg", msg)
+	}
+
+	model2, pollCmd := m.Update(ram)
+	mm2 := model2.(Model)
+	if pollCmd == nil {
+		t.Fatal("a racy RunPausedCheckpoint snapshot with Report == nil must still schedule another poll — this is the exact bug found live (B3/B6), the panel would otherwise freeze forever")
+	}
+	if !mm2.runPollPending {
+		t.Fatal("runPollPending should be set after rescheduling from the racy snapshot")
+	}
+
+	// Confirm the follow-up poll actually reaches the real, settled state
+	// (not stuck echoing the same stale snapshot forever).
+	tickMsg := pollCmd()
+	statusCmd, ok := tickMsg.(runStatusTickMsg)
+	_ = ok
+	model3, statusPollCmd := mm2.Update(statusCmd)
+	_ = model3
+	if statusPollCmd == nil {
+		t.Fatal("expected the tick to trigger a status fetch")
+	}
+	finalMsg := statusPollCmd()
+	rsm, ok := finalMsg.(runStatusMsg)
+	if !ok {
+		t.Fatalf("msg type = %T, want runStatusMsg", finalMsg)
+	}
+	if rsm.res == nil || rsm.res.Report == nil || rsm.res.Report.Status != run.StatusCompleted {
+		t.Fatalf("follow-up poll should reveal the real completed state, got %+v", rsm.res)
+	}
+}
+
 // TestRunPanel_YNIgnoredWithoutPendingCheckpoint ensures y/n are no-ops when
 // there's nothing to approve — they must not fire a spurious RPC.
 func TestRunPanel_YNIgnoredWithoutPendingCheckpoint(t *testing.T) {
@@ -380,15 +454,76 @@ func TestRunStatusPoll_ReschedulesWhileRunningStopsWhenTerminal(t *testing.T) {
 		t.Fatal("runPollPending should be set again after rescheduling")
 	}
 
-	// A terminal status does not reschedule.
+	// A terminal status does not reschedule. Report must be set here to
+	// match reality: the daemon only ever reports Status == RunDone
+	// together with a non-nil Report (finishRun, internal/daemon/runs.go)
+	// — Report == nil, not Status, is the genuinely-terminal signal the
+	// Model actually gates on (see runStatusMsg/runApproveMsg/runStartMsg
+	// and TestRunPanel_ApproveRacySnapshotStillPolls for why: a racy
+	// snapshot can report a non-terminal Status with Report == nil and
+	// still needs another poll).
 	mm3.runPollPending = false
-	model4, cmd4 := mm3.Update(runStatusMsg{res: &daemon.RunResult{ID: "run-3", Status: daemon.RunDone}})
+	model4, cmd4 := mm3.Update(runStatusMsg{res: &daemon.RunResult{ID: "run-3", Status: daemon.RunDone, Report: &run.Report{Status: run.StatusCompleted}}})
 	mm4 := model4.(Model)
 	if cmd4 != nil {
 		t.Fatal("a terminal run.status result must not reschedule another poll")
 	}
 	if mm4.runPollPending {
 		t.Fatal("runPollPending must stay false once the run is terminal")
+	}
+}
+
+// TestRunPanel_ClearsOnSessionSwitch is a regression lock for a real bug
+// found live driving the TUI through the QA harness
+// (hojaDeRuta-qa-autonomo-tui.md Fase 4, scenario B5): a run belongs to
+// whichever session started it, not to the TUI process globally, but the
+// run panel's tracking state (runID/runResult/runPanelVisible/
+// runPollPending) previously survived a session switch untouched. A ctrl+4
+// in a brand-new session that never ran anything showed a STALE run left
+// over from the session you just switched away from, instead of "no active
+// run". The fix (resetRunPanelForSessionSwitch) clears that state at every
+// site that already resets entries/lastSeq/pendingUserText for the same
+// reason; this test drives one of those sites (createSessionMsg, the "n"
+// new-session path) end to end through ctrl+4.
+func TestRunPanel_ClearsOnSessionSwitch(t *testing.T) {
+	m := newTestModel()
+	m.SetClient(&fakeClient{})
+	// Simulate a session that has a tracked, visible run — exactly the
+	// state ctrl+4 would otherwise resurrect after switching sessions.
+	m.runID = "run-old"
+	m.runPanelVisible = true
+	m.runPollPending = true
+	m.runResult = &daemon.RunResult{ID: "run-old", Status: daemon.RunRunning}
+	m.runErr = "stale error from the old session"
+
+	model, _ := m.Update(createSessionMsg{res: &daemon.SessionResult{ID: "sess-new"}})
+	mm := model.(Model)
+
+	if mm.runID != "" {
+		t.Fatalf("runID = %q, want cleared after switching sessions", mm.runID)
+	}
+	if mm.runResult != nil {
+		t.Fatal("runResult should be cleared after switching sessions")
+	}
+	if mm.runErr != "" {
+		t.Fatalf("runErr = %q, want cleared after switching sessions", mm.runErr)
+	}
+	if mm.runPanelVisible {
+		t.Fatal("runPanelVisible should be cleared after switching sessions")
+	}
+	if mm.runPollPending {
+		t.Fatal("runPollPending should be cleared after switching sessions")
+	}
+
+	// ctrl+4 in the new session must report "no active run", not resurrect
+	// the old session's run — this is the exact user-visible symptom (B5).
+	model2, _ := mm.Update(keyPress("ctrl+4"))
+	mm2 := model2.(Model)
+	if mm2.runPanelVisible {
+		t.Fatal("ctrl+4 must not open the panel — the new session has no tracked run")
+	}
+	if !strings.Contains(mm2.toast, "no active run") {
+		t.Fatalf("toast = %q, want a no-active-run hint", mm2.toast)
 	}
 }
 

@@ -1066,6 +1066,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastSeq = 0
 			m.entries = nil
 			m.pendingUserText = ""
+			m.resetRunPanelForSessionSwitch()
 			m.rebuildTranscriptForceBottom()
 			if m.explicitSessionCreate {
 				m.toast = fmt.Sprintf("nueva sesión → %s", msg.res.ID[:8])
@@ -1462,7 +1463,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.runErr = ""
 		m.runPanelVisible = true
 		m.toast = fmt.Sprintf("run %s started", msg.res.ID)
-		if msg.res.Status == daemon.RunRunning {
+		if msg.res.Report == nil {
 			return m, m.scheduleRunStatusPoll(m.runID)
 		}
 		return m, nil
@@ -1486,7 +1487,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runResult = msg.res
 		m.runErr = ""
-		if msg.res.Status == daemon.RunRunning {
+		if msg.res.Report == nil {
 			return m, m.scheduleRunStatusPoll(m.runID)
 		}
 		return m, nil
@@ -1501,7 +1502,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runResult = msg.res
 		m.runErr = ""
-		if msg.res.Status == daemon.RunRunning {
+		// Report == nil, not Status == RunRunning: ApproveRunCheckpoint's
+		// own returned snapshot is racy by design (internal/daemon/runs.go
+		// — taken right after handing the decision to the run's goroutine,
+		// which may not have processed it yet) and can still legitimately
+		// read RunPausedCheckpoint here even though the decision already
+		// went through. Gating strictly on RunRunning left the panel
+		// permanently stuck showing a resolved checkpoint as pending —
+		// found live driving the real TUI via the QA harness
+		// (hojaDeRuta-qa-autonomo-tui.md Fase 4, scenarios B3/B6). Polling
+		// again (matching the exact terminal-state check waitForRunCompletion
+		// and isRunTerminal already use elsewhere) picks up the real,
+		// settled status on the very next tick instead of freezing here.
+		if msg.res.Report == nil {
 			return m, m.scheduleRunStatusPoll(m.runID)
 		}
 		return m, nil
@@ -1638,6 +1651,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastSeq = 0
 				m.entries = nil
 				m.pendingUserText = ""
+				m.resetRunPanelForSessionSwitch()
 				m.rebuildTranscriptForceBottom()
 					m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 					m.suggestionsVisible = false
@@ -1773,6 +1787,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if strings.TrimSpace(cur) == sel.Command || cur == sel.Command+" " {
 						m.dismissSuggestions()
 						m.relayout() // suggestion box rows leave the input area
+						break // fall through to global enter handling (send)
+					}
+					// Real bug found live driving the TUI through a PTY
+					// harness (hojaDeRuta-qa-autonomo-tui.md Fase 3): once
+					// the user types PAST the bare command name into an
+					// argument (e.g. "/run run.json"), the suggestion
+					// dropdown stays open — updateSuggestions filters on
+					// the first whitespace-separated token only, so it
+					// never auto-closes on its own — and Enter fell through
+					// to suggestionComplete() below, which unconditionally
+					// overwrites the input with just "<command> " (see its
+					// own doc comment), silently discarding "run.json" and
+					// every other typed argument. Any command taking an
+					// argument (/run, /model, /palette) was unusable by
+					// normal typing. Once a space exists past the first
+					// token, the user is composing an argument, not the
+					// command name — Enter must send it, never complete it
+					// away.
+					if strings.Contains(strings.TrimRight(cur, " "), " ") {
+						m.dismissSuggestions()
+						m.relayout()
 						break // fall through to global enter handling (send)
 					}
 				}
@@ -2986,11 +3021,29 @@ func (m *Model) cycleSession() (bool, tea.Cmd) {
 	// Spec says entries replaced, lastSeq reset, echo cleared — so clear entries wholesale.
 	m.entries = nil
 	m.pendingUserText = ""
+	m.resetRunPanelForSessionSwitch()
 	m.rebuildTranscriptForceBottom()
 	m.toast = fmt.Sprintf("session → %s", next.ID[:8])
 	// Also clear suggestions
 	m.suggestionsVisible = false
 	return true, m.cmdGetMessagesSince(0)
+}
+
+// resetRunPanelForSessionSwitch clears the run panel's tracking state on
+// every session switch (new session or selecting an existing one) — a run
+// belongs to whichever session started it (or was told about via an
+// incoming checkpoint event), not to the TUI process globally. Without
+// this, ctrl+4 in a session that never ran anything showed a STALE run
+// left over from a previous session instead of "no active run" — a real
+// bug found live via the QA harness (hojaDeRuta-qa-autonomo-tui.md Fase 4,
+// scenario B5). Called from every site that already resets
+// entries/lastSeq/pendingUserText for the same reason.
+func (m *Model) resetRunPanelForSessionSwitch() {
+	m.runID = ""
+	m.runResult = nil
+	m.runErr = ""
+	m.runPanelVisible = false
+	m.runPollPending = false
 }
 
 func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
@@ -3002,6 +3055,7 @@ func (m *Model) switchToSession(idx int) (bool, tea.Cmd) {
 	m.lastSeq = 0
 	m.entries = nil
 	m.pendingUserText = ""
+	m.resetRunPanelForSessionSwitch()
 	m.rebuildTranscriptForceBottom()
 	m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 	m.suggestionsVisible = false

@@ -160,6 +160,37 @@ func TestSuggestionInterceptor_ModelExactSends(t *testing.T) {
 	}
 }
 
+// TestSuggestionInterceptor_ArgumentNotDiscarded is a regression lock for a
+// bug found LIVE while driving the real TUI through a PTY harness
+// (hojaDeRuta-qa-autonomo-tui.md Fase 3, outside this repo): typing
+// "/run run.json" and pressing Enter while the suggestion dropdown was
+// still open (updateSuggestions filters on the first whitespace-separated
+// token only, so it never auto-closes once a command name matches,
+// regardless of what argument follows) silently discarded "run.json" —
+// Enter fell through to suggestionComplete(), which unconditionally
+// overwrites the whole input with just "<command> ". Every argument-taking
+// slash command (/run, /model, /palette) was unusable by normal typing.
+func TestSuggestionInterceptor_ArgumentNotDiscarded(t *testing.T) {
+	m := newTestModel()
+	m.SetSize(80, 24)
+	m.input.SetValue("/run run.json")
+	m.updateSuggestions()
+	if !m.IsSuggestionsVisible() {
+		t.Fatal("suggestions should still be visible for /run run.json (filter matches on the first token only)")
+	}
+	model, _ := m.Update(keyPress("enter"))
+	mm := model.(Model)
+	if mm.IsSuggestionsVisible() {
+		t.Fatal("suggestions should close once Enter sends")
+	}
+	if mm.input.Value() != "" {
+		t.Fatalf("input should be cleared after send, got %q (argument was discarded by suggestion-complete instead of being sent)", mm.input.Value())
+	}
+	if mm.Toast() != "not connected" {
+		t.Fatalf("expected the /run handler to actually run (toast %q from no client), not a silent suggestion-complete", mm.Toast())
+	}
+}
+
 func TestSuggestionInterceptor_PrefixCompletes(t *testing.T) {
 	m := newTestModel()
 	m.SetSize(80, 24)
