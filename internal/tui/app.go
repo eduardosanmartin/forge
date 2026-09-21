@@ -43,7 +43,13 @@ func (a *ClientAdapter) CreateSession() (*daemon.SessionResult, error) {
 func (a *ClientAdapter) ExecuteTurn(sessionID, message string) (*daemon.ExecuteTurnResult, error) {
 	var res daemon.ExecuteTurnResult
 	ctx := context.Background()
-	if err := a.c.Call(ctx, daemon.MethodExecuteTurn, daemon.ExecuteTurnParams{SessionID: sessionID, UserMessage: message}, &res); err != nil {
+	// EnableSkills: true — the TUI never sent any v1 flag before this (found
+	// live via hojaDeRuta-embeddings-skills.md investigation: skills could be
+	// installed and enabled yet never fire from the TUI). Only skills is
+	// turned on here, not retrieval/compaction/anchoring/routing — those
+	// remain CLI-only (forge chat --retrieval etc.) until a real need to
+	// extend this beyond skills.
+	if err := a.c.Call(ctx, daemon.MethodExecuteTurn, daemon.ExecuteTurnParams{SessionID: sessionID, UserMessage: message, EnableSkills: true}, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

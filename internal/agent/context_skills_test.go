@@ -91,7 +91,12 @@ func TestContextAssembler_Build_SkillsInjection(t *testing.T) {
 			assembler := NewContextAssembler(tools.New(nil, "", nil), &contextMockStore{
 				session: &store.Session{ID: "session-1", Metadata: tc.metadata},
 			}, 10)
-			assembler.SetV1Deps(V1Deps{Skills: tc.skillsDep})
+			// LazyLoad: true — this test is specifically about the semantic
+			// matching path (RF-4.2's Relevant()). Manual activation
+			// (LazyLoad false, the config default since
+			// hojaDeRuta-embeddings-skills.md Fase 3) has its own coverage
+			// below in TestContextAssembler_Build_SkillsManualActivation.
+			assembler.SetV1Deps(V1Deps{Skills: tc.skillsDep, SkillsLazyLoad: true})
 			messages, err := assembler.Build(ctx, "session-1", tc.userMsg)
 			if err != nil {
 				t.Fatalf("Build: %v", err)
@@ -111,6 +116,92 @@ func TestContextAssembler_Build_SkillsInjection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestContextAssembler_Build_SkillsManualActivation covers LazyLoad false
+// (the config default — hojaDeRuta-embeddings-skills.md Fase 3): no
+// Relevant()/embedding call, the active set is exactly
+// ActiveManual(SkillsEnabled) — project skills named in SkillsEnabled, plus
+// every global-origin skill unconditionally. Injection must not depend on
+// userMsg content at all, unlike the LazyLoad-true tests above.
+func TestContextAssembler_Build_SkillsManualActivation(t *testing.T) {
+	ctx := context.Background()
+
+	projectRoot := t.TempDir()
+	globalRoot := t.TempDir()
+	writeSkill := func(dir, name, desc, body string) {
+		skillDir := filepath.Join(dir, name)
+		if err := os.MkdirAll(skillDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		content := "---\nname: " + name + "\ndescription: \"" + desc + "\"\nsource: local\n---\n" + body + "\n"
+		if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatalf("write skill: %v", err)
+		}
+	}
+	writeSkill(projectRoot, "project-only", "a project-scoped skill", "PROJECT SKILL BODY")
+	writeSkill(globalRoot, "global-always", "a global skill", "GLOBAL SKILL BODY")
+
+	mgr := skill.NewManager(skill.Options{})
+	defer mgr.Close()
+	if _, err := mgr.ScanAll(projectRoot, globalRoot); err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+
+	unrelatedMsg := "weather forecast gardening cooking" // must not matter in manual mode
+
+	newAssembler := func(skillsEnabled []string) *ContextAssembler {
+		a := NewContextAssembler(tools.New(nil, "", nil), &contextMockStore{
+			session: &store.Session{ID: "session-1", Metadata: map[string]any{"v1_skills": true}},
+		}, 10)
+		a.SetV1Deps(V1Deps{Skills: mgr, SkillsLazyLoad: false, SkillsEnabled: skillsEnabled})
+		return a
+	}
+
+	t.Run("project skill listed in SkillsEnabled injects regardless of message", func(t *testing.T) {
+		messages, err := newAssembler([]string{"project-only"}).Build(ctx, "session-1", unrelatedMsg)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		var all string
+		for _, m := range messages {
+			all += m.Content
+		}
+		if !contains(all, "PROJECT SKILL BODY") {
+			t.Errorf("expected project-only injected regardless of message, messages=%+v", messages)
+		}
+	})
+
+	t.Run("project skill NOT listed in SkillsEnabled does not inject (global-always still does)", func(t *testing.T) {
+		messages, err := newAssembler(nil).Build(ctx, "session-1", unrelatedMsg)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		var all string
+		for _, m := range messages {
+			all += m.Content
+		}
+		if contains(all, "PROJECT SKILL BODY") {
+			t.Errorf("project skill not in SkillsEnabled must not inject, messages=%+v", messages)
+		}
+		if !contains(all, "GLOBAL SKILL BODY") {
+			t.Errorf("global-always should still inject even when SkillsEnabled is empty, messages=%+v", messages)
+		}
+	})
+
+	t.Run("global skill injects unconditionally without being listed", func(t *testing.T) {
+		messages, err := newAssembler(nil).Build(ctx, "session-1", unrelatedMsg)
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		var all string
+		for _, m := range messages {
+			all += m.Content
+		}
+		if !contains(all, "GLOBAL SKILL BODY") {
+			t.Errorf("expected global-always injected without being listed, messages=%+v", messages)
+		}
+	})
 }
 
 func TestContextAssembler_Build_SkillsNilChangesNothing(t *testing.T) {

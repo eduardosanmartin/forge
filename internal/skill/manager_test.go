@@ -305,6 +305,99 @@ func TestManager_Scan_MissingDirNotError(t *testing.T) {
 	}
 }
 
+// TestManager_ScanAll_ProjectOverridesGlobalOnNameCollision covers Fase 3
+// of hojaDeRuta-embeddings-skills.md's precedence rule: a skill present in
+// both roots with the same name resolves to the project's copy — the
+// global entry is skipped, not an error, not merged.
+func TestManager_ScanAll_ProjectOverridesGlobalOnNameCollision(t *testing.T) {
+	projectRoot := t.TempDir()
+	globalRoot := t.TempDir()
+
+	writeSkillMD(t, filepath.Join(projectRoot, "shared-name"),
+		"---\nname: shared-name\ndescription: \"project version\"\nsource: local\n---\nPROJECT VERSION BODY\n")
+	writeSkillMD(t, filepath.Join(globalRoot, "shared-name"),
+		"---\nname: shared-name\ndescription: \"global version\"\nsource: local\n---\nGLOBAL VERSION BODY\n")
+	writeSkillMD(t, filepath.Join(globalRoot, "global-only"),
+		"---\nname: global-only\ndescription: \"only in global\"\nsource: local\n---\nGLOBAL ONLY BODY\n")
+
+	mgr := NewManager(Options{})
+	defer mgr.Close()
+	results, err := mgr.ScanAll(projectRoot, globalRoot)
+	if err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+
+	// shared-name must appear exactly once in results (the project load),
+	// never a second time from the global pass.
+	shareCount := 0
+	for _, r := range results {
+		if r.Name == "shared-name" {
+			shareCount++
+		}
+	}
+	if shareCount != 1 {
+		t.Fatalf("shared-name should be loaded exactly once (project wins), got %d results", shareCount)
+	}
+
+	loaded := mgr.Loaded()
+	sort.Strings(loaded)
+	wantLoaded := []string{"global-only", "shared-name"}
+	if len(loaded) != len(wantLoaded) || loaded[0] != wantLoaded[0] || loaded[1] != wantLoaded[1] {
+		t.Fatalf("Loaded() = %v, want %v", loaded, wantLoaded)
+	}
+
+	info := mgr.Info()
+	byName := make(map[string]SkillInfo, len(info))
+	for _, i := range info {
+		byName[i.Name] = i
+	}
+	if byName["shared-name"].Description != "project version" {
+		t.Errorf("shared-name description = %q, want the project version, not global's", byName["shared-name"].Description)
+	}
+	if byName["shared-name"].Origin != string(OriginProject) {
+		t.Errorf("shared-name Origin = %q, want %q", byName["shared-name"].Origin, OriginProject)
+	}
+	if byName["global-only"].Origin != string(OriginGlobal) {
+		t.Errorf("global-only Origin = %q, want %q", byName["global-only"].Origin, OriginGlobal)
+	}
+}
+
+// TestManager_ActiveManual_ProjectListPlusGlobalUnion covers the manual
+// activation set directly at the Manager level (context_skills_test.go in
+// internal/agent covers the same thing end to end through Build()).
+func TestManager_ActiveManual_ProjectListPlusGlobalUnion(t *testing.T) {
+	projectRoot := t.TempDir()
+	globalRoot := t.TempDir()
+
+	writeSkillMD(t, filepath.Join(projectRoot, "listed"),
+		"---\nname: listed\ndescription: \"listed in project config\"\nsource: local\n---\nLISTED BODY\n")
+	writeSkillMD(t, filepath.Join(projectRoot, "unlisted"),
+		"---\nname: unlisted\ndescription: \"not listed\"\nsource: local\n---\nUNLISTED BODY\n")
+	writeSkillMD(t, filepath.Join(globalRoot, "always-on"),
+		"---\nname: always-on\ndescription: \"global\"\nsource: local\n---\nALWAYS ON BODY\n")
+
+	mgr := NewManager(Options{})
+	defer mgr.Close()
+	if _, err := mgr.ScanAll(projectRoot, globalRoot); err != nil {
+		t.Fatalf("ScanAll: %v", err)
+	}
+
+	active := mgr.ActiveManual([]string{"listed"})
+	names := make(map[string]bool, len(active))
+	for _, sk := range active {
+		names[sk.Name] = true
+	}
+	if !names["listed"] {
+		t.Error("listed (in configEnabled) should be active")
+	}
+	if names["unlisted"] {
+		t.Error("unlisted (not in configEnabled, not global) should not be active")
+	}
+	if !names["always-on"] {
+		t.Error("always-on (global) should be active without being listed")
+	}
+}
+
 func stripChecksumLineForTest(data []byte) []byte {
 	lines := strings.Split(string(data), "\n")
 	var kept []string

@@ -255,16 +255,24 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Skills manager: owns its own embedding store internally; missing directory is NOT an error.
 	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger, ApproveExternal: approveExternal})
 	defer skillsMgr.Close()
-	if results, err := skillsMgr.Scan(filepath.Join(workspaceRoot, ".forge", "skills")); err != nil {
+	projectSkillsRoot := filepath.Join(workspaceRoot, ".forge", "skills")
+	globalSkillsRoot, gsErr := config.GlobalSkillsDir()
+	if gsErr != nil {
+		app.Logger.Warn("skills: could not resolve global skills dir, scanning project only", "error", gsErr)
+		if results, err := skillsMgr.Scan(projectSkillsRoot); err != nil {
+			app.Logger.Warn("skills scan: some skills failed to load", "error", err, "results", results)
+		}
+	} else if results, err := skillsMgr.ScanAll(projectSkillsRoot, globalSkillsRoot); err != nil {
 		app.Logger.Warn("skills scan: some skills failed to load", "error", err, "results", results)
-	} else {
-		app.Logger.Info("skills manager ready", "loaded", len(skillsMgr.Loaded()), "enabled", len(skillsMgr.Enabled()))
 	}
+	app.Logger.Info("skills manager ready", "loaded", len(skillsMgr.Loaded()), "enabled", len(skillsMgr.Enabled()), "lazy_load", app.Config.Skills.LazyLoad)
 	v1Deps := agent.V1Deps{
-		Retriever:   retriever,
-		Compactor:   compactor,
-		AnchorStore: anchorStore,
-		Skills:      skillsMgr,
+		Retriever:      retriever,
+		Compactor:      compactor,
+		AnchorStore:    anchorStore,
+		Skills:         skillsMgr,
+		SkillsLazyLoad: app.Config.Skills.LazyLoad,
+		SkillsEnabled:  app.Config.Skills.Enabled,
 	}
 
 	// Create tools registry (base five tools + the six v1 feature tools on

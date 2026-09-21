@@ -571,13 +571,17 @@ func newSkillListCommand() *cobra.Command {
 				fmt.Fprintln(os.Stdout, "No skills")
 				return nil
 			}
-			fmt.Fprintf(os.Stdout, "%-20s %-30s %-10s %-7s %s\n", "NAME", "DESCRIPTION", "CATEGORY", "ENABLED", "SOURCE")
+			fmt.Fprintf(os.Stdout, "%-20s %-30s %-10s %-7s %-8s %s\n", "NAME", "DESCRIPTION", "CATEGORY", "ENABLED", "ORIGIN", "SOURCE")
 			for _, s := range res.Skills {
 				desc := s.Description
 				if len(desc) > 30 {
 					desc = desc[:27] + "..."
 				}
-				fmt.Fprintf(os.Stdout, "%-20s %-30s %-10s %-7t %s\n", s.Name, desc, s.Category, s.Enabled, s.Source)
+				origin := s.Origin
+				if origin == "" {
+					origin = "project" // pre-existing skills scanned before Origin existed
+				}
+				fmt.Fprintf(os.Stdout, "%-20s %-30s %-10s %-7t %-8s %s\n", s.Name, desc, s.Category, s.Enabled, origin, s.Source)
 			}
 			return nil
 		},

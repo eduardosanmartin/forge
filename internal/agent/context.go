@@ -68,6 +68,12 @@ type V1Deps struct {
 	// Skills is the skills manager for lazy-load semantic injection (RF-4.2).
 	// Nil disables skills injection.
 	Skills *skill.Manager
+	// SkillsLazyLoad selects semantic matching (true) vs. manual activation
+	// (false) — see config.SkillsConfig and Build's Skills branch.
+	SkillsLazyLoad bool
+	// SkillsEnabled is the project's skills.enabled config list, used only
+	// when SkillsLazyLoad is false.
+	SkillsEnabled []string
 }
 
 // SetV1Deps wires the optional v1 feature dependencies. Intended to be
@@ -192,16 +198,29 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 			}
 		}
 
-		// Skills (v1): lazy-load injection — only enabled skills whose description
-		// semantically matches the current user message get injected (RF-4.2).
+		// Skills (v1, RF-4.2): two mutually exclusive activation modes.
+		// LazyLoad true: semantic matching — only enabled skills whose
+		// description matches the current user message get injected
+		// (Skills.Relevant, scored against an embedding).
+		// LazyLoad false: manual activation — no matching call at all.
+		// The active set is whatever Skills.ActiveManual(SkillsEnabled)
+		// resolves to (project's configured list + every global skill),
+		// injected unconditionally on every turn regardless of message
+		// content. See config.SkillsConfig's doc comment for why false is
+		// the honest default today (RF-4.2's embedding is a hash
+		// placeholder until Fase 4 of hojaDeRuta-embeddings-skills.md).
 		if enableSkills && c.v1Deps.Skills != nil && userMessage != "" {
-			if skills, err := c.v1Deps.Skills.Relevant(userMessage); err == nil && len(skills) > 0 {
-				for _, sk := range skills {
-					messages = append(messages, llm.Message{
-						Role:    "system",
-						Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
-					})
-				}
+			var skills []skill.Skill
+			if c.v1Deps.SkillsLazyLoad {
+				skills, _ = c.v1Deps.Skills.Relevant(userMessage)
+			} else {
+				skills = c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled)
+			}
+			for _, sk := range skills {
+				messages = append(messages, llm.Message{
+					Role:    "system",
+					Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
+				})
 			}
 		}
 	}

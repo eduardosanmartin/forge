@@ -14,6 +14,19 @@ const (
 	SourceExternal Source = "external"
 )
 
+// Origin identifies which root directory a skill was scanned from — not to
+// be confused with Source (local/external, about provenance/trust). Origin
+// is about scope: a project skill applies to this workspace only; a global
+// skill (config.GlobalSkillsDir) applies to every project and, in manual
+// activation mode (SkillsConfig.LazyLoad == false), is always active
+// without needing to be listed in any project's config.
+type Origin string
+
+const (
+	OriginProject Origin = "project"
+	OriginGlobal  Origin = "global"
+)
+
 // Skill describes a single skill loaded from a SKILL.md file.
 type Skill struct {
 	// Name is the skill name; must match the directory basename and the
@@ -35,6 +48,9 @@ type Skill struct {
 	Instructions string
 	// DirPath is the absolute or relative skill directory containing SKILL.md.
 	DirPath string
+	// Origin is which root this skill was scanned from (project or global).
+	// Set by the Manager at scan time, not part of the SKILL.md frontmatter.
+	Origin Origin
 }
 
 // Sentinel errors for the skill runtime.

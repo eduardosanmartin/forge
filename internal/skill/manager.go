@@ -56,6 +56,7 @@ type SkillInfo struct {
 	Description string `json:"description"`
 	Category    string `json:"category"`
 	Source      string `json:"source"`
+	Origin      string `json:"origin"`
 	Enabled     bool   `json:"enabled"`
 }
 
@@ -71,7 +72,8 @@ type Manager struct {
 	minScore        float32
 	topK            int
 	closed          bool
-	root            string // remembered root for Reload()
+	root            string // remembered project root for Reload()
+	globalRoot      string // remembered global root for Reload(); empty if Scan (not ScanAll) was used
 }
 
 // NewManager creates a Manager.
@@ -186,21 +188,50 @@ func isApproved(dir string) bool {
 // unless ApproveExternal is true (or per-skill approved.flag exists) and Enable is called explicitly.
 // Missing root directory is NOT an error (zero skills is valid).
 // It returns per-skill LoadResults and an aggregated error if any skill failed.
+// Every skill scanned this way has Origin == OriginProject; use ScanAll to
+// also load a global root (see config.GlobalSkillsDir).
 func (m *Manager) Scan(root string) ([]LoadResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	m.root = root
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("skill root %q: %w", root, err)
-	}
+	m.globalRoot = ""
+	m.resetStateLocked()
+	return m.scanRootLocked(root, OriginProject)
+}
 
-	// Reset state for fresh scan (idempotent re-scan).
-	// Clear previous skills and enabled.
+// ScanAll is Scan plus a second root loaded as OriginGlobal — every skill
+// found under globalRoot regardless of project root. A skill present in
+// both roots with the same name resolves to the project's copy: the global
+// entry is skipped entirely (not an error, not a LoadResult) rather than
+// overwriting it, since project scope is more specific. Either root missing
+// is not an error, same as Scan.
+func (m *Manager) ScanAll(projectRoot, globalRoot string) ([]LoadResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.root = projectRoot
+	m.globalRoot = globalRoot
+	m.resetStateLocked()
+
+	results, projErr := m.scanRootLocked(projectRoot, OriginProject)
+	globalResults, globalErr := m.scanRootLocked(globalRoot, OriginGlobal)
+	results = append(results, globalResults...)
+
+	switch {
+	case projErr != nil && globalErr != nil:
+		return results, fmt.Errorf("%v; %v", projErr, globalErr)
+	case projErr != nil:
+		return results, projErr
+	default:
+		return results, globalErr
+	}
+}
+
+// resetStateLocked clears all loaded/enabled skills and the embedding
+// store. Caller holds m.mu. Shared by Scan and ScanAll so both start from
+// the same clean slate regardless of how many roots follow.
+func (m *Manager) resetStateLocked() {
 	m.skills = make(map[string]*Skill)
 	m.enabled = make(map[string]bool)
 	// Reset embedding store by creating a fresh one (in-memory, no persistent state to clear otherwise).
@@ -209,6 +240,21 @@ func (m *Manager) Scan(root string) ([]LoadResult, error) {
 		_ = m.embedStore.Close()
 	}
 	m.embedStore, _ = embedding.NewStore("")
+}
+
+// scanRootLocked loads every <root>/<name>/SKILL.md under root, tagging
+// each loaded skill with origin. Caller holds m.mu and has already reset
+// state if this is the first root of a fresh scan. A name already present
+// in m.skills (from an earlier root in the same scan) is skipped silently
+// — see ScanAll's doc comment on precedence.
+func (m *Manager) scanRootLocked(root string, origin Origin) ([]LoadResult, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("skill root %q: %w", root, err)
+	}
 
 	var results []LoadResult
 	var errs []string
@@ -217,13 +263,16 @@ func (m *Manager) Scan(root string) ([]LoadResult, error) {
 		if !e.IsDir() {
 			continue
 		}
+		if _, exists := m.skills[e.Name()]; exists {
+			continue // already loaded from a higher-precedence root
+		}
 		skillDir := filepath.Join(root, e.Name())
 		skillFile := filepath.Join(skillDir, "SKILL.md")
 		if _, err := os.Stat(skillFile); err != nil {
 			continue // not a skill directory
 		}
 		res := LoadResult{Name: e.Name()}
-		if err := m.loadOneLocked(skillDir, skillFile); err != nil {
+		if err := m.loadOneLocked(skillDir, skillFile, origin); err != nil {
 			res.Err = err
 			res.Loaded = false
 			errs = append(errs, fmt.Sprintf("%s: %v", e.Name(), err))
@@ -240,7 +289,7 @@ func (m *Manager) Scan(root string) ([]LoadResult, error) {
 }
 
 // loadOneLocked loads a single skill; caller holds m.mu.
-func (m *Manager) loadOneLocked(skillDir, skillFile string) error {
+func (m *Manager) loadOneLocked(skillDir, skillFile string, origin Origin) error {
 	data, err := os.ReadFile(skillFile)
 	if err != nil {
 		return fmt.Errorf("read SKILL.md: %w", err)
@@ -269,6 +318,7 @@ func (m *Manager) loadOneLocked(skillDir, skillFile string) error {
 	}
 
 	// Insert.
+	sk.Origin = origin
 	m.skills[sk.Name] = &sk
 
 	// Local auto-enabled; external stays disabled until Enable().
@@ -415,6 +465,7 @@ func (m *Manager) Info() []SkillInfo {
 			Description: sk.Description,
 			Category:    sk.Category,
 			Source:      string(sk.Source),
+			Origin:      string(sk.Origin),
 			Enabled:     m.enabled[name],
 		})
 	}
@@ -422,15 +473,48 @@ func (m *Manager) Info() []SkillInfo {
 	return out
 }
 
-// Reload re-scans the remembered root, discarding previous state, and returns LoadResults.
+// Reload re-scans the remembered root(s), discarding previous state, and
+// returns LoadResults. Uses ScanAll if the last scan included a global
+// root, Scan otherwise — mirrors whichever of the two the caller used.
 func (m *Manager) Reload() ([]LoadResult, error) {
 	m.mu.Lock()
 	root := m.root
+	globalRoot := m.globalRoot
 	m.mu.Unlock()
 	if root == "" {
 		return nil, nil
 	}
+	if globalRoot != "" {
+		return m.ScanAll(root, globalRoot)
+	}
 	return m.Scan(root)
+}
+
+// ActiveManual returns the skills that are active under manual activation
+// (SkillsConfig.LazyLoad == false): every loaded skill whose Origin is
+// OriginGlobal, plus every loaded skill whose name appears in configEnabled
+// (the project's own skills.enabled config list). No embedding, no scoring
+// — this never calls Relevant() or touches the embedding store. Unknown
+// names in configEnabled (no matching loaded skill) are silently ignored;
+// callers that want to validate a config's skill names should cross-check
+// against Loaded() themselves.
+func (m *Manager) ActiveManual(configEnabled []string) []Skill {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	want := make(map[string]bool, len(configEnabled))
+	for _, n := range configEnabled {
+		want[n] = true
+	}
+
+	var out []Skill
+	for name, sk := range m.skills {
+		if sk.Origin == OriginGlobal || want[name] {
+			out = append(out, *sk)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Relevant returns enabled skills whose description+keywords embedding is

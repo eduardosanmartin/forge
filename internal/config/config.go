@@ -362,6 +362,27 @@ const AgentMaxParallelChildrenMax = 4
 // Sensitivity is a ceiling on autonomy (general | regulado | datos-sensibles).
 // Canonical values are the spec's Spanish terms; English aliases low/medium/high
 // and regulated/sensitive are normalized to the canonical forms on Validate/Load.
+// SkillsConfig controls how skills get activated for an agent turn (RF-4.2).
+//
+// LazyLoad true selects semantic matching: Skills.Relevant(userMessage)
+// decides per turn which enabled skills to inject, scored against an
+// embedding. LazyLoad false selects manual activation instead: no matching
+// call happens at all — the active set is exactly Enabled (skill names from
+// this project's config) plus every skill found in the global skills
+// directory (~/.forge/skills — see config.GlobalSkillsDir), which is always
+// active across every project without needing to be listed here. A skill
+// present in both the project and the global directory with the same name
+// resolves to the project's copy (more specific wins).
+//
+// Default is false: until the embedding backend behind LazyLoad is a real
+// semantic model (not the bag-of-words placeholder), semantic matching
+// essentially never fires for realistic prompts — manual activation is the
+// only mode that reliably works today.
+type SkillsConfig struct {
+	LazyLoad bool     `json:"lazy_load"`
+	Enabled  []string `json:"enabled,omitempty"`
+}
+
 type ProjectConfig struct {
 	Sensitivity string `json:"sensitivity"`
 	// SpecPath is the optional workspace-relative path to the project spec
@@ -391,6 +412,7 @@ type Config struct {
 	Agent           AgentConfig         `json:"agent"`
 	Project         ProjectConfig       `json:"project"`
 	Daemon          DaemonConfig        `json:"daemon"`
+	Skills          SkillsConfig        `json:"skills"`
 	// FallbackChain is an ordered list of "provider/model" entries (same
 	// syntax as forge fanout --models) tried in order on a RETRYABLE
 	// failure — rate limit (429), transient upstream outage (502/503/504),
@@ -433,6 +455,7 @@ func Defaults() *Config {
 		},
 		Agent:   AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds, MaxParallelChildren: DefaultAgentMaxParallelChildren},
 		Project: ProjectConfig{Sensitivity: SensitivityGeneral},
+		Skills:  SkillsConfig{LazyLoad: false},
 	}
 }
 
@@ -461,6 +484,18 @@ func GlobalConfigPath() (string, error) {
 	p, err := ExpandPath("~/.forge/config.json")
 	if err != nil {
 		return "", fmt.Errorf("resolve global config path: %w", err)
+	}
+	return p, nil
+}
+
+// GlobalSkillsDir returns the user-wide skills directory (~/.forge/skills),
+// with "~" expanded. Skills found here are active in every project's manual
+// activation set (SkillsConfig.LazyLoad == false) without needing to be
+// listed in any project's own config — see SkillsConfig's doc comment.
+func GlobalSkillsDir() (string, error) {
+	p, err := ExpandPath("~/.forge/skills")
+	if err != nil {
+		return "", fmt.Errorf("resolve global skills dir: %w", err)
 	}
 	return p, nil
 }
@@ -515,6 +550,7 @@ type fileConfig struct {
 	Agent           *fileAgent          `json:"agent"`
 	Project         *ProjectConfig      `json:"project"`
 	Daemon          *DaemonConfig       `json:"daemon"`
+	Skills          *SkillsConfig       `json:"skills"`
 	// FallbackChain: no pointer needed — nil (key absent from this layer)
 	// vs non-nil (key present, even as "[]" to explicitly clear a lower
 	// layer's chain) is already exactly what json.Unmarshal gives a plain
@@ -742,6 +778,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.Daemon != nil {
 		dst.Daemon = *fc.Daemon
+	}
+	if fc.Skills != nil {
+		dst.Skills = *fc.Skills
 	}
 }
 

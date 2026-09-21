@@ -420,6 +420,7 @@ type SkillInfoResult struct {
 	Description string `json:"description"`
 	Category    string `json:"category"`
 	Source      string `json:"source"`
+	Origin      string `json:"origin"`
 	Enabled     bool   `json:"enabled"`
 }
 

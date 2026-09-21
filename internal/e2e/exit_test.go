@@ -361,7 +361,13 @@ func TestExit_Verification(t *testing.T) {
 		// Create assembler with the skill manager wired.
 		toolsReg := tools.New(nil, "", slog.Default())
 		asm := agent.NewContextAssembler(toolsReg, st, 8)
-		asm.SetV1Deps(agent.V1Deps{Skills: skillMgr})
+		// LazyLoad true: this step of the exit-verification walkthrough is
+		// specifically exercising RF-4.2's semantic matching (the skill's
+		// description must paraphrase-match the message below). Manual
+		// activation (the config default since Fase 3 of
+		// hojaDeRuta-embeddings-skills.md) has its own coverage in
+		// internal/agent/context_skills_test.go.
+		asm.SetV1Deps(agent.V1Deps{Skills: skillMgr, SkillsLazyLoad: true})
 		msgs, err := asm.Build(ctx, sess.ID, "preparing the deploy notes for release")
 		if err != nil {
 			t.Fatalf("Build: %v", err)

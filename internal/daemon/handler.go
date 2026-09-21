@@ -780,6 +780,7 @@ func (h *Handler) handleSkillList(ctx context.Context, req *JSONRPCRequest) *JSO
 			Description: info.Description,
 			Category:    info.Category,
 			Source:      info.Source,
+			Origin:      info.Origin,
 			Enabled:     info.Enabled,
 		})
 	}
