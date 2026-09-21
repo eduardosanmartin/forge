@@ -38,6 +38,7 @@ func newWizardCommand() *cobra.Command {
 			return runWizard(p, cmd.OutOrStdout(), args[0])
 		},
 	}
+	cmd.AddCommand(newWizardSmartCommand())
 	return cmd
 }
 
