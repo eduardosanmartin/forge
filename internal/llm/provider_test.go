@@ -4,6 +4,7 @@ package llm
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/logging"
@@ -146,6 +147,61 @@ func TestStreamChunk_JSONRoundtrip(t *testing.T) {
 	}
 	if decoded.Choices[0].FinishReason == nil || *decoded.Choices[0].FinishReason != *chunk.Choices[0].FinishReason {
 		t.Errorf("finish_reason: got %v, want %v", decoded.Choices[0].FinishReason, chunk.Choices[0].FinishReason)
+	}
+}
+
+// TestStreamChunk_UnmarshalJSON_ErrorAsPlainString covers the shape most
+// providers use (Forge's own anthropic.go/gemini.go included, when they
+// construct StreamChunk directly rather than via JSON).
+func TestStreamChunk_UnmarshalJSON_ErrorAsPlainString(t *testing.T) {
+	data := []byte(`{"id":"x","model":"m","choices":[],"error":"boom"}`)
+	var c StreamChunk
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Error != "boom" {
+		t.Errorf("Error = %q, want %q", c.Error, "boom")
+	}
+}
+
+// TestStreamChunk_UnmarshalJSON_ErrorAsObject is a regression lock for a
+// real bug found live testing hojaDeRuta-embeddings-skills.md's Fase 2
+// verification on macOS: OpenRouter relayed a genuine upstream 503
+// ("Upstream error from Nvidia: Service temporarily overloaded") as
+// {"error":{"code":503,"message":"...","metadata":{...}}}. Before this fix,
+// decoding this exact payload into the plain `Error string` field failed
+// the ENTIRE chunk's json.Unmarshal (Go fails the whole struct on one bad
+// field), which internal/llm/openai_compatible.go's stream loop treated as
+// "unparseable, skip" — logged only at DEBUG, never surfaced. The turn
+// silently returned no content and exit code 0, with zero indication
+// anything had gone wrong.
+func TestStreamChunk_UnmarshalJSON_ErrorAsObject(t *testing.T) {
+	data := []byte(`{"id":"gen-1790000981-m1Eci8em3NVPUB2YpbMt","object":"chat.completion.chunk","created":1790000981,"model":"nvidia/nemotron-3-ultra-550b-a55b:free","provider":"Nvidia","choices":[],"error":{"code":503,"message":"Upstream error from Nvidia: Service temporarily overloaded","metadata":{"error_type":"provider_overloaded"}}}`)
+	var c StreamChunk
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unmarshal must succeed even with an object-shaped error, got: %v", err)
+	}
+	if c.Error == "" {
+		t.Fatal("Error must be populated from the object's \"message\" field, got empty string")
+	}
+	if !strings.Contains(c.Error, "Service temporarily overloaded") {
+		t.Errorf("Error = %q, want it to contain the upstream message", c.Error)
+	}
+	if !strings.Contains(c.Error, "503") {
+		t.Errorf("Error = %q, want it to include the code 503", c.Error)
+	}
+}
+
+// TestStreamChunk_UnmarshalJSON_ErrorAbsent covers the common case (no
+// error field at all) still decodes cleanly with Error == "".
+func TestStreamChunk_UnmarshalJSON_ErrorAbsent(t *testing.T) {
+	data := []byte(`{"id":"x","model":"m","choices":[]}`)
+	var c StreamChunk
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Error != "" {
+		t.Errorf("Error = %q, want empty", c.Error)
 	}
 }
 

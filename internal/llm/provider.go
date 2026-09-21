@@ -4,6 +4,8 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 )
 
 // Message represents a single message in a chat conversation.
@@ -104,6 +106,60 @@ type StreamChunk struct {
 	Choices []StreamChoice `json:"choices"`
 	Usage   *Usage         `json:"usage,omitempty"`
 	Error   string         `json:"error,omitempty"`
+}
+
+// UnmarshalJSON gives StreamChunk a custom decoder because OpenAI-compatible
+// providers are inconsistent about the wire shape of a mid-stream error: most
+// send a plain string, but OpenRouter relaying an upstream provider failure
+// sends a structured object instead — confirmed live (hojaDeRuta-embeddings-skills.md
+// verification on macOS): a real 503 ("Upstream error from Nvidia: Service
+// temporarily overloaded") arrived as
+// {"error":{"code":503,"message":"...","metadata":{...}}}. With the plain
+// `Error string` field decoded via the default json.Unmarshal, that object
+// shape fails to decode — and because Go's json.Unmarshal fails the WHOLE
+// struct on one bad field, not just that field, the entire chunk (including
+// any real content in the same line) was silently dropped, logged only at
+// DEBUG, with the turn returning no content and no visible error at all.
+// This decodes Error permissively: plain string first, then an object's
+// "message" (plus its "code" if present), then the raw JSON as a last
+// resort — so a real upstream error always ends up in the caller-visible
+// StreamChunk.Error string, never swallowed.
+func (c *StreamChunk) UnmarshalJSON(data []byte) error {
+	type streamChunkAlias StreamChunk // avoid recursing into this method
+	var raw struct {
+		streamChunkAlias
+		Error json.RawMessage `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*c = StreamChunk(raw.streamChunkAlias)
+	c.Error = decodeStreamChunkError(raw.Error)
+	return nil
+}
+
+// decodeStreamChunkError parses a stream chunk's "error" field permissively
+// — see StreamChunk.UnmarshalJSON's doc comment for why. Returns "" for an
+// absent/empty field.
+func decodeStreamChunkError(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj struct {
+		Message string `json:"message"`
+		Code    int    `json:"code"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.Message != "" {
+		if obj.Code != 0 {
+			return fmt.Sprintf("%s (code %d)", obj.Message, obj.Code)
+		}
+		return obj.Message
+	}
+	return string(raw)
 }
 
 // StreamChoice represents a choice delta in a streaming chunk.
