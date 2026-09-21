@@ -243,6 +243,10 @@ const (
 	MethodBootstrapDiscard     = "bootstrap.discard"
 	MethodBootstrapSuggestMore = "bootstrap.suggest_more"
 	MethodBootstrapSuggestOwn  = "bootstrap.suggest_own"
+	// Fase 3: the "? N" clarification sub-chat about one item. Never
+	// mutates the item's Status/Index/numbering — UX decision #1 — so it
+	// returns just the answer, not a full State.
+	MethodBootstrapClarify = "bootstrap.clarify"
 )
 
 // CreateSessionParams for session.create.
@@ -799,4 +803,19 @@ type BootstrapSuggestOwnParams struct {
 	BootstrapID string `json:"bootstrap_id"`
 	Kind        string `json:"kind"`
 	Text        string `json:"text"`
+}
+
+// BootstrapClarifyParams for bootstrap.clarify. Index is the item being
+// asked about (Item.Index); Question is the raw text either from the
+// two-step "¿qué querés saber?" flow or the "? N <pregunta>" one-line
+// shortcut — both resolve to the same Question string at the RPC layer.
+type BootstrapClarifyParams struct {
+	BootstrapID string `json:"bootstrap_id"`
+	Index       int    `json:"index"`
+	Question    string `json:"question"`
+}
+
+// BootstrapClarifyResult for bootstrap.clarify.
+type BootstrapClarifyResult struct {
+	Answer string `json:"answer"`
 }

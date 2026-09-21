@@ -75,9 +75,17 @@ type State struct {
 	Items     []Item
 	Finalized bool
 
-	nextIndex int
-	nextRFNum int
+	nextIndex  int
+	nextRFNum  int
 	nextRNFNum int
+
+	// clarifySessions maps an Item's Index to the daemon session backing
+	// its clarification sub-chat (Fase 3's "? N"), if one has been opened.
+	// Never exposed to a caller (unexported, not part of the JSON shape) —
+	// reusing the same session across follow-up questions about the same
+	// item is an internal implementation detail of Manager.Clarify, not
+	// something a client needs to see or manage.
+	clarifySessions map[int]string
 }
 
 // snapshot returns a defensive copy of the state safe to hand to a caller
@@ -129,20 +137,51 @@ func (s *State) appendProposed(proposed []proposedItem) error {
 // testable without a daemon, a session manager, or a real LLM.
 type Proposer func(ctx context.Context, prompt string) (string, error)
 
+// Clarifier answers one question about a specific item, as part of a
+// multi-turn sub-chat (Fase 3's "? N"). sessionID is the daemon session
+// already backing that item's sub-chat — "" opens a new one — and the
+// returned sessionID is what Manager stores to continue that exact
+// conversation on the item's next question, so a follow-up gets real
+// multi-turn context (the session's own message history) instead of
+// Manager re-sending the framing by hand every time. See
+// internal/daemon/runs.go's bootstrapClarifier for the real
+// implementation; kept as an interface here for the same testability
+// reason Proposer is.
+type Clarifier func(ctx context.Context, sessionID, prompt string) (answer, newSessionID string, err error)
+
 // Manager holds every in-progress bootstrap session for one daemon
 // process. Safe for concurrent use.
 type Manager struct {
 	mu       sync.Mutex
 	sessions map[string]*State
 	propose  Proposer
+	clarify  Clarifier
+}
+
+// Option configures a Manager at construction. Kept as a functional option
+// (mirrors daemon.WithV1Deps) so every existing single-argument
+// NewManager(propose) call site from Fase 1/2 — production and tests alike
+// — keeps compiling unchanged.
+type Option func(*Manager)
+
+// WithClarifier wires a Clarifier for Fase 3's bootstrap.clarify. A
+// Manager with none configured returns an error from Clarify; the daemon
+// always wires one in production (bootstrapClarifier), so this only
+// matters to a test that exercises Clarify without supplying one.
+func WithClarifier(c Clarifier) Option {
+	return func(m *Manager) { m.clarify = c }
 }
 
 // NewManager creates a Manager backed by propose for every LLM call.
-func NewManager(propose Proposer) *Manager {
-	return &Manager{
+func NewManager(propose Proposer, opts ...Option) *Manager {
+	m := &Manager{
 		sessions: make(map[string]*State),
 		propose:  propose,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Start begins a new bootstrap session from idea: one LLM call proposing
@@ -286,6 +325,59 @@ func (m *Manager) SuggestMore(ctx context.Context, id string) (*State, error) {
 		return nil, err
 	}
 	return st.snapshot(), nil
+}
+
+// Clarify answers one question about the item at index, continuing that
+// item's own sub-chat if one is already open. Never touches Status, Index,
+// or numbering — UX decision #1 in the roadmap requires the selection list
+// to come back unchanged after "volver", and Clarify simply never mutates
+// Items at all.
+func (m *Manager) Clarify(ctx context.Context, id string, index int, question string) (string, error) {
+	if strings.TrimSpace(question) == "" {
+		return "", fmt.Errorf("%w: question is required", ErrInvalidRequest)
+	}
+	if m.clarify == nil {
+		return "", fmt.Errorf("bootstrap clarify is not configured")
+	}
+	st, err := m.getSession(id)
+	if err != nil {
+		return "", err
+	}
+
+	m.mu.Lock()
+	item, ok := itemByIndex(st, index)
+	if !ok {
+		m.mu.Unlock()
+		return "", fmt.Errorf("%w: item index %d not found", ErrInvalidRequest, index)
+	}
+	idea := st.Idea
+	sid := st.clarifySessions[index]
+	m.mu.Unlock()
+
+	prompt := BuildClarifyPrompt(idea, item, question, sid == "")
+	answer, newSID, err := m.clarify(ctx, sid, prompt)
+	if err != nil {
+		return "", fmt.Errorf("clarify: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if st.clarifySessions == nil {
+		st.clarifySessions = make(map[int]string)
+	}
+	st.clarifySessions[index] = newSID
+	return answer, nil
+}
+
+// itemByIndex returns a copy of the item at index (never a pointer into
+// st.Items — callers use this to read outside the Manager's lock).
+func itemByIndex(st *State, index int) (Item, bool) {
+	for _, it := range st.Items {
+		if it.Index == index {
+			return it, true
+		}
+	}
+	return Item{}, false
 }
 
 // getSession looks up an existing session by id, wrapped so every caller

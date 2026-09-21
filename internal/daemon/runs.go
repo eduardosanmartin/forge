@@ -475,6 +475,39 @@ func (m *SessionManager) bootstrapProposer() bootstrap.Proposer {
 	}
 }
 
+// bootstrapClarifier is the daemon-internal internal/bootstrap.Clarifier
+// (hojaDeRuta-wizard-inteligente.md Fase 3, "? N"). Unlike
+// bootstrapProposer — a fresh throwaway session every call — this CONTINUES
+// an existing session when sessionID is non-empty, so a multi-turn
+// sub-chat about the same item gets real conversational context for free
+// from the session's own message history, instead of Manager re-sending
+// the framing by hand on every follow-up question.
+func (m *SessionManager) bootstrapClarifier() bootstrap.Clarifier {
+	return func(ctx context.Context, sessionID, prompt string) (string, string, error) {
+		sid := sessionID
+		if sid == "" {
+			sess, err := m.CreateSession(ctx, map[string]any{
+				"source":   "bootstrap_clarify",
+				"no_tools": true,
+			})
+			if err != nil {
+				return "", "", fmt.Errorf("create bootstrap clarify session: %w", err)
+			}
+			sid = sess.ID
+		}
+		msgs, err := m.ExecuteTurn(ctx, sid, prompt)
+		if err != nil {
+			return "", "", fmt.Errorf("bootstrap clarify turn: %w", err)
+		}
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "assistant" {
+				return msgs[i].Content, sid, nil
+			}
+		}
+		return "", sid, fmt.Errorf("bootstrap clarify turn produced no assistant message")
+	}
+}
+
 // publishRunCheckpointEvent broadcasts run.checkpoint.event the instant a
 // run blocks on a required checkpoint (Fase 2 of hojaDeRuta-multiagente.md
 // — no public RPC to approve it exists until Fase 3, but publishing this

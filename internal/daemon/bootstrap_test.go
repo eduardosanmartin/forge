@@ -219,6 +219,58 @@ func TestHandler_BootstrapSuggestOwn(t *testing.T) {
 	}
 }
 
+// TestHandler_BootstrapClarify exercises Fase 3's clarification RPC end to
+// end: real Handler, real bootstrap.Manager, real
+// SessionManager.bootstrapClarifier wiring — only the LLM call itself is
+// faked. Confirms the answer comes back and that Clarify never touches the
+// item's Status.
+func TestHandler_BootstrapClarify(t *testing.T) {
+	mgr, llmReg := newTestSessionManagerForBootstrap()
+	setCannedAssistantResponse(llmReg, `[{"kind": "RF", "text": "Registrar un gasto"}]`)
+	h := NewHandler(mgr, slog.New(slog.DiscardHandler), nil, nil)
+	st := bootstrapStartViaHandler(t, h, "idea")
+
+	setCannedAssistantResponse(llmReg, "RF-1 asume un solo grupo por gasto.")
+	resp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapClarify, BootstrapClarifyParams{
+		BootstrapID: st.ID, Index: 1, Question: "¿puede un gasto pertenecer a mas de un grupo?",
+	}))
+	if resp.Error != nil {
+		t.Fatalf("bootstrap.clarify returned an error: %+v", resp.Error)
+	}
+	var result BootstrapClarifyResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshal bootstrap.clarify result: %v", err)
+	}
+	if result.Answer != "RF-1 asume un solo grupo por gasto." {
+		t.Errorf("Answer = %q", result.Answer)
+	}
+
+	statusResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapStatus, BootstrapStatusParams{BootstrapID: st.ID}))
+	var afterState bootstrap.State
+	if err := json.Unmarshal(statusResp.Result, &afterState); err != nil {
+		t.Fatalf("unmarshal bootstrap.status result: %v", err)
+	}
+	if afterState.Items[0].Status != bootstrap.StatusPending {
+		t.Errorf("item 1 status = %q, want pending (clarify must not decide it)", afterState.Items[0].Status)
+	}
+
+	// unknown item index: mapped to ErrCodeInvalidParams
+	badResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapClarify, BootstrapClarifyParams{
+		BootstrapID: st.ID, Index: 99, Question: "algo",
+	}))
+	if badResp.Error == nil || badResp.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("bootstrap.clarify with a bad index: got %+v, want ErrCodeInvalidParams", badResp.Error)
+	}
+
+	// unknown bootstrap id: mapped to ErrCodeBootstrapNotFound
+	unknownResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapClarify, BootstrapClarifyParams{
+		BootstrapID: "does-not-exist", Index: 1, Question: "algo",
+	}))
+	if unknownResp.Error == nil || unknownResp.Error.Code != ErrCodeBootstrapNotFound {
+		t.Fatalf("bootstrap.clarify with an unknown bootstrap id: got %+v, want ErrCodeBootstrapNotFound", unknownResp.Error)
+	}
+}
+
 // TestHandler_BootstrapSuggestMore re-consults the (fake) model for a
 // second round and confirms both rounds' items coexist with continuous
 // numbering, driven entirely through the real RPC dispatch.
