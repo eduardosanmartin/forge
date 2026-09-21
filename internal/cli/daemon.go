@@ -236,7 +236,20 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// raw handle, with its table created alongside the store schema.
 	// Construction errors fail fast: a daemon without its declared v1
 	// features would silently regress to placeholder behavior.
-	embStore, err := embedding.NewStore("")
+	// Real embedding backend (llama.cpp + a configured model, e.g. bge-m3 —
+	// hojaDeRuta-embeddings-skills.md Fase 4), shared between skills and
+	// retrieval so there's exactly one llama-server process and one warm
+	// cache, not two. Never fails startup: a nil embClient here just means
+	// "use the hash", handled explicitly below rather than silently.
+	embClient, embDim, embCleanup := startEmbeddingsBackend(ctx, app.Config.Embeddings, app.Logger)
+	defer embCleanup()
+
+	var embStore *embedding.Store
+	if embClient != nil {
+		embStore, err = embedding.NewStoreWithBackend(embClient, embDim)
+	} else {
+		embStore, err = embedding.NewStore("")
+	}
 	if err != nil {
 		app.Logger.Error("v1 deps: embedding store construction failed", "error", err)
 		return fmt.Errorf("create embedding store: %w", err)
@@ -252,8 +265,11 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 		return fmt.Errorf("create anchors table: %w", err)
 	}
 	anchorStore := anchor.NewAnchorStoreSQL(st.DB())
-	// Skills manager: owns its own embedding store internally; missing directory is NOT an error.
-	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger, ApproveExternal: approveExternal})
+	// Skills manager shares embStore with retrieval above (same real
+	// backend when one is configured and healthy, same warm content cache
+	// either way) instead of building its own — see embStore's
+	// construction above. Missing skills directory is NOT an error.
+	skillsMgr := skill.NewManager(skill.Options{Logger: app.Logger, ApproveExternal: approveExternal, Store: embStore})
 	defer skillsMgr.Close()
 	projectSkillsRoot := filepath.Join(workspaceRoot, ".forge", "skills")
 	globalSkillsRoot, gsErr := config.GlobalSkillsDir()

@@ -383,6 +383,31 @@ type SkillsConfig struct {
 	Enabled  []string `json:"enabled,omitempty"`
 }
 
+// EmbeddingsConfig controls the optional real embedding backend
+// (hojaDeRuta-embeddings-skills.md Fase 4) that skills.lazy_load's
+// semantic matching (and retrieval, RF-3.2) need to be useful in
+// practice — the bag-of-words hash they fall back to otherwise scores
+// real queries far below any reasonable threshold (measured live: ~0.08
+// on realistic Spanish prompts). Both LlamaServerPath and ModelPath must
+// point to files that actually exist for the daemon to start the
+// backend; if either is missing, empty, or the process fails its health
+// check, the daemon logs that and continues with the hash — this is
+// never a fatal startup error.
+//
+// This is deliberately NOT auto-downloaded: the daemon only starts a
+// backend it finds already in place. Fetching a several-hundred-MB model
+// file on first run, with progress reporting and checksum verification,
+// is real scope left for later — see hojaDeRuta-embeddings-skills.md
+// Fase 0's still-open "mecanismo de distribución del modelo" question.
+type EmbeddingsConfig struct {
+	Enabled         bool   `json:"enabled"`
+	LlamaServerPath string `json:"llama_server_path"`
+	ModelPath       string `json:"model_path"`
+	// Port to run llama-server on. 0 (the default) picks an ephemeral
+	// port, same convention as DaemonConfig.Addr's ":0".
+	Port int `json:"port,omitempty"`
+}
+
 type ProjectConfig struct {
 	Sensitivity string `json:"sensitivity"`
 	// SpecPath is the optional workspace-relative path to the project spec
@@ -413,6 +438,7 @@ type Config struct {
 	Project         ProjectConfig       `json:"project"`
 	Daemon          DaemonConfig        `json:"daemon"`
 	Skills          SkillsConfig        `json:"skills"`
+	Embeddings      EmbeddingsConfig    `json:"embeddings"`
 	// FallbackChain is an ordered list of "provider/model" entries (same
 	// syntax as forge fanout --models) tried in order on a RETRYABLE
 	// failure — rate limit (429), transient upstream outage (502/503/504),
@@ -453,9 +479,32 @@ func Defaults() *Config {
 			PluginWasmMaxBytes: DefaultPluginWasmMaxBytes,
 			SkillFileMaxBytes:  DefaultSkillFileMaxBytes,
 		},
-		Agent:   AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds, MaxParallelChildren: DefaultAgentMaxParallelChildren},
-		Project: ProjectConfig{Sensitivity: SensitivityGeneral},
-		Skills:  SkillsConfig{LazyLoad: false},
+		Agent:      AgentConfig{MaxIterations: DefaultAgentMaxIterations, MaxTurnSeconds: DefaultAgentMaxTurnSeconds, MaxParallelChildren: DefaultAgentMaxParallelChildren},
+		Project:    ProjectConfig{Sensitivity: SensitivityGeneral},
+		Skills:     SkillsConfig{LazyLoad: false},
+		Embeddings: defaultEmbeddingsConfig(),
+	}
+}
+
+// defaultEmbeddingsConfig points at the conventional ~/.forge/embeddings/
+// location (paralleling ~/.forge/keys, ~/.forge/skills) — Enabled true, but
+// the daemon only actually starts the backend if both files are really
+// there (EmbeddingsConfig's doc comment). Best-effort: if the home
+// directory can't be resolved, leaves the paths empty, which has the same
+// effect (daemon finds nothing there, falls back to the hash).
+func defaultEmbeddingsConfig() EmbeddingsConfig {
+	base, err := ExpandPath("~/.forge/embeddings")
+	if err != nil {
+		return EmbeddingsConfig{Enabled: true}
+	}
+	binName := "llama-server"
+	if runtime.GOOS == "windows" {
+		binName = "llama-server.exe"
+	}
+	return EmbeddingsConfig{
+		Enabled:         true,
+		LlamaServerPath: filepath.Join(base, binName),
+		ModelPath:       filepath.Join(base, "models", "bge-m3-q4_k_m.gguf"),
 	}
 }
 
@@ -551,6 +600,7 @@ type fileConfig struct {
 	Project         *ProjectConfig      `json:"project"`
 	Daemon          *DaemonConfig       `json:"daemon"`
 	Skills          *SkillsConfig       `json:"skills"`
+	Embeddings      *EmbeddingsConfig   `json:"embeddings"`
 	// FallbackChain: no pointer needed — nil (key absent from this layer)
 	// vs non-nil (key present, even as "[]" to explicitly clear a lower
 	// layer's chain) is already exactly what json.Unmarshal gives a plain
@@ -781,6 +831,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	}
 	if fc.Skills != nil {
 		dst.Skills = *fc.Skills
+	}
+	if fc.Embeddings != nil {
+		dst.Embeddings = *fc.Embeddings
 	}
 }
 

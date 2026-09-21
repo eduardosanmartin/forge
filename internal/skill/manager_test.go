@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/eduardosanmartin/forge/internal/embedding"
 )
 
 func writeSkillMD(t *testing.T, dir string, content string) {
@@ -438,6 +440,72 @@ func TestManager_Relevant_CachesAcrossRepeatedCalls(t *testing.T) {
 	if got := store.GenCacheSize(); got != 3 {
 		t.Fatalf("embed cache size after %d repeated Relevant() calls = %d, want 3 (1 query + 2 skills, not %d*(1+2)=%d)",
 			simulatedIterations, got, simulatedIterations, simulatedIterations*3)
+	}
+}
+
+// TestManager_Reload_PreservesInjectedStore is a regression lock for a real
+// bug found while implementing Fase 4 of hojaDeRuta-embeddings-skills.md:
+// resetStateLocked (called by every Scan/ScanAll/Reload) used to
+// unconditionally recreate m.embedStore as a fresh hash-only store,
+// silently discarding a real backend passed via Options.Store — a
+// Manager configured with a real embedding backend would quietly revert
+// to the bag-of-words hash after its very first Reload, with no error or
+// log line. This test builds a Manager with a distinguishable custom
+// store and confirms the SAME store instance is still wired after Reload.
+func TestManager_Reload_PreservesInjectedStore(t *testing.T) {
+	root := t.TempDir()
+	writeSkillMD(t, filepath.Join(root, "skill-a"),
+		"---\nname: skill-a\ndescription: \"skill for reload regression test\"\nsource: local\n---\nBODY\n")
+
+	customStore, err := embedding.NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	mgr := NewManager(Options{Store: customStore})
+	defer mgr.Close()
+
+	if _, err := mgr.Scan(root); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if mgr.embedStore != customStore {
+		t.Fatal("Scan replaced the injected store on its first call")
+	}
+
+	if _, err := mgr.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if mgr.embedStore != customStore {
+		t.Fatal("Reload replaced the injected store — the exact bug this test locks against")
+	}
+}
+
+// TestManager_Close_DoesNotCloseExternallyOwnedStore covers the ownership
+// split needed once skill.Manager can share a Store with something else
+// (internal/cli/daemon.go shares one between skills and retrieval, Fase 4
+// of hojaDeRuta-embeddings-skills.md): Close() must only close a store it
+// created itself. embedding.Store.Close() is a harmless no-op today, so
+// this can't be observed via a panic or error — it asserts on Manager's
+// own bookkeeping (ownsStore) instead, which is what actually decides the
+// behavior.
+func TestManager_Close_DoesNotCloseExternallyOwnedStore(t *testing.T) {
+	external, err := embedding.NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	mgr := NewManager(Options{Store: external})
+	if mgr.ownsStore {
+		t.Fatal("ownsStore should be false when Options.Store was supplied")
+	}
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	owned := NewManager(Options{})
+	if !owned.ownsStore {
+		t.Fatal("ownsStore should be true when Options.Store was nil (Manager created its own)")
+	}
+	if err := owned.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 

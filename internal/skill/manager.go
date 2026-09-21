@@ -32,15 +32,35 @@ import (
 // real model embeddings, tune toward semantic recall.
 //
 // TopK caps how many skills are injected per turn (default 1).
+//
+// The 0.4 default is calibrated for the hash ONLY. A real backend (Store
+// via NewStoreWithBackend, e.g. llama.cpp + bge-m3 — see
+// hojaDeRuta-embeddings-skills.md Fase 4) measures on a completely
+// different scale: live measurement against real Spanish queries found
+// relevant matches around ~0.70 and irrelevant ones around ~0.56-0.63 for
+// bge-m3 — 0.4 would let nearly everything through and defeat the point of
+// using a real embedding to discriminate at all. If Store is set and
+// MinScore is left zero, NewManager applies 0.65 instead of 0.4 (a
+// reasonable midpoint from that measurement, not re-validated per model —
+// callers using a different backend/model should pass MinScore explicitly
+// rather than rely on this fallback).
 type Options struct {
 	// ApproveExternal must be true to load any skill whose frontmatter source is "external".
 	ApproveExternal bool
-	// MinScore is the relevance threshold for Relevant(). Default 0.4.
+	// MinScore is the relevance threshold for Relevant(). Default 0.4 with
+	// the hash, 0.65 if Store is set and this is left zero — see the
+	// Options doc comment above.
 	MinScore float32
 	// TopK is the max skills injected per turn. Default 1.
 	TopK int
 	// Logger receives debug messages.
 	Logger *slog.Logger
+	// Store, when non-nil, is used instead of a fresh hash-only
+	// embedding.Store — pass one built via embedding.NewStoreWithBackend
+	// to use a real embedding backend. Nil (the default) preserves every
+	// existing caller's behavior unchanged: an internal hash-only Store,
+	// exactly as before Fase 4.
+	Store *embedding.Store
 }
 
 // LoadResult reports the outcome of loading one skill directory.
@@ -74,6 +94,7 @@ type Manager struct {
 	closed          bool
 	root            string // remembered project root for Reload()
 	globalRoot      string // remembered global root for Reload(); empty if Scan (not ScanAll) was used
+	ownsStore       bool   // true when NewManager created embedStore itself (Options.Store was nil) — see Close
 }
 
 // NewManager creates a Manager.
@@ -84,19 +105,33 @@ func NewManager(opts Options) *Manager {
 	}
 	minScore := opts.MinScore
 	if minScore == 0 {
-		minScore = 0.4
+		if opts.Store != nil {
+			minScore = 0.65 // see Options' doc comment — calibrated for a real backend, not the hash
+		} else {
+			minScore = 0.4
+		}
 	}
 	topK := opts.TopK
 	if topK <= 0 {
 		topK = 1
 	}
-	// Manager owns its own embedding store (do not share v1 retriever's store).
-	st, _ := embedding.NewStore("")
+	// Manager owns its own embedding store by default — unless the caller
+	// supplied one explicitly (e.g. shared with retrieval, or a real
+	// backend via embedding.NewStoreWithBackend, Fase 4). ownsStore
+	// controls whether Close() closes it: Manager must not close a store
+	// some other owner (daemon.go, sharing it with retrieval) is
+	// responsible for.
+	st := opts.Store
+	ownsStore := st == nil
+	if st == nil {
+		st, _ = embedding.NewStore("")
+	}
 	return &Manager{
 		opts:            opts,
 		skills:          make(map[string]*Skill),
 		enabled:         make(map[string]bool),
 		embedStore:      st,
+		ownsStore:       ownsStore,
 		logger:          logger,
 		approveExternal: opts.ApproveExternal,
 		minScore:        minScore,
@@ -234,12 +269,14 @@ func (m *Manager) ScanAll(projectRoot, globalRoot string) ([]LoadResult, error) 
 func (m *Manager) resetStateLocked() {
 	m.skills = make(map[string]*Skill)
 	m.enabled = make(map[string]bool)
-	// Reset embedding store by creating a fresh one (in-memory, no persistent state to clear otherwise).
-	// The store has no Clear API, so recreate.
-	if m.embedStore != nil {
-		_ = m.embedStore.Close()
-	}
-	m.embedStore, _ = embedding.NewStore("")
+	// m.embedStore is deliberately NOT recreated here (it used to be,
+	// before Fase 4 of hojaDeRuta-embeddings-skills.md — a real bug: doing
+	// so silently threw away an injected real backend on every
+	// Scan/ScanAll/Reload, reverting to the hash after the first scan with
+	// no error or log line). It doesn't need to be: GenerateEmbedding's
+	// cache (Fase 1) is content-addressed, so stale entries from a
+	// previous scan are harmless — a changed skill's new text is simply a
+	// fresh cache key, not a stale hit.
 }
 
 // scanRootLocked loads every <root>/<name>/SKILL.md under root, tagging
@@ -596,7 +633,7 @@ func (m *Manager) Close() error {
 	m.closed = true
 	m.skills = make(map[string]*Skill)
 	m.enabled = make(map[string]bool)
-	if m.embedStore != nil {
+	if m.embedStore != nil && m.ownsStore {
 		_ = m.embedStore.Close()
 	}
 	return nil
