@@ -61,6 +61,12 @@ const (
 	// decision was already delivered — see ApproveRunCheckpoint's own doc
 	// comment in internal/daemon/runs.go).
 	ErrCodeRunNoCheckpointPending = -32032
+	// ErrCodeBootstrapNotFound: bootstrap.status (or any later bootstrap.*
+	// method) on a bootstrap_id the daemon has no in-memory session for —
+	// either never started, or lost to a daemon restart (bootstrap sessions
+	// are intentionally not persisted; see hojaDeRuta-wizard-inteligente.md
+	// Fase 0's "Estado intermedio" decision).
+	ErrCodeBootstrapNotFound = -32040
 )
 
 // Method names for daemon -> client notifications.
@@ -221,6 +227,15 @@ const (
 	MethodRunResume            = "run.resume"
 	MethodRunCancel            = "run.cancel"
 	MethodRunApproveCheckpoint = "run.approve_checkpoint"
+	// Intelligent wizard (hojaDeRuta-wizard-inteligente.md): turns a short
+	// project idea into a curated RF/RNF set, then (later phases) SPEC.md +
+	// config + manifest. Same run.*/skill.* naming convention. Fase 1 scope
+	// only: propose the initial set (Start) and read it back (Status) — no
+	// filesystem access here, same "no tools" discipline as run.start's own
+	// decomposition call (internal/bootstrap.Proposer wraps a throwaway
+	// no_tools session, mirroring manifestDecomposer).
+	MethodBootstrapStart  = "bootstrap.start"
+	MethodBootstrapStatus = "bootstrap.status"
 )
 
 // CreateSessionParams for session.create.
@@ -737,4 +752,15 @@ type RunCancelParams struct {
 type RunApproveCheckpointParams struct {
 	RunID    string `json:"run_id"`
 	Approved bool   `json:"approved"`
+}
+
+// BootstrapStartParams for bootstrap.start. Idea is the user's short,
+// possibly vague project description — the only input Fase 1 needs.
+type BootstrapStartParams struct {
+	Idea string `json:"idea"`
+}
+
+// BootstrapStatusParams for bootstrap.status.
+type BootstrapStatusParams struct {
+	BootstrapID string `json:"bootstrap_id"`
 }

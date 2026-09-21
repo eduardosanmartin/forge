@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/eduardosanmartin/forge/internal/bootstrap"
 	"github.com/eduardosanmartin/forge/internal/run"
 )
 
@@ -442,6 +443,35 @@ func (m *SessionManager) manifestDecomposer() run.Decomposer {
 			}
 		}
 		return run.ParseDecomposedTasks(finalContent)
+	}
+}
+
+// bootstrapProposer is the daemon-internal internal/bootstrap.Proposer:
+// same throwaway no_tools-session pattern as manifestDecomposer above,
+// reused verbatim in spirit for the intelligent wizard's RF/RNF proposal
+// calls (hojaDeRuta-wizard-inteligente.md Fase 1). A dedicated session per
+// call keeps wizard chatter out of every other session's context, exactly
+// as manifestDecomposer keeps decomposition chatter out of a run's task
+// turns.
+func (m *SessionManager) bootstrapProposer() bootstrap.Proposer {
+	return func(ctx context.Context, prompt string) (string, error) {
+		sess, err := m.CreateSession(ctx, map[string]any{
+			"source":   "bootstrap_propose",
+			"no_tools": true,
+		})
+		if err != nil {
+			return "", fmt.Errorf("create bootstrap session: %w", err)
+		}
+		msgs, err := m.ExecuteTurn(ctx, sess.ID, prompt)
+		if err != nil {
+			return "", fmt.Errorf("bootstrap propose turn: %w", err)
+		}
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "assistant" {
+				return msgs[i].Content, nil
+			}
+		}
+		return "", fmt.Errorf("bootstrap propose turn produced no assistant message")
 	}
 }
 

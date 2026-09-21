@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/eduardosanmartin/forge/internal/llmjson"
 )
 
 // decompositionSystemPrompt instructs the model to propose an atomic task
@@ -69,10 +71,7 @@ type decomposedTask struct {
 // (the manifest's after_spec_decomposition checkpoint) surface that to a
 // human rather than silently falling back to a single giant task.
 func ParseDecomposedTasks(raw string) ([]Task, error) {
-	candidates := []string{raw, stripCodeFence(raw)}
-	if start, end, ok := outermostBrackets(raw); ok {
-		candidates = append(candidates, raw[start:end])
-	}
+	candidates := llmjson.Candidates(raw)
 
 	var lastErr error
 	for _, c := range candidates {
@@ -107,60 +106,3 @@ func ParseDecomposedTasks(raw string) ([]Task, error) {
 	return nil, fmt.Errorf("could not parse a task list from the decomposition response: %w", lastErr)
 }
 
-// stripCodeFence removes a single leading/trailing markdown code fence
-// (``` or ```json) if present; returns s unchanged otherwise.
-func stripCodeFence(s string) string {
-	s = strings.TrimSpace(s)
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	s = strings.TrimPrefix(s, "```json")
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	return strings.TrimSpace(s)
-}
-
-// outermostBrackets returns the span [start, end) of the JSON array starting
-// at the first '[' in s, found by tracking bracket depth (not just "first
-// '[' to last ']'" — a naive last-']' scan grabs trailing prose as part of
-// the array whenever the model's own commentary after the array contains
-// ANY ']' of its own, e.g. a markdown link or an "arr[0]" example; observed
-// in practice against a real decomposition response and exactly the kind of
-// response shape small/local models are prone to). Bracket/brace depth
-// inside JSON string literals is ignored via a small state machine so a
-// string value like "returns arr[0]" doesn't miscount.
-func outermostBrackets(s string) (start, end int, ok bool) {
-	start = strings.IndexByte(s, '[')
-	if start < 0 {
-		return 0, 0, false
-	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if inString {
-			switch {
-			case escaped:
-				escaped = false
-			case c == '\\':
-				escaped = true
-			case c == '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '[', '{':
-			depth++
-		case ']', '}':
-			depth--
-			if depth == 0 {
-				return start, i + 1, true
-			}
-		}
-	}
-	return 0, 0, false
-}

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/eduardosanmartin/forge/internal/bootstrap"
 	"github.com/eduardosanmartin/forge/internal/cost"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
 	"github.com/eduardosanmartin/forge/internal/skill"
@@ -17,15 +18,26 @@ import (
 
 // Handler dispatches JSON-RPC requests to the session manager.
 type Handler struct {
-	mgr       *SessionManager
-	logger    *slog.Logger
-	pluginMgr *pluginwasm.Manager
-	skillMgr  *skill.Manager
+	mgr          *SessionManager
+	logger       *slog.Logger
+	pluginMgr    *pluginwasm.Manager
+	skillMgr     *skill.Manager
+	bootstrapMgr *bootstrap.Manager
 }
 
-// NewHandler creates a new Handler.
+// NewHandler creates a new Handler. bootstrapMgr is built here (not passed
+// in) because it has exactly one dependency — mgr's own bootstrapProposer,
+// itself a thin wrapper over mgr.CreateSession/ExecuteTurn — so there is no
+// external wiring for a caller to supply, unlike pluginMgr/skillMgr which
+// are independently constructed subsystems.
 func NewHandler(mgr *SessionManager, logger *slog.Logger, pluginMgr *pluginwasm.Manager, skillMgr *skill.Manager) *Handler {
-	return &Handler{mgr: mgr, logger: logger, pluginMgr: pluginMgr, skillMgr: skillMgr}
+	return &Handler{
+		mgr:          mgr,
+		logger:       logger,
+		pluginMgr:    pluginMgr,
+		skillMgr:     skillMgr,
+		bootstrapMgr: bootstrap.NewManager(mgr.bootstrapProposer()),
+	}
 }
 
 // HandleRequest processes a JSON-RPC request and returns a response (or nil for notifications).
@@ -123,6 +135,10 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleRunCancel(ctx, req)
 	case MethodRunApproveCheckpoint:
 		return h.handleRunApproveCheckpoint(ctx, req)
+	case MethodBootstrapStart:
+		return h.handleBootstrapStart(ctx, req)
+	case MethodBootstrapStatus:
+		return h.handleBootstrapStatus(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -1003,6 +1019,36 @@ func (h *Handler) handleRunApproveCheckpoint(ctx context.Context, req *JSONRPCRe
 		}
 	}
 	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleBootstrapStart(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapStartParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if strings.TrimSpace(params.Idea) == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "idea is required", nil)
+	}
+	st, err := h.bootstrapMgr.Start(ctx, params.Idea)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, st)
+}
+
+func (h *Handler) handleBootstrapStatus(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapStatusParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	st, err := h.bootstrapMgr.Status(params.BootstrapID)
+	if err != nil {
+		return NewErrorResponse(req.ID, ErrCodeBootstrapNotFound, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, st)
 }
 
 func messageToResult(msg store.Message) MessageResult {
