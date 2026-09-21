@@ -236,6 +236,13 @@ const (
 	// no_tools session, mirroring manifestDecomposer).
 	MethodBootstrapStart  = "bootstrap.start"
 	MethodBootstrapStatus = "bootstrap.status"
+	// Fase 2: curating the proposed set — accept/discard by Index, ask the
+	// model for more, or add one of the user's own. All four mutate and
+	// return the same State shape bootstrap.start/status already use.
+	MethodBootstrapSelect      = "bootstrap.select"
+	MethodBootstrapDiscard     = "bootstrap.discard"
+	MethodBootstrapSuggestMore = "bootstrap.suggest_more"
+	MethodBootstrapSuggestOwn  = "bootstrap.suggest_own"
 )
 
 // CreateSessionParams for session.create.
@@ -763,4 +770,33 @@ type BootstrapStartParams struct {
 // BootstrapStatusParams for bootstrap.status.
 type BootstrapStatusParams struct {
 	BootstrapID string `json:"bootstrap_id"`
+}
+
+// BootstrapSelectParams for bootstrap.select. Indices refer to Item.Index
+// (the stable, ever-growing position UX decision #1 requires — never the
+// per-kind ID).
+type BootstrapSelectParams struct {
+	BootstrapID string `json:"bootstrap_id"`
+	Indices     []int  `json:"indices"`
+}
+
+// BootstrapDiscardParams for bootstrap.discard.
+type BootstrapDiscardParams struct {
+	BootstrapID string `json:"bootstrap_id"`
+	Indices     []int  `json:"indices"`
+}
+
+// BootstrapSuggestMoreParams for bootstrap.suggest_more (the "+" command).
+type BootstrapSuggestMoreParams struct {
+	BootstrapID string `json:"bootstrap_id"`
+}
+
+// BootstrapSuggestOwnParams for bootstrap.suggest_own (the "sugerir: ..."
+// command). Kind is "RF" or "RNF" — the CLI frontend (Fase 5) is
+// responsible for asking the user which, since the mockup's "sugerir: ..."
+// line doesn't carry it.
+type BootstrapSuggestOwnParams struct {
+	BootstrapID string `json:"bootstrap_id"`
+	Kind        string `json:"kind"`
+	Text        string `json:"text"`
 }

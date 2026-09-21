@@ -3,18 +3,33 @@
 // project idea into a proposed, user-curated set of RF/RNF requirements,
 // which Fase 4 later turns into SPEC.md, .forge/config.json, and run.json.
 //
-// Fase 1 scope only: the initial proposal (Start) and reading state back
-// (Status). Selection, suggestions, clarification, and finalization are
-// separate phases layered on top of the same State — see the roadmap.
+// Fase 1+2 scope: the initial proposal (Start), reading state back
+// (Status), and curating it (Select/Discard/SuggestMore/SuggestOwn).
+// Clarification and finalization are separate phases layered on top of the
+// same State — see the roadmap.
 package bootstrap
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
+
+// ErrSessionNotFound is wrapped into every "no such bootstrap_id" error, so
+// a caller (the daemon's RPC handlers) can map it to a specific error code
+// via errors.Is instead of pattern-matching a message string.
+var ErrSessionNotFound = errors.New("bootstrap session not found")
+
+// ErrInvalidRequest is wrapped into every error caused by bad caller input
+// (empty indices, an unknown item index, a malformed Kind/empty text on a
+// user-supplied suggestion) — as opposed to a Proposer/LLM failure, which
+// is the caller's problem to retry, not theirs to fix by changing the
+// request. Lets the daemon's RPC handlers map this to ErrCodeInvalidParams.
+var ErrInvalidRequest = errors.New("invalid bootstrap request")
 
 // Kind distinguishes a functional requirement from a non-functional one.
 type Kind string
@@ -161,13 +176,128 @@ func (m *Manager) Start(ctx context.Context, idea string) (*State, error) {
 
 // Status returns the current state of an existing session.
 func (m *Manager) Status(id string) (*State, error) {
+	st, err := m.getSession(id)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return st.snapshot(), nil
+}
+
+// Select marks each item at the given Index as Accepted. Discard does the
+// same as Discarded. Re-deciding an already-decided item (accepted →
+// discarded or back) is allowed — nothing is final until Finalize (a later
+// phase); the user navigates the loop freely until they say "listo".
+func (m *Manager) Select(id string, indices []int) (*State, error) {
+	return m.setStatus(id, indices, StatusAccepted)
+}
+
+func (m *Manager) Discard(id string, indices []int) (*State, error) {
+	return m.setStatus(id, indices, StatusDiscarded)
+}
+
+// setStatus validates every index exists before changing any of them, so a
+// call naming one bad index alongside several good ones mutates nothing
+// rather than partially applying.
+func (m *Manager) setStatus(id string, indices []int, status Status) (*State, error) {
+	if len(indices) == 0 {
+		return nil, fmt.Errorf("%w: indices is required", ErrInvalidRequest)
+	}
+	st, err := m.getSession(id)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	byIndex := make(map[int]*Item, len(st.Items))
+	for i := range st.Items {
+		byIndex[st.Items[i].Index] = &st.Items[i]
+	}
+	for _, idx := range indices {
+		if _, ok := byIndex[idx]; !ok {
+			return nil, fmt.Errorf("%w: item index %d not found", ErrInvalidRequest, idx)
+		}
+	}
+	for _, idx := range indices {
+		byIndex[idx].Status = status
+	}
+	return st.snapshot(), nil
+}
+
+// SuggestOwn appends a single user-authored item (the "sugerir: ..."
+// command) directly — no LLM call, unlike SuggestMore. kind is validated
+// here (not left to appendProposed's own check) because an invalid kind
+// here is the CALLER's mistake (ErrInvalidRequest), whereas the same check
+// failing inside appendProposed during Start/SuggestMore means the MODEL
+// ignored the prompt's format — a different kind of failure, mapped to a
+// different RPC error code by the daemon.
+func (m *Manager) SuggestOwn(id string, kind Kind, text string) (*State, error) {
+	if kind != KindRF && kind != KindRNF {
+		return nil, fmt.Errorf("%w: kind must be %q or %q, got %q", ErrInvalidRequest, KindRF, KindRNF, kind)
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("%w: text is required", ErrInvalidRequest)
+	}
+	st, err := m.getSession(id)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := st.appendProposed([]proposedItem{{Kind: string(kind), Text: text}}); err != nil {
+		return nil, err
+	}
+	return st.snapshot(), nil
+}
+
+// SuggestMore re-consults the model (the "+" command), sending the idea
+// plus every item decided or proposed so far (BuildProposePrompt's
+// "ALREADY PROPOSED" section — UX decision #4 in the roadmap: new
+// suggestions must not repeat what's accepted or contradict what's
+// discarded) and appending whatever comes back.
+func (m *Manager) SuggestMore(ctx context.Context, id string) (*State, error) {
+	st, err := m.getSession(id)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	idea := st.Idea
+	existing := append([]Item(nil), st.Items...)
+	m.mu.Unlock()
+
+	prompt := BuildProposePrompt(idea, existing)
+	raw, err := m.propose(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("propose: %w", err)
+	}
+	proposed, err := ParseProposedItems(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse proposal: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := st.appendProposed(proposed); err != nil {
+		return nil, err
+	}
+	return st.snapshot(), nil
+}
+
+// getSession looks up an existing session by id, wrapped so every caller
+// gets the same ErrSessionNotFound-based error.
+func (m *Manager) getSession(id string) (*State, error) {
 	m.mu.Lock()
 	st, ok := m.sessions[id]
 	m.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("bootstrap session %q not found", id)
+		return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
 	}
-	return st.snapshot(), nil
+	return st, nil
 }
 
 // newSessionID returns a random 16-hex-char (8-byte) identifier — enough

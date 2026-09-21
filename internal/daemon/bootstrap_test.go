@@ -128,3 +128,116 @@ func TestHandler_BootstrapStart_EmptyIdea(t *testing.T) {
 		t.Errorf("Error.Code = %d, want %d (ErrCodeInvalidParams)", resp.Error.Code, ErrCodeInvalidParams)
 	}
 }
+
+// bootstrapStartViaHandler is a small helper for the Fase 2 curation tests
+// below: runs bootstrap.start through the real handler and returns the
+// resulting state, failing the test on any error.
+func bootstrapStartViaHandler(t *testing.T, h *Handler, idea string) bootstrap.State {
+	t.Helper()
+	resp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapStart, BootstrapStartParams{Idea: idea}))
+	if resp.Error != nil {
+		t.Fatalf("bootstrap.start returned an error: %+v", resp.Error)
+	}
+	var st bootstrap.State
+	if err := json.Unmarshal(resp.Result, &st); err != nil {
+		t.Fatalf("unmarshal bootstrap.start result: %v", err)
+	}
+	return st
+}
+
+// TestHandler_BootstrapSelect_And_Discard exercises Fase 2's curation RPCs
+// end to end through the real dispatch, same rigor as the Fase 1 test
+// above.
+func TestHandler_BootstrapSelect_And_Discard(t *testing.T) {
+	mgr, llmReg := newTestSessionManagerForBootstrap()
+	setCannedAssistantResponse(llmReg, `[
+		{"kind": "RF", "text": "Registrar un gasto"},
+		{"kind": "RF", "text": "Calcular el balance"}
+	]`)
+	h := NewHandler(mgr, slog.New(slog.DiscardHandler), nil, nil)
+	st := bootstrapStartViaHandler(t, h, "idea")
+
+	selResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSelect, BootstrapSelectParams{BootstrapID: st.ID, Indices: []int{1}}))
+	if selResp.Error != nil {
+		t.Fatalf("bootstrap.select returned an error: %+v", selResp.Error)
+	}
+	var afterSelect bootstrap.State
+	if err := json.Unmarshal(selResp.Result, &afterSelect); err != nil {
+		t.Fatalf("unmarshal bootstrap.select result: %v", err)
+	}
+	if afterSelect.Items[0].Status != bootstrap.StatusAccepted {
+		t.Errorf("item 1 status = %q, want accepted", afterSelect.Items[0].Status)
+	}
+
+	discResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapDiscard, BootstrapDiscardParams{BootstrapID: st.ID, Indices: []int{2}}))
+	if discResp.Error != nil {
+		t.Fatalf("bootstrap.discard returned an error: %+v", discResp.Error)
+	}
+	var afterDiscard bootstrap.State
+	if err := json.Unmarshal(discResp.Result, &afterDiscard); err != nil {
+		t.Fatalf("unmarshal bootstrap.discard result: %v", err)
+	}
+	if afterDiscard.Items[1].Status != bootstrap.StatusDiscarded {
+		t.Errorf("item 2 status = %q, want discarded", afterDiscard.Items[1].Status)
+	}
+
+	// bad index: mapped to ErrCodeInvalidParams via bootstrap.ErrInvalidRequest
+	badResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSelect, BootstrapSelectParams{BootstrapID: st.ID, Indices: []int{99}}))
+	if badResp.Error == nil || badResp.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("bootstrap.select with a bad index: got %+v, want ErrCodeInvalidParams", badResp.Error)
+	}
+}
+
+// TestHandler_BootstrapSuggestOwn adds a user-authored item without any LLM
+// call and confirms it lands with correct numbering.
+func TestHandler_BootstrapSuggestOwn(t *testing.T) {
+	mgr, llmReg := newTestSessionManagerForBootstrap()
+	setCannedAssistantResponse(llmReg, `[{"kind": "RF", "text": "Registrar un gasto"}]`)
+	h := NewHandler(mgr, slog.New(slog.DiscardHandler), nil, nil)
+	st := bootstrapStartViaHandler(t, h, "idea")
+
+	resp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSuggestOwn, BootstrapSuggestOwnParams{
+		BootstrapID: st.ID, Kind: "RNF", Text: "Debe funcionar sin conexion a internet",
+	}))
+	if resp.Error != nil {
+		t.Fatalf("bootstrap.suggest_own returned an error: %+v", resp.Error)
+	}
+	var got bootstrap.State
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal bootstrap.suggest_own result: %v", err)
+	}
+	if len(got.Items) != 2 || got.Items[1].ID != "RNF-1" {
+		t.Fatalf("unexpected items after suggest_own: %+v", got.Items)
+	}
+
+	// invalid kind: mapped to ErrCodeInvalidParams
+	badResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSuggestOwn, BootstrapSuggestOwnParams{
+		BootstrapID: st.ID, Kind: "functional", Text: "algo",
+	}))
+	if badResp.Error == nil || badResp.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("bootstrap.suggest_own with an invalid kind: got %+v, want ErrCodeInvalidParams", badResp.Error)
+	}
+}
+
+// TestHandler_BootstrapSuggestMore re-consults the (fake) model for a
+// second round and confirms both rounds' items coexist with continuous
+// numbering, driven entirely through the real RPC dispatch.
+func TestHandler_BootstrapSuggestMore(t *testing.T) {
+	mgr, llmReg := newTestSessionManagerForBootstrap()
+	setCannedAssistantResponse(llmReg, `[{"kind": "RF", "text": "Registrar un gasto"}]`)
+	h := NewHandler(mgr, slog.New(slog.DiscardHandler), nil, nil)
+	st := bootstrapStartViaHandler(t, h, "idea")
+
+	setCannedAssistantResponse(llmReg, `[{"kind": "RNF", "text": "Persistencia local"}]`)
+	resp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSuggestMore, BootstrapSuggestMoreParams{BootstrapID: st.ID}))
+	if resp.Error != nil {
+		t.Fatalf("bootstrap.suggest_more returned an error: %+v", resp.Error)
+	}
+	var got bootstrap.State
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal bootstrap.suggest_more result: %v", err)
+	}
+	if len(got.Items) != 2 || got.Items[0].ID != "RF-1" || got.Items[1].ID != "RNF-1" {
+		t.Fatalf("unexpected items after suggest_more: %+v", got.Items)
+	}
+}

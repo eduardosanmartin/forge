@@ -139,6 +139,14 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleBootstrapStart(ctx, req)
 	case MethodBootstrapStatus:
 		return h.handleBootstrapStatus(ctx, req)
+	case MethodBootstrapSelect:
+		return h.handleBootstrapSelect(ctx, req)
+	case MethodBootstrapDiscard:
+		return h.handleBootstrapDiscard(ctx, req)
+	case MethodBootstrapSuggestMore:
+		return h.handleBootstrapSuggestMore(ctx, req)
+	case MethodBootstrapSuggestOwn:
+		return h.handleBootstrapSuggestOwn(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -1031,7 +1039,7 @@ func (h *Handler) handleBootstrapStart(ctx context.Context, req *JSONRPCRequest)
 	}
 	st, err := h.bootstrapMgr.Start(ctx, params.Idea)
 	if err != nil {
-		return NewErrorResponse(req.ID, ErrCodeInternalError, err.Error(), nil)
+		return h.bootstrapErrorResponse(req.ID, err)
 	}
 	return h.resultResponse(req.ID, st)
 }
@@ -1046,9 +1054,83 @@ func (h *Handler) handleBootstrapStatus(ctx context.Context, req *JSONRPCRequest
 	}
 	st, err := h.bootstrapMgr.Status(params.BootstrapID)
 	if err != nil {
-		return NewErrorResponse(req.ID, ErrCodeBootstrapNotFound, err.Error(), nil)
+		return h.bootstrapErrorResponse(req.ID, err)
 	}
 	return h.resultResponse(req.ID, st)
+}
+
+func (h *Handler) handleBootstrapSelect(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapSelectParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	st, err := h.bootstrapMgr.Select(params.BootstrapID, params.Indices)
+	if err != nil {
+		return h.bootstrapErrorResponse(req.ID, err)
+	}
+	return h.resultResponse(req.ID, st)
+}
+
+func (h *Handler) handleBootstrapDiscard(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapDiscardParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	st, err := h.bootstrapMgr.Discard(params.BootstrapID, params.Indices)
+	if err != nil {
+		return h.bootstrapErrorResponse(req.ID, err)
+	}
+	return h.resultResponse(req.ID, st)
+}
+
+func (h *Handler) handleBootstrapSuggestMore(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapSuggestMoreParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	st, err := h.bootstrapMgr.SuggestMore(ctx, params.BootstrapID)
+	if err != nil {
+		return h.bootstrapErrorResponse(req.ID, err)
+	}
+	return h.resultResponse(req.ID, st)
+}
+
+func (h *Handler) handleBootstrapSuggestOwn(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapSuggestOwnParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	st, err := h.bootstrapMgr.SuggestOwn(params.BootstrapID, bootstrap.Kind(params.Kind), params.Text)
+	if err != nil {
+		return h.bootstrapErrorResponse(req.ID, err)
+	}
+	return h.resultResponse(req.ID, st)
+}
+
+// bootstrapErrorResponse maps a bootstrap.Manager error onto the right
+// JSON-RPC error code via errors.Is against its sentinels — the same
+// pattern handleRunApproveCheckpoint uses for ErrRunNotFound.
+func (h *Handler) bootstrapErrorResponse(id *json.RawMessage, err error) *JSONRPCResponse {
+	switch {
+	case errors.Is(err, bootstrap.ErrSessionNotFound):
+		return NewErrorResponse(id, ErrCodeBootstrapNotFound, err.Error(), nil)
+	case errors.Is(err, bootstrap.ErrInvalidRequest):
+		return NewErrorResponse(id, ErrCodeInvalidParams, err.Error(), nil)
+	default:
+		return NewErrorResponse(id, ErrCodeInternalError, err.Error(), nil)
+	}
 }
 
 func messageToResult(msg store.Message) MessageResult {
