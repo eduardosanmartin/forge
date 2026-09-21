@@ -120,3 +120,39 @@ func TestRetrieverClear(t *testing.T) {
 		t.Errorf("clear should remove all data, got %d results", len(results))
 	}
 }
+
+// TestRetriever_Search_CachesQueryAcrossRepeatedCalls is the retrieval-side
+// half of the Fase 1 regression (hojaDeRuta-embeddings-skills.md): Search
+// is called once per agent tool-calling iteration within a single turn
+// (same shared root cause as skill.Manager.Relevant — internal/agent/
+// context.go's Build calls it every iteration with the same userMessage).
+// The embedding.Store this Retriever wraps now memoizes GenerateEmbedding
+// by exact text, so repeated Search calls with the same query must not
+// grow the cache past 1 entry for the query, regardless of call count.
+func TestRetriever_Search_CachesQueryAcrossRepeatedCalls(t *testing.T) {
+	embStore, err := embedding.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("embedding.NewStore: %v", err)
+	}
+	defer embStore.Close()
+	r := NewRetriever(embStore)
+	// Search short-circuits to a no-op before ever touching the embedding
+	// store when there is nothing indexed yet — index one message so the
+	// real Search -> embStore.Search -> GenerateEmbedding path actually runs.
+	r.Index([]Message{{ID: 1, Role: "user", Content: "algo indexado para que Search tenga contra qué buscar"}})
+
+	const query = "same query repeated across every iteration of one turn"
+	const simulatedIterations = 5
+	for i := 0; i < simulatedIterations; i++ {
+		if _, err := r.Search(query, 5); err != nil {
+			t.Fatalf("Search call %d: %v", i, err)
+		}
+	}
+
+	// 1 indexed message + 1 query = 2 distinct texts, regardless of
+	// simulatedIterations.
+	if got := embStore.GenCacheSize(); got != 2 {
+		t.Fatalf("embed cache size after %d repeated Search() calls with the same query = %d, want 2 (1 indexed message + 1 query)",
+			simulatedIterations, got)
+	}
+}

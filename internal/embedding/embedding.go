@@ -15,7 +15,29 @@ type Store struct {
 	entries []entry
 	nextID  int64
 	dim     int
+
+	// genCache memoizes GenerateEmbedding by exact input text — content-
+	// addressed, so a changed text is automatically a cache miss with no
+	// separate invalidation logic needed. Fixes a real redundant-work bug
+	// found live (hojaDeRuta-embeddings-skills.md Fase 1): both
+	// skill.Manager.Relevant and retrieval.Retriever.Search recomputed the
+	// SAME text's embedding on every call, and Relevant in particular was
+	// called once per agent tool-calling iteration within a single turn —
+	// same userMessage, same skill descriptions, recomputed every time.
+	// FIFO eviction (not true LRU) once genCacheCap is exceeded: simple,
+	// and sufficient for the actual access pattern (bursty repeats of the
+	// same handful of strings within one turn, not a long tail that needs
+	// real recency tracking).
+	genCache      map[string][]float32
+	genCacheOrder []string
+	genCacheCap   int
 }
+
+// defaultGenCacheCap bounds genCache's size. Generous relative to a
+// realistic working set (one turn's query + a handful of enabled skill
+// descriptions) without letting a long-running daemon's cache grow
+// unbounded from one-off queries that never repeat.
+const defaultGenCacheCap = 128
 
 type entry struct {
 	id        int64
@@ -34,15 +56,28 @@ type SearchResult struct {
 func NewStore(dsn string) (*Store, error) {
 	// dsn ignored for in-memory; kept for API compatibility
 	return &Store{
-		entries: make([]entry, 0),
-		nextID:  1,
-		dim:     384,
+		entries:     make([]entry, 0),
+		nextID:      1,
+		dim:         384,
+		genCache:    make(map[string][]float32),
+		genCacheCap: defaultGenCacheCap,
 	}, nil
 }
 
 // Close closes the store (no-op for in-memory).
 func (s *Store) Close() error {
 	return nil
+}
+
+// GenCacheSize returns the number of distinct texts currently memoized by
+// GenerateEmbedding. Exported for tests (in this package and callers like
+// skill.Manager) that need to prove a burst of calls with repeated text
+// produced one cache entry, not one recomputation per call — see genCache's
+// doc comment on the Store struct.
+func (s *Store) GenCacheSize() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.genCache)
 }
 
 // GenerateEmbedding generates a deterministic token-based bag-of-words embedding
@@ -107,9 +142,39 @@ func GenerateEmbedding(text string) ([]float32, error) {
 }
 
 // GenerateEmbedding generates a deterministic token-based bag-of-words embedding
-// via the package-level GenerateEmbedding. Kept on Store for API compatibility.
+// via the package-level GenerateEmbedding, memoized per exact input text (see
+// genCache's doc comment on the Store struct). Kept on Store for API
+// compatibility.
 func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
-	return GenerateEmbedding(text)
+	s.mu.RLock()
+	if cached, ok := s.genCache[text]; ok {
+		out := make([]float32, len(cached))
+		copy(out, cached)
+		s.mu.RUnlock()
+		return out, nil
+	}
+	s.mu.RUnlock()
+
+	emb, err := GenerateEmbedding(text)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if _, exists := s.genCache[text]; !exists {
+		if s.genCacheCap > 0 && len(s.genCacheOrder) >= s.genCacheCap {
+			oldest := s.genCacheOrder[0]
+			s.genCacheOrder = s.genCacheOrder[1:]
+			delete(s.genCache, oldest)
+		}
+		cached := make([]float32, len(emb))
+		copy(cached, emb)
+		s.genCache[text] = cached
+		s.genCacheOrder = append(s.genCacheOrder, text)
+	}
+	s.mu.Unlock()
+
+	return emb, nil
 }
 
 // Store saves text and its embedding, returns the row ID.

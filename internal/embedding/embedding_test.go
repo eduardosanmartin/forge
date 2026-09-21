@@ -135,3 +135,100 @@ func TestEmbeddingIdenticalVsUnrelated(t *testing.T) {
 		t.Fatalf("paraphrase should score >=0.3, got %f", dot3)
 	}
 }
+
+// TestStore_GenerateEmbedding_MemoizesRepeatedText is a regression lock for
+// a real redundant-work bug (hojaDeRuta-embeddings-skills.md Fase 1):
+// skill.Manager.Relevant recomputed the query's embedding AND every enabled
+// skill's embedding on every call, and Relevant is called once per agent
+// tool-calling iteration within a single turn — so the exact same text (the
+// unchanged userMessage, the unchanged skill descriptions) got hashed
+// N×(1+M) times per turn instead of once. This test locks the fix at the
+// Store level: repeated calls with the same text must produce exactly one
+// cache entry, not one recomputation per call.
+func TestStore_GenerateEmbedding_MemoizesRepeatedText(t *testing.T) {
+	s, err := NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+
+	const text = "que estrategia me recomendas para reducir la deuda tecnica"
+	var first []float32
+	for i := 0; i < 5; i++ {
+		emb, err := s.GenerateEmbedding(text)
+		if err != nil {
+			t.Fatalf("GenerateEmbedding call %d: %v", i, err)
+		}
+		if i == 0 {
+			first = emb
+		} else if !floatSlicesEqual(first, emb) {
+			t.Fatalf("call %d returned a different embedding for the same text", i)
+		}
+	}
+
+	s.mu.RLock()
+	cacheSize := len(s.genCache)
+	orderSize := len(s.genCacheOrder)
+	s.mu.RUnlock()
+	if cacheSize != 1 {
+		t.Fatalf("genCache should hold exactly 1 entry after 5 calls with the same text, got %d", cacheSize)
+	}
+	if orderSize != 1 {
+		t.Fatalf("genCacheOrder should hold exactly 1 entry after 5 calls with the same text, got %d", orderSize)
+	}
+
+	// A second, genuinely different text must be its own cache entry, not
+	// collapse into (or evict) the first.
+	if _, err := s.GenerateEmbedding("otra consulta completamente distinta"); err != nil {
+		t.Fatalf("GenerateEmbedding (second text): %v", err)
+	}
+	s.mu.RLock()
+	cacheSize = len(s.genCache)
+	s.mu.RUnlock()
+	if cacheSize != 2 {
+		t.Fatalf("genCache should hold 2 entries after 2 distinct texts, got %d", cacheSize)
+	}
+}
+
+// TestStore_GenerateEmbedding_CacheEvictsOldestWhenFull covers the FIFO
+// eviction bound (defaultGenCacheCap) — the cache must not grow unbounded
+// over a long-running daemon fielding many one-off queries.
+func TestStore_GenerateEmbedding_CacheEvictsOldestWhenFull(t *testing.T) {
+	s, err := NewStore("")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+	s.genCacheCap = 3
+
+	texts := []string{"one", "two", "three", "four"}
+	for _, txt := range texts {
+		if _, err := s.GenerateEmbedding(txt); err != nil {
+			t.Fatalf("GenerateEmbedding(%q): %v", txt, err)
+		}
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.genCache) != 3 {
+		t.Fatalf("genCache should be capped at 3, got %d", len(s.genCache))
+	}
+	if _, stillCached := s.genCache["one"]; stillCached {
+		t.Error("\"one\" was inserted first and should have been evicted (FIFO)")
+	}
+	if _, cached := s.genCache["four"]; !cached {
+		t.Error("\"four\" is the most recent insert and must still be cached")
+	}
+}
+
+func floatSlicesEqual(a, b []float32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

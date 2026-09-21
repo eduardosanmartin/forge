@@ -398,6 +398,49 @@ func TestManager_ActiveManual_ProjectListPlusGlobalUnion(t *testing.T) {
 	}
 }
 
+// TestManager_Relevant_CachesAcrossRepeatedCalls is a regression lock for
+// Fase 1 of hojaDeRuta-embeddings-skills.md: Relevant() is called once per
+// agent tool-calling iteration within a single turn (internal/agent/loop.go
+// calls ContextAssembler.Build, which calls Relevant, inside the turn's
+// iteration loop) — with the SAME userMessage and the SAME enabled skills
+// every time. Before the fix, N iterations against M enabled skills meant
+// N*(1+M) embedding computations for identical text; after it, the
+// underlying embedding.Store's cache holds exactly 1 (query) + M (skills)
+// entries no matter how many times Relevant is called.
+func TestManager_Relevant_CachesAcrossRepeatedCalls(t *testing.T) {
+	root := t.TempDir()
+	writeSkillMD(t, filepath.Join(root, "skill-a"),
+		"---\nname: skill-a\ndescription: \"first skill for cache regression test\"\nsource: local\n---\nBODY A\n")
+	writeSkillMD(t, filepath.Join(root, "skill-b"),
+		"---\nname: skill-b\ndescription: \"second skill for cache regression test\"\nsource: local\n---\nBODY B\n")
+
+	mgr := NewManager(Options{MinScore: 0.0})
+	defer mgr.Close()
+	if _, err := mgr.Scan(root); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	const query = "same query repeated across every iteration of one turn"
+	const simulatedIterations = 5
+	for i := 0; i < simulatedIterations; i++ {
+		if _, err := mgr.Relevant(query); err != nil {
+			t.Fatalf("Relevant call %d: %v", i, err)
+		}
+	}
+
+	store := mgr.embedStore
+	if store == nil {
+		t.Fatal("manager has no embed store")
+	}
+	// 1 query + 2 skill descriptions (each combined with its — here empty —
+	// activation keywords) = 3 distinct texts, regardless of
+	// simulatedIterations.
+	if got := store.GenCacheSize(); got != 3 {
+		t.Fatalf("embed cache size after %d repeated Relevant() calls = %d, want 3 (1 query + 2 skills, not %d*(1+2)=%d)",
+			simulatedIterations, got, simulatedIterations, simulatedIterations*3)
+	}
+}
+
 func stripChecksumLineForTest(data []byte) []byte {
 	lines := strings.Split(string(data), "\n")
 	var kept []string
