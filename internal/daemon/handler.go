@@ -36,7 +36,9 @@ func NewHandler(mgr *SessionManager, logger *slog.Logger, pluginMgr *pluginwasm.
 		logger:       logger,
 		pluginMgr:    pluginMgr,
 		skillMgr:     skillMgr,
-		bootstrapMgr: bootstrap.NewManager(mgr.bootstrapProposer(), bootstrap.WithClarifier(mgr.bootstrapClarifier())),
+		bootstrapMgr: bootstrap.NewManager(mgr.bootstrapProposer(),
+			bootstrap.WithClarifier(mgr.bootstrapClarifier()),
+			bootstrap.WithDecomposer(mgr.manifestDecomposer())),
 	}
 }
 
@@ -149,6 +151,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handleBootstrapSuggestOwn(ctx, req)
 	case MethodBootstrapClarify:
 		return h.handleBootstrapClarify(ctx, req)
+	case MethodBootstrapFinalize:
+		return h.handleBootstrapFinalize(ctx, req)
 	default:
 		return NewErrorResponse(req.ID, ErrCodeMethodNotFound, fmt.Sprintf("method not found: %s", req.Method), nil)
 	}
@@ -1134,6 +1138,21 @@ func (h *Handler) handleBootstrapClarify(ctx context.Context, req *JSONRPCReques
 		return h.bootstrapErrorResponse(req.ID, err)
 	}
 	return h.resultResponse(req.ID, BootstrapClarifyResult{Answer: answer})
+}
+
+func (h *Handler) handleBootstrapFinalize(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params BootstrapFinalizeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.BootstrapID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "bootstrap_id is required", nil)
+	}
+	art, err := h.bootstrapMgr.Finalize(ctx, params.BootstrapID)
+	if err != nil {
+		return h.bootstrapErrorResponse(req.ID, err)
+	}
+	return h.resultResponse(req.ID, art)
 }
 
 // bootstrapErrorResponse maps a bootstrap.Manager error onto the right

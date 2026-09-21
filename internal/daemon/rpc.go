@@ -247,6 +247,10 @@ const (
 	// mutates the item's Status/Index/numbering — UX decision #1 — so it
 	// returns just the answer, not a full State.
 	MethodBootstrapClarify = "bootstrap.clarify"
+	// Fase 4: the "listo" command — coordinated generation of SPEC.md,
+	// .forge/config.json and run.json as content (UX decision #5: this
+	// never runs on an intermediate selection, only on explicit "listo").
+	MethodBootstrapFinalize = "bootstrap.finalize"
 )
 
 // CreateSessionParams for session.create.
@@ -818,4 +822,9 @@ type BootstrapClarifyParams struct {
 // BootstrapClarifyResult for bootstrap.clarify.
 type BootstrapClarifyResult struct {
 	Answer string `json:"answer"`
+}
+
+// BootstrapFinalizeParams for bootstrap.finalize.
+type BootstrapFinalizeParams struct {
+	BootstrapID string `json:"bootstrap_id"`
 }

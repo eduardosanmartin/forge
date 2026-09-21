@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/bootstrap"
@@ -268,6 +269,62 @@ func TestHandler_BootstrapClarify(t *testing.T) {
 	}))
 	if unknownResp.Error == nil || unknownResp.Error.Code != ErrCodeBootstrapNotFound {
 		t.Fatalf("bootstrap.clarify with an unknown bootstrap id: got %+v, want ErrCodeBootstrapNotFound", unknownResp.Error)
+	}
+}
+
+// TestHandler_BootstrapFinalize exercises Fase 4's "listo" RPC end to end:
+// real Handler, real bootstrap.Manager wired with the SAME
+// SessionManager.manifestDecomposer() run.start's own --decompose flag
+// uses (no daemon-side code duplicated for this), only the LLM calls
+// themselves faked.
+func TestHandler_BootstrapFinalize(t *testing.T) {
+	mgr, llmReg := newTestSessionManagerForBootstrap()
+	setCannedAssistantResponse(llmReg, `[
+		{"kind": "RF", "text": "Registrar un gasto"},
+		{"kind": "RNF", "text": "Persistencia local"}
+	]`)
+	h := NewHandler(mgr, slog.New(slog.DiscardHandler), nil, nil)
+	st := bootstrapStartViaHandler(t, h, "una app de gastos compartidos")
+
+	selResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapSelect, BootstrapSelectParams{BootstrapID: st.ID, Indices: []int{1, 2}}))
+	if selResp.Error != nil {
+		t.Fatalf("bootstrap.select returned an error: %+v", selResp.Error)
+	}
+
+	// finalize's own decomposition call gets its own canned response —
+	// the fake provider returns this for the manifestDecomposer turn.
+	setCannedAssistantResponse(llmReg, `[{"id": "t1", "goal": "implementar registro de gastos", "done_criteria": "cmd: go build ./...", "file_budget": "internal/expenses", "model_hint": "generation"}]`)
+
+	finResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapFinalize, BootstrapFinalizeParams{BootstrapID: st.ID}))
+	if finResp.Error != nil {
+		t.Fatalf("bootstrap.finalize returned an error: %+v", finResp.Error)
+	}
+	var art bootstrap.Artifacts
+	if err := json.Unmarshal(finResp.Result, &art); err != nil {
+		t.Fatalf("unmarshal bootstrap.finalize result: %v", err)
+	}
+	if art.Manifest == nil || len(art.Manifest.Tasks) != 1 || art.Manifest.Tasks[0].ID != "t1" {
+		t.Fatalf("unexpected manifest: %+v", art.Manifest)
+	}
+	if art.Config == nil {
+		t.Fatal("Config is nil")
+	}
+	if !strings.Contains(art.SpecMD, "RF-1") || !strings.Contains(art.SpecMD, "RNF-1") {
+		t.Fatalf("SPEC.md missing accepted items: %q", art.SpecMD)
+	}
+
+	// no accepted items: mapped to ErrCodeInvalidParams
+	setCannedAssistantResponse(llmReg, `[{"kind": "RF", "text": "otra idea"}]`)
+	st2 := bootstrapStartViaHandler(t, h, "otra idea sin seleccionar nada")
+	badResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapFinalize, BootstrapFinalizeParams{BootstrapID: st2.ID}))
+	if badResp.Error == nil || badResp.Error.Code != ErrCodeInvalidParams {
+		t.Fatalf("bootstrap.finalize with nothing accepted: got %+v, want ErrCodeInvalidParams", badResp.Error)
+	}
+
+	// unknown bootstrap id: mapped to ErrCodeBootstrapNotFound
+	unknownResp := h.HandleRequest(t.Context(), makeRequest(MethodBootstrapFinalize, BootstrapFinalizeParams{BootstrapID: "does-not-exist"}))
+	if unknownResp.Error == nil || unknownResp.Error.Code != ErrCodeBootstrapNotFound {
+		t.Fatalf("bootstrap.finalize with an unknown id: got %+v, want ErrCodeBootstrapNotFound", unknownResp.Error)
 	}
 }
 

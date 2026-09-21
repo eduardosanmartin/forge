@@ -1,12 +1,10 @@
 // Package bootstrap implements the intelligent wizard loop
 // (hojaDeRuta-wizard-inteligente.md): turning a short, possibly vague
 // project idea into a proposed, user-curated set of RF/RNF requirements,
-// which Fase 4 later turns into SPEC.md, .forge/config.json, and run.json.
-//
-// Fase 1+2 scope: the initial proposal (Start), reading state back
-// (Status), and curating it (Select/Discard/SuggestMore/SuggestOwn).
-// Clarification and finalization are separate phases layered on top of the
-// same State — see the roadmap.
+// then (Finalize) SPEC.md, .forge/config.json, and run.json — as content
+// only; writing them to disk is the CLI's job (Fase 5), same as every
+// other bootstrap RPC's "no filesystem access" rule (Fase 0's
+// architecture decision).
 package bootstrap
 
 import (
@@ -17,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/eduardosanmartin/forge/internal/run"
 )
 
 // ErrSessionNotFound is wrapped into every "no such bootstrap_id" error, so
@@ -152,10 +152,11 @@ type Clarifier func(ctx context.Context, sessionID, prompt string) (answer, newS
 // Manager holds every in-progress bootstrap session for one daemon
 // process. Safe for concurrent use.
 type Manager struct {
-	mu       sync.Mutex
-	sessions map[string]*State
-	propose  Proposer
-	clarify  Clarifier
+	mu        sync.Mutex
+	sessions  map[string]*State
+	propose   Proposer
+	clarify   Clarifier
+	decompose run.Decomposer
 }
 
 // Option configures a Manager at construction. Kept as a functional option
@@ -170,6 +171,16 @@ type Option func(*Manager)
 // matters to a test that exercises Clarify without supplying one.
 func WithClarifier(c Clarifier) Option {
 	return func(m *Manager) { m.clarify = c }
+}
+
+// WithDecomposer wires the task-breakdown call Finalize uses (Fase 4):
+// literally the same run.Decomposer type internal/daemon/runs.go's
+// manifestDecomposer already returns — see internal/daemon/handler.go's
+// NewHandler for the real wiring (mgr.manifestDecomposer(), no new
+// daemon-side code needed). A Manager with none configured returns an
+// error from Finalize, same convention as WithClarifier/Clarify.
+func WithDecomposer(d run.Decomposer) Option {
+	return func(m *Manager) { m.decompose = d }
 }
 
 // NewManager creates a Manager backed by propose for every LLM call.
