@@ -250,21 +250,28 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// retrieval so there's exactly one llama-server process and one warm
 	// cache, not two. Never fails startup: a nil embClient here just means
 	// "use the hash", handled explicitly below rather than silently.
-	embClient, embDim, embCleanup := startEmbeddingsBackend(ctx, app.Config.Embeddings, app.Logger)
-	defer embCleanup()
-
-	var embStore *embedding.Store
-	if embClient != nil {
-		embStore, err = embedding.NewStoreWithBackend(embClient, embDim)
-	} else {
-		embStore, err = embedding.NewStore("")
-	}
+	//
+	// The backend starts in the BACKGROUND (N2, review 2026-10-03: waiting
+	// for llama-server + model load held the daemon's startup for 5-7 s,
+	// vs RNF-1.1's 200 ms). The store starts on the hash embedding and is
+	// upgraded in place when the backend answers; retrieval indexes are
+	// then rebuilt (vectors of different dimensions don't compare).
+	embStore, err := embedding.NewStore("")
 	if err != nil {
 		app.Logger.Error("v1 deps: embedding store construction failed", "error", err)
 		return fmt.Errorf("create embedding store: %w", err)
 	}
 	defer embStore.Close()
 	retriever := retrieval.NewRetriever(embStore)
+	embCleanup := startEmbeddingsAsync(ctx, app.Config.Embeddings, app.Logger, func(client *embedding.LlamaClient, dim int) {
+		if err := embStore.UpgradeBackend(client, dim); err != nil {
+			app.Logger.Warn("embeddings backend: upgrade failed, staying on hash", "error", err)
+			return
+		}
+		retriever.ResetAll()
+		app.Logger.Info("embeddings backend: in use (switched from hash)", "dim", dim)
+	})
+	defer embCleanup()
 	// Summary granularity 60: keeps the compacted view inside the RNF-2.5
 	// 4k-8k context ceiling; measured by the RNF-10 bench (44.6% context
 	// reduction at 40 turns vs full history).

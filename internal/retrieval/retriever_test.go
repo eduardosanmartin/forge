@@ -225,3 +225,20 @@ func TestRetrieverEvictsLeastRecentlyUsedSession(t *testing.T) {
 		t.Fatalf("sizes old=%d mid=%d new=%d, want mid evicted", r.Size("old"), r.Size("mid"), r.Size("new"))
 	}
 }
+
+// N2: after the embedding backend changes dimension, every index must be
+// rebuilt (old vectors can't be compared with new ones).
+func TestRetrieverResetAll(t *testing.T) {
+	embStore, _ := embedding.NewStore("")
+	r := NewRetriever(embStore)
+	_ = r.IndexSession("a", []Message{{ID: 1, Role: "user", Content: "x"}})
+	_ = r.IndexSession("b", []Message{{ID: 2, Role: "user", Content: "y"}})
+	r.ResetAll()
+	if r.Size("a") != 0 || r.Size("b") != 0 {
+		t.Fatal("ResetAll must empty every session index")
+	}
+	_ = r.IndexSession("a", []Message{{ID: 1, Role: "user", Content: "x"}})
+	if r.Size("a") != 1 {
+		t.Fatal("a message seen before the reset must be indexed again")
+	}
+}

@@ -212,7 +212,9 @@ func (s *Store) GenerateEmbedding(text string) ([]float32, error) {
 	}
 
 	s.mu.Lock()
-	if _, exists := s.genCache[text]; !exists {
+	// Don't cache a vector computed by a backend that UpgradeBackend has
+	// replaced meanwhile: its dimension no longer matches the store's.
+	if _, exists := s.genCache[text]; !exists && s.backend == backend {
 		if s.genCacheCap > 0 && len(s.genCacheOrder) >= s.genCacheCap {
 			oldest := s.genCacheOrder[0]
 			s.genCacheOrder = s.genCacheOrder[1:]
@@ -333,3 +335,26 @@ func hashString(s string) uint32 {
 // Removed — see llama.go's LlamaClient for the real backend
 // (hojaDeRuta-embeddings-skills.md Fase 4) and NewStoreWithBackend for how
 // a Store picks it up.
+
+// UpgradeBackend switches a running store (typically started on the hash
+// embedding so the daemon doesn't wait for llama-server) to a real
+// backend of dimension dim. Everything computed under the previous
+// backend — cached generations and stored entries — is dropped: vectors
+// of different models/dimensions can't be compared. Callers holding their
+// own vectors (the retriever's indexes) must rebuild them too.
+func (s *Store) UpgradeBackend(backend *LlamaClient, dim int) error {
+	if backend == nil {
+		return fmt.Errorf("UpgradeBackend: backend must not be nil")
+	}
+	if dim <= 0 {
+		return fmt.Errorf("UpgradeBackend: dim must be positive, got %d", dim)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.backend = backend
+	s.dim = dim
+	s.genCache = make(map[string][]float32)
+	s.genCacheOrder = nil
+	s.entries = s.entries[:0]
+	return nil
+}

@@ -212,3 +212,12 @@ func cosine(a, b []float32) float32 {
 	}
 	return float32(dot / (math.Sqrt(na) * math.Sqrt(nb)))
 }
+
+// ResetAll drops every session's index (e.g. after the embedding backend
+// changed: old vectors can't be compared with new ones). Sessions are
+// re-indexed from their transcripts on their next turn.
+func (r *Retriever) ResetAll() {
+	r.mu.Lock()
+	r.sessions = make(map[string]*sessionIndex)
+	r.mu.Unlock()
+}

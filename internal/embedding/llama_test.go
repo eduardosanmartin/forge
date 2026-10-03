@@ -177,3 +177,33 @@ func TestStore_GenerateEmbedding_BackendFailureErrorsNotHashFallback(t *testing.
 		t.Fatal("expected an error when the backend is unreachable, got a (presumably hash-fallback) result instead")
 	}
 }
+
+// N2 (review 2026-10-03): the daemon used to block ~5-7 s at startup until
+// llama-server was up. It now starts on the hash embedding and upgrades the
+// SAME store once the backend is ready — dimension changes, so cached
+// embeddings from before must be dropped.
+func TestStoreUpgradeBackendSwitchesFromHash(t *testing.T) {
+	st, err := NewStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.GenerateEmbedding("hello world")
+	if len(before) != 384 || st.GenCacheSize() != 1 {
+		t.Fatalf("hash store: dim %d cache %d", len(before), st.GenCacheSize())
+	}
+	srv := fakeLlamaServer(t, 8)
+	defer srv.Close()
+	if err := st.UpgradeBackend(NewLlamaClient(srv.URL, "m"), 8); err != nil {
+		t.Fatal(err)
+	}
+	if st.GenCacheSize() != 0 {
+		t.Fatal("upgrading must drop embeddings cached under the old dimension")
+	}
+	after, err := st.GenerateEmbedding("hello world")
+	if err != nil || len(after) != 8 {
+		t.Fatalf("after upgrade: dim %d err %v, want the backend's 8", len(after), err)
+	}
+	if err := st.UpgradeBackend(nil, 8); err == nil {
+		t.Fatal("nil backend must be rejected")
+	}
+}

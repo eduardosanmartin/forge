@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/eduardosanmartin/forge/internal/config"
@@ -173,4 +174,44 @@ func freeTCPPort() (int, error) {
 		return 0, fmt.Errorf("unexpected listener address type %T", l.Addr())
 	}
 	return addr.Port, nil
+}
+
+// embeddingsStarter is startEmbeddingsBackend, swappable in tests.
+var embeddingsStarter = startEmbeddingsBackend
+
+// startEmbeddingsAsync starts the embeddings backend in the background and
+// calls onReady once it answers (never, if it fails or is disabled). It
+// returns immediately — N2 (review 2026-10-03): the daemon used to block
+// ~5-7 s at startup waiting for llama-server and the model to load, far
+// beyond RNF-1.1's 200 ms. Until onReady, callers run on the hash
+// embedding. cleanup stops the backend (safe to call any time).
+func startEmbeddingsAsync(ctx context.Context, cfg config.EmbeddingsConfig, logger *slog.Logger, onReady func(client *embedding.LlamaClient, dim int)) (cleanup func()) {
+	if !cfg.Enabled {
+		return func() {}
+	}
+	var mu sync.Mutex
+	var stop func()
+	stopped := false
+	go func() {
+		client, dim, c := embeddingsStarter(ctx, cfg, logger)
+		mu.Lock()
+		if stopped {
+			mu.Unlock()
+			c()
+			return
+		}
+		stop = c
+		mu.Unlock()
+		if client != nil && onReady != nil {
+			onReady(client, dim)
+		}
+	}()
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		stopped = true
+		if stop != nil {
+			stop()
+		}
+	}
 }
