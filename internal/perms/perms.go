@@ -383,29 +383,49 @@ func (e *Engine) evaluate(req Request) Decision {
 			return Decision{Allowed: true, Rule: string(KindFsWrite) + ":" + pat}
 		}
 	case KindShell:
+		// Shell floor first, like the git floor: no allow entry can
+		// authorize what it forbids.
+		if d, floored := e.shellFloor(req); floored {
+			return d
+		}
 		base := commandBase(req.Command)
+		argLine := strings.Join(req.Args, " ")
 		for _, allowed := range e.shellAllow {
+			// An entry may carry an argument pattern after the program
+			// ("go test *", "npm run lint"): the program part matches as
+			// below, and the joined argument line must then match the
+			// pattern ("*" = any run of characters, "?" = one). An entry
+			// without one keeps its original meaning: any arguments.
+			cmdPat, argPat, hasArgPat := splitShellEntry(allowed)
 			// Base-name comparison is case-insensitive on ALL platforms:
 			// Windows filenames are case-preserving-insensitive and POSIX
 			// builds prefer predictability over pedantry here. When the
-			// allow entry contains glob meta (*, ?, [...]) it is matched as
+			// program part contains glob meta (*, ?, [...]) it is matched as
 			// a case-insensitive glob against the base name; "*" alone thus
 			// matches any executable and effectively disables deny-by-default
 			// for shell (owner explicitly requested this escape hatch).
-			if containsShellGlobMeta(allowed) {
-				if shellGlobMatches(allowed, base) {
-					return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
-				}
+			// A program part with a path separator ("./scripts/check.sh")
+			// names that exact program path, never a base name.
+			var cmdOK bool
+			if strings.ContainsAny(cmdPat, `/\`) {
+				cmdOK = strings.EqualFold(normalizeProgramPath(cmdPat), normalizeProgramPath(req.Command))
+			} else if containsShellGlobMeta(cmdPat) {
+				cmdOK = shellGlobMatches(cmdPat, base)
+			} else {
+				cmdOK = strings.EqualFold(base, cmdPat)
+			}
+			if !cmdOK || (hasArgPat && !wildcardMatch(argPat, argLine)) {
 				continue
 			}
-			if strings.EqualFold(base, allowed) {
-				return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
-			}
+			return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
 		}
 	case KindGit:
 		// Floor first: no configuration can authorize what it forbids.
 		if IsDestructiveGit(req.Subcommand, req.GitArgs) {
 			return Decision{Allowed: false, Rule: "git-floor"}
+		}
+		if req.Workdir != "" && !e.workdirInside(req.Workdir) {
+			return Decision{Allowed: false, Rule: "workdir-outside-workspace"}
 		}
 		for _, allowed := range e.gitAllow {
 			// Case-SENSITIVE by convention: git subcommands are lowercase;

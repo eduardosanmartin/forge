@@ -95,7 +95,13 @@ allows it.
   documented escape hatch for explicitly authorized out-of-workspace locations.
   Escaping paths (e.g. `../`) auto-deny unless an absolute pattern allows them.
 - A non-configurable git safety floor blocks destructive subcommands before any
-  allowlist is consulted.
+  allowlist is consulted — also when git is invoked through `shell_exec`.
+- `shell.allow` entries match a program by base name (`"go"`), optionally
+  followed by an argument pattern (`"go test *"`, `"npm run lint"`; `*` = any
+  text). A path-qualified program inside the workspace (`./src/go`) runs only
+  if an entry names that exact path (`"./scripts/check.sh"`), so an allowed
+  name can't be shadowed by a file the agent wrote. `workdir` for shell/git
+  must stay inside the workspace.
 - `network.allowed_hosts` gates every provider endpoint by host (or exact
   host:port); an empty list denies all egress.
 - `limits.plugin_wasm_max_bytes` caps the plugin `.wasm` entrypoint at install

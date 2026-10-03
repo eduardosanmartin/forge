@@ -149,7 +149,9 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 	cmd.WaitDelay = 3 * time.Second
 
 	// Capture combined output
+	started := time.Now()
 	output, err := cmd.CombinedOutput()
+	elapsedMs := time.Since(started).Milliseconds()
 
 	// Check for timeout - context may be cancelled even if err is ExitError (Windows)
 	timedOut := errors.Is(err, context.DeadlineExceeded) || execCtx.Err() == context.DeadlineExceeded
@@ -182,7 +184,7 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 
 	metadata := map[string]any{
 		"exit_code":   exitCode,
-		"duration_ms": int64(0),
+		"duration_ms": elapsedMs,
 		"truncated":   truncated,
 	}
 	if isolated {
