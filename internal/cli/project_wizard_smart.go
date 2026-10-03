@@ -378,6 +378,9 @@ func writeSmartArtifacts(out io.Writer, dir string, art *bootstrap.Artifacts) er
 	if err := os.MkdirAll(forgeDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", forgeDir, err)
 	}
+	if err := writeForgeGitignore(forgeDir); err != nil {
+		return err
+	}
 
 	cfgData, err := json.MarshalIndent(art.Config, "", "  ")
 	if err != nil {

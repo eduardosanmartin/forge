@@ -181,3 +181,26 @@ func TestRunInit_RejectsPathSeparatorsInName(t *testing.T) {
 		}
 	}
 }
+
+func TestRunInit_WritesForgeGitignoreKeepingConfigCommittable(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var out bytes.Buffer
+	if err := runInit(&out, "Gitignore Project", false); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("Gitignore Project", ".forge", ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .forge/.gitignore: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{"runs/", "*.db", "*.key", "tui-state.json"} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf(".forge/.gitignore missing %q", want)
+		}
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.TrimSpace(line) == "config.json" {
+			t.Error("config.json must stay committable, but .forge/.gitignore ignores it")
+		}
+	}
+}

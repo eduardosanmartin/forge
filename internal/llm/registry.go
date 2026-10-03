@@ -253,11 +253,11 @@ func (r *Registry) createProvider(name string, p config.Provider) (Provider, err
 	)
 	switch p.Kind {
 	case "openai-compatible":
-		provider, err = NewOpenAICompatibleProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewOpenAICompatibleProvider(p.BaseURL, p.ResolvedAPIKey(), r.allowedHosts, r.logger)
 	case "anthropic":
-		provider, err = NewAnthropicProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewAnthropicProvider(p.BaseURL, p.ResolvedAPIKey(), r.allowedHosts, r.logger)
 	case "gemini":
-		provider, err = NewGeminiProvider(p.BaseURL, p.APIKey, r.allowedHosts, r.logger)
+		provider, err = NewGeminiProvider(p.BaseURL, p.ResolvedAPIKey(), r.allowedHosts, r.logger)
 	default:
 		return nil, fmt.Errorf("unknown provider kind %q", p.Kind)
 	}

@@ -170,10 +170,8 @@ func TestRunWizard_ExistingDir_ConfirmOverwrite(t *testing.T) {
 }
 
 // TestRunWizard_RemoteProvider checks the branch that asks extra questions
-// (base_url) and writes api_key as an explicit placeholder rather than
-// leaving it blank (blank silently falls back to an env var per config's
-// own doc comment — a human filling this template in needs to see it needs
-// filling).
+// (base_url) and points api_key_env at an environment variable instead of
+// writing a key (or a placeholder) into a config meant to be committed.
 func TestRunWizard_RemoteProvider(t *testing.T) {
 	t.Chdir(t.TempDir())
 
@@ -210,8 +208,11 @@ func TestRunWizard_RemoteProvider(t *testing.T) {
 	if remote.BaseURL != "https://api.example.com/v1" {
 		t.Errorf("base_url = %q, want the answered URL", remote.BaseURL)
 	}
-	if remote.APIKey == "" {
-		t.Error("api_key should be an explicit placeholder for a remote provider, not blank")
+	if remote.APIKey != "" {
+		t.Errorf("api_key = %q, want empty: the secret must not be written into a committable config", remote.APIKey)
+	}
+	if remote.APIKeyEnv == "" {
+		t.Error("api_key_env should name the env var holding the key for a remote provider")
 	}
 
 	found := false

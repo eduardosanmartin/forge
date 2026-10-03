@@ -78,6 +78,9 @@ func runInit(out io.Writer, projectName string, force bool) error {
 	if err := os.MkdirAll(forgeDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", forgeDir, err)
 	}
+	if err := writeForgeGitignore(forgeDir); err != nil {
+		return err
+	}
 
 	slug := slugify(projectName)
 
@@ -110,7 +113,7 @@ func runInit(out io.Writer, projectName string, force bool) error {
 	fmt.Fprintf(out, "  %s\n  %s\n  %s\n\n", specPath, cfgPath, manifestPath)
 	fmt.Fprintf(out, "Próximos pasos:\n")
 	fmt.Fprintf(out, "  1. Completá SPEC.md (objetivo, RF-N/RNF-N, fuera de alcance).\n")
-	fmt.Fprintf(out, "  2. Revisá .forge/config.json — completá \"api_key\" si tu proveedor lo pide,\n")
+	fmt.Fprintf(out, "  2. Revisá .forge/config.json — usá \"api_key_env\" (nombre de una variable de entorno) si tu proveedor pide key,\n")
 	fmt.Fprintf(out, "     y ajustá \"providers\"/\"model_roles\" a lo que realmente vayas a usar.\n")
 	fmt.Fprintf(out, "  3. Completá \"goal\" en run.json, y \"tasks\" a mano o con --decompose.\n")
 	fmt.Fprintf(out, "  4. cd %s && ../forge.exe serve --addr 127.0.0.1:8765\n", dir)
@@ -258,4 +261,32 @@ cargarlas todas de antemano en spec_ref (ver manual_usuario.md §10).
 -->
 - TODO (opcional)
 `, projectName)
+}
+
+// forgeGitignore keeps forge's runtime state out of version control while
+// leaving .forge/config.json committable (RNF-7.2: project config is
+// versioned with the code). API keys belong in an env var named by
+// providers.<name>.api_key_env, never in config.json.
+const forgeGitignore = `# forge runtime state — never commit. config.json IS meant to be committed
+# (keep API keys out of it: use providers.<name>.api_key_env).
+runs/
+worktrees/
+*.db
+*.db-*
+*.key
+tui-state.json
+spec-state.json
+`
+
+// writeForgeGitignore writes .forge/.gitignore unless one already exists
+// (a user-edited one is never overwritten).
+func writeForgeGitignore(forgeDir string) error {
+	path := filepath.Join(forgeDir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(forgeGitignore), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
 }

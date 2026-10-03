@@ -222,6 +222,9 @@ func runWizard(p Prompter, out io.Writer, projectName string) error {
 	if err := os.MkdirAll(forgeDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", forgeDir, err)
 	}
+	if err := writeForgeGitignore(forgeDir); err != nil {
+		return err
+	}
 
 	slug := slugify(dir)
 
@@ -254,7 +257,7 @@ func runWizard(p Prompter, out io.Writer, projectName string) error {
 	fmt.Fprintf(out, "  %s\n  %s\n  %s\n\n", specPath, cfgPath, manifestPath)
 	fmt.Fprintf(out, "Próximos pasos:\n")
 	if ans.ProviderKind != 0 {
-		fmt.Fprintf(out, "  1. Completá \"api_key\" en .forge/config.json (no se pide acá — no la guardes en un commit).\n")
+		fmt.Fprintf(out, "  1. Exportá la variable de entorno que nombra \"api_key_env\" en .forge/config.json con tu API key (así el config se puede commitear sin el secreto).\n")
 	} else {
 		fmt.Fprintf(out, "  1. Revisá .forge/config.json — Ollama local no necesita api_key.\n")
 	}
@@ -293,7 +296,7 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 					"generation": a.ModelName,
 					"reasoning":  a.ModelName,
 				},
-				APIKey: "TODO: completá tu API key acá — no la commitees",
+				APIKeyEnv: "FORGE_REMOTE_API_KEY",
 			},
 		}
 	case 2: // anthropic
@@ -309,7 +312,7 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 					"generation": a.ModelName,
 					"reasoning":  a.ModelName,
 				},
-				APIKey: "TODO: completá tu API key acá — no la commitees",
+				APIKeyEnv: "ANTHROPIC_API_KEY",
 			},
 		}
 	case 3: // gemini
@@ -325,7 +328,7 @@ func wizardConfig(slug string, a wizardAnswers) *config.Config {
 					"generation": a.ModelName,
 					"reasoning":  a.ModelName,
 				},
-				APIKey: "TODO: completá tu API key acá — no la commitees",
+				APIKeyEnv: "GEMINI_API_KEY",
 			},
 		}
 	default: // ollama local — same shape initConfig already writes, just the chosen model

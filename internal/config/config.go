@@ -53,6 +53,11 @@ type Provider struct {
 	// APIKey authenticates against remote endpoints. Empty falls back to the
 	// OPENCODE_API_KEY env var so secrets stay out of config files.
 	APIKey string `json:"api_key"`
+	// APIKeyEnv names an environment variable holding the API key, used
+	// when APIKey is empty. Lets .forge/config.json be committed with the
+	// project (RNF-7.2) without committing the secret itself: e.g.
+	// "api_key_env": "OPENROUTER_API_KEY".
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 	// PricePerMillionInputTokens/OutputTokens estimate cost for paid
 	// providers (RNF-6.3: "métricas de costo... cuando aplique (modelos de
 	// pago)"). Both zero (the default, including for every local/free
@@ -68,6 +73,19 @@ type Provider struct {
 	// one. Set this low (e.g. 120-180) for a local model known to be fast,
 	// or raise it for a large remote model under real load.
 	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
+}
+
+// ResolvedAPIKey returns the provider's API key: APIKey when set,
+// otherwise the value of the APIKeyEnv environment variable ("" if
+// neither is available).
+func (p Provider) ResolvedAPIKey() string {
+	if p.APIKey != "" {
+		return p.APIKey
+	}
+	if p.APIKeyEnv != "" {
+		return os.Getenv(p.APIKeyEnv)
+	}
+	return ""
 }
 
 // DefaultRequestTimeoutSeconds is the fallback per-request HTTP timeout when

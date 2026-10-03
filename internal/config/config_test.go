@@ -1077,3 +1077,22 @@ func TestCustomPermissionsChainToEngine(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderResolvedAPIKey(t *testing.T) {
+	t.Setenv("FORGE_TEST_PROVIDER_KEY", "from-env")
+	cases := []struct {
+		p    Provider
+		want string
+	}{
+		{Provider{APIKey: "inline"}, "inline"},
+		{Provider{APIKey: "inline", APIKeyEnv: "FORGE_TEST_PROVIDER_KEY"}, "inline"},
+		{Provider{APIKeyEnv: "FORGE_TEST_PROVIDER_KEY"}, "from-env"},
+		{Provider{APIKeyEnv: "FORGE_TEST_UNSET_VAR_XYZ"}, ""},
+		{Provider{}, ""},
+	}
+	for _, tc := range cases {
+		if got := tc.p.ResolvedAPIKey(); got != tc.want {
+			t.Errorf("%+v.ResolvedAPIKey() = %q, want %q", tc.p, got, tc.want)
+		}
+	}
+}
