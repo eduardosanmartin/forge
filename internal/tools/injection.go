@@ -24,10 +24,15 @@ var injectionPatterns = []injectionPattern{
 	{"tries to redefine the assistant's role", regexp.MustCompile(`(?i)\b(you\s+are\s+now\s+(a|an|the)\b|from\s+now\s+on,?\s+you\s+(are|will|must|should)\b|a\s+partir\s+de\s+ahora,?\s+(eres|serás|debes))`)},
 	{"announces new instructions", regexp.MustCompile(`(?i)\b(new|updated|revised)\s+(system\s+)?instructions\s*:|\bnuevas\s+instrucciones\s*:|\bsystem\s+prompt\s*:`)},
 	{"contains chat-template role markers", regexp.MustCompile(`<\|im_start\|>|<\|im_end\|>|<\|system\|>|<\|assistant\|>|\[/?INST\]|<<SYS>>|<\|start_header_id\|>`)},
-	{"impersonates a system/assistant turn", regexp.MustCompile(`(?im)^\s*(###\s*)?(system|assistant)\s*:\s*\S`)},
+	// The turn must read as prose (three or more words, no code/markup
+	// punctuation): a bare "system: value" is a YAML key, CSS property or Go
+	// struct field (N3: the measured false positives in third-party code).
+	{"impersonates a system/assistant turn", regexp.MustCompile(`(?im)^\s*(###\s*)?(system|assistant)\s*:[ \t]*[A-Za-z][^\n{};=]*?\b[A-Za-z']+[ \t,]+[A-Za-z']+\b[^\n{};=]*$`)},
 	{"tries to close the tool-result fence", regexp.MustCompile(`</?TOOL_RESULT:|</CONTENT>`)},
 	{"asks to hide actions from the user", regexp.MustCompile(`(?i)\b(do\s+not|don't|never)\s+(tell|inform|mention\s+(this\s+)?to|show)\s+the\s+user|\bwithout\s+(telling|informing)\s+the\s+user|\bsin\s+(decirle|avisarle|informarle)\s+al\s+usuario`)},
-	{"asks to send credentials or secrets", regexp.MustCompile(`(?i)\b(send|post|upload|exfiltrate|leak|email)\b[^.\n]{0,40}\b(api[\s_-]?keys?|credentials?|passwords?|secrets?|tokens?|ssh\s+keys?|\.env)\b`)},
+	// "post" is matched only in prose casing: the uppercase HTTP verb
+	// ("POST /login returns 401 without token") is documentation (N3).
+	{"asks to send credentials or secrets", regexp.MustCompile(`\b((?i:send|upload|exfiltrate|leak|email)|[Pp]ost)\b(?i:[^.\n]{0,40}\b(api[\s_-]?keys?|credentials?|passwords?|secrets?|tokens?|ssh\s+keys?|\.env))\b`)},
 }
 
 // DetectInjection reports the reasons content looks like it carries
