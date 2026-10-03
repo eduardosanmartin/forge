@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "profile": "A",
+  "model": "qwen3-4b-ctx16k:latest",
+  "backend": "ollama",
+  "started_at": "2026-10-03T05:39:01.8885656Z",
+  "hardware": {
+    "os": "windows",
+    "arch": "amd64",
+    "num_cpu": 8,
+    "cpu_model": "AMD64 Family 23 Model 24 Stepping 1, AuthenticAMD"
+  },
+  "num_ctx": 16384,
+  "prefill": [
+    {
+      "target_tokens": 256,
+      "prompt_tokens": 320,
+      "prefill_ms": 15721.265,
+      "prefill_tok_per_s": 20.354596147320205,
+      "ttft_ms": 15744.576,
+      "context_fraction": 0.01953125
+    },
+    {
+      "target_tokens": 512,
+      "prompt_tokens": 598,
+      "prefill_ms": 32537.73,
+      "prefill_tok_per_s": 18.37866378508888,
+      "ttft_ms": 32587.365,
+      "context_fraction": 0.0364990234375
+    },
+    {
+      "target_tokens": 1024,
+      "prompt_tokens": 1146,
+      "prefill_ms": 66163.72,
+      "prefill_tok_per_s": 17.320670603164395,
+      "ttft_ms": 66238.451,
+      "context_fraction": 0.0699462890625
+    },
+    {
+      "target_tokens": 2048,
+      "prompt_tokens": 2251,
+      "prefill_ms": 164176.421,
+      "prefill_tok_per_s": 13.710860465157783,
+      "ttft_ms": 164316.182,
+      "context_fraction": 0.13739013671875
+    }
+  ],
+  "kv_cache": {
+    "target_tokens": 2048,
+    "prompt_tokens": 2251,
+    "cold_prefill_ms": 164663.74,
+    "warm_prefill_ms": 375.261,
+    "warm_evaluated_tokens": 2251,
+    "cold_ttft_ms": 164869.164,
+    "warm_ttft_ms": 419.253,
+    "ttft_speedup": 393.2450429692811,
+    "prefix_reuse_percent": 99.77
+  },
+  "tasks": [
+    {
+      "name": "codegen",
+      "wall_ms": 20819.451,
+      "ttft_ms": 2221.447,
+      "prompt_tokens": 35,
+      "completion_tokens": 128,
+      "gen_tok_per_s": 6.882557807974164
+    },
+    {
+      "name": "explain",
+      "wall_ms": 20030.399,
+      "ttft_ms": 1682.982,
+      "prompt_tokens": 26,
+      "completion_tokens": 128,
+      "gen_tok_per_s": 6.976542520364282
+    },
+    {
+      "name": "refactor",
+      "wall_ms": 20527.918,
+      "ttft_ms": 2645.745,
+      "prompt_tokens": 42,
+      "completion_tokens": 128,
+      "gen_tok_per_s": 7.162286844328311
+    }
+  ],
+  "summary": {
+    "gen_tok_per_s": 7.007129057555585,
+    "median_ttft_ms": 2221.447,
+    "prefill_tok_per_s": 17.441197750182816,
+    "tasks_wall_ms": 61377.76800000001,
+    "prefill_4k_ms": 0,
+    "prefill_8k_ms": 0,
+    "kv_cache_ttft_speedup": 393.2450429692811
+  },
+  "total_wall_ms": 517303,
+  "model_load_ms": 5881,
+  "backend_version": "0.34.4"
+}

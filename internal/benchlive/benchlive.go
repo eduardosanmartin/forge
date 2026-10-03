@@ -239,8 +239,13 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if kv.WarmTTFTMs > 0 {
 			kv.TTFTSpeedup = kv.ColdTTFTMs / kv.WarmTTFTMs
 		}
-		if kv.PromptTokens > 0 {
+		// Some Ollama versions count cached tokens in prompt_eval_count;
+		// fall back to the prefill time saved when the count doesn't drop.
+		switch {
+		case kv.PromptTokens > 0 && kv.WarmEvaluatedToks < kv.PromptTokens:
 			kv.PrefixReusePercent = 100 * float64(kv.PromptTokens-kv.WarmEvaluatedToks) / float64(kv.PromptTokens)
+		case kv.ColdPrefillMs > 0 && kv.WarmPrefillMs < kv.ColdPrefillMs:
+			kv.PrefixReusePercent = 100 * (1 - kv.WarmPrefillMs/kv.ColdPrefillMs)
 		}
 		res.KVCache = kv
 		progress(fmt.Sprintf("kv-cache (~%d tok): TTFT cold %.0f ms -> warm %.0f ms (%.1fx, %.0f%% prefix reused)", kvSize, kv.ColdTTFTMs, kv.WarmTTFTMs, kv.TTFTSpeedup, kv.PrefixReusePercent))
