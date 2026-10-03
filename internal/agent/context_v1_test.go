@@ -364,14 +364,18 @@ func TestContextAssembler_Build_CompactionV1_AboveThresholdCompactsView(t *testi
 		t.Errorf("oldest turns should be covered by the summary: %s", summaryMsg.Content)
 	}
 
-	// ...plus the most recent turns verbatim (sliding window of 20
-	// messages; the last of those 20 IS the current user message — Build no
-	// longer duplicates it with a second append).
-	if got := countNonSystemMessages(messages); got != 20 {
-		t.Errorf("non-system message count = %d, want 20 (verbatim window, current user message included once)", got)
+	// ...plus the most recent turns verbatim: a 20-message budget, aligned
+	// to a whole-turn boundary (it must open on a user message), so 19 here
+	// — the last of them IS the current user message (Build no longer
+	// duplicates it with a second append).
+	if got := countNonSystemMessages(messages); got != 19 {
+		t.Errorf("non-system message count = %d, want 19 (turn-aligned verbatim window, current user message included once)", got)
+	}
+	tail := messages[len(messages)-19:]
+	if tail[0].Role != "user" {
+		t.Errorf("verbatim window opens with role %q, want a user message (turn boundary)", tail[0].Role)
 	}
 	// The newest filler stays verbatim inside the window.
-	tail := messages[len(messages)-20:]
 	found := false
 	for _, m := range tail {
 		if contains(m.Content, "filler turn 43 deterministic content") {

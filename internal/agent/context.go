@@ -96,8 +96,21 @@ func NewContextAssembler(toolsReg ToolsRegistryInterface, store StoreInterface, 
 }
 
 // Build constructs the message list for a single turn.
-// Returns []llm.Message ready for ChatRequest.
+// Returns []llm.Message ready for ChatRequest. Equivalent to
+// BuildWithQuery(ctx, sessionID, userMessage, userMessage).
 func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMessage string) ([]llm.Message, error) {
+	return c.BuildWithQuery(ctx, sessionID, userMessage, userMessage)
+}
+
+// BuildWithQuery is Build with the retrieval/skills query separated from
+// the message to append. The agent loop passes the turn's ORIGINAL user
+// message as query on every iteration of the turn, and userMessage = ""
+// on tool-result continuations: previously the query was tied to
+// userMessage, so retrieval and skill instructions silently vanished from
+// the second iteration on — the model lost its skills mid-task, and the
+// prefix changed between iterations of the same turn (defeating KV-cache
+// reuse).
+func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string, userMessage, query string) ([]llm.Message, error) {
 	var messages []llm.Message
 
 	// 1. System prompt (fixed per session)
@@ -184,8 +197,8 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		// daemon process (acceptable for v1): the SessionManager re-indexes
 		// the session transcript after each turn. Empty index, no hits, or
 		// an empty user message → no injection.
-		if enableRetrieval && c.v1Deps.Retriever != nil && userMessage != "" {
-			if chunks, searchErr := c.v1Deps.Retriever.Search(userMessage, retrievalTopK); searchErr == nil && len(chunks) > 0 {
+		if enableRetrieval && c.v1Deps.Retriever != nil && query != "" {
+			if chunks, searchErr := c.v1Deps.Retriever.Search(query, retrievalTopK); searchErr == nil && len(chunks) > 0 {
 				var sb strings.Builder
 				sb.WriteString("RELEVANT CONTEXT (v1):\n")
 				for _, ch := range chunks {
@@ -209,10 +222,10 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 		// content. See config.SkillsConfig's doc comment for why false is
 		// the honest default today (RF-4.2's embedding is a hash
 		// placeholder until Fase 4 of hojaDeRuta-embeddings-skills.md).
-		if enableSkills && c.v1Deps.Skills != nil && userMessage != "" {
+		if enableSkills && c.v1Deps.Skills != nil && query != "" {
 			var skills []skill.Skill
 			if c.v1Deps.SkillsLazyLoad {
-				skills, _ = c.v1Deps.Skills.Relevant(userMessage)
+				skills, _ = c.v1Deps.Skills.Relevant(query)
 			} else {
 				skills = c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled)
 			}
@@ -240,21 +253,13 @@ func (c *ContextAssembler) Build(ctx context.Context, sessionID string, userMess
 	}
 
 	if !compacted {
-		// Recent history (sliding window of last N messages, configurable)
-		// GetMessages returns newest first, we need oldest first for context
-		recentMessages, err := c.store.GetMessages(ctx, sessionID, c.maxHistoryTurns*2, 0)
+		recent, err := c.recentTranscript(ctx, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("get recent messages: %w", err)
 		}
-
-		// Reverse to get chronological order (oldest first), then drop any
-		// leading orphaned tool-result message the fixed-size window cut
-		// mid-turn (see dropOrphanedToolPrefix).
-		windowed := make([]llm.Message, 0, len(recentMessages))
-		for i := len(recentMessages) - 1; i >= 0; i-- {
-			windowed = append(windowed, toLLMMessage(recentMessages[i]))
+		for _, msg := range selectHistoryWindow(recent, c.maxHistoryTurns*2) {
+			messages = append(messages, toLLMMessage(msg))
 		}
-		messages = append(messages, dropOrphanedToolPrefix(windowed)...)
 	}
 
 	// 5. Current user message. Callers (the agent loop) persist the user
@@ -336,16 +341,128 @@ func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID
 		Content: "COMPACTED HISTORY (v1):\n" + strings.Join(summaries, "\n"),
 	})
 
-	window := c.maxHistoryTurns * 2
-	if window > len(transcript) {
-		window = len(transcript)
+	for _, msg := range selectHistoryWindow(transcript, c.maxHistoryTurns*2) {
+		*messages = append(*messages, toLLMMessage(msg))
 	}
-	tail := make([]llm.Message, 0, window)
-	for _, msg := range transcript[len(transcript)-window:] {
-		tail = append(tail, toLLMMessage(msg))
-	}
-	*messages = append(*messages, dropOrphanedToolPrefix(tail)...)
 	return true
+}
+
+// historyPageSize is how many messages recentTranscript fetches per store
+// round trip, and historyScanLimit caps how far back it looks for the
+// current turn's opening user message (a turn longer than this is
+// pathological: max_iterations bounds it far below).
+const (
+	historyPageSize  = 64
+	historyScanLimit = 4096
+)
+
+// recentTranscript returns, oldest first, the tail of the session's
+// transcript that selectHistoryWindow needs: enough to contain the current
+// turn's opening user message plus the older-history budget. Usually one
+// store call; more only for turns with very many tool iterations.
+func (c *ContextAssembler) recentTranscript(ctx context.Context, sessionID string) ([]store.Message, error) {
+	older := c.maxHistoryTurns * 2
+	var newestFirst []store.Message
+	for offset := 0; offset < historyScanLimit; offset += historyPageSize {
+		page, err := c.store.GetMessages(ctx, sessionID, historyPageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		newestFirst = append(newestFirst, page...)
+		if userIdx := firstUserIndex(newestFirst); userIdx >= 0 && len(newestFirst) >= userIdx+1+older {
+			break
+		}
+		if len(page) < historyPageSize {
+			break // transcript exhausted
+		}
+	}
+	out := make([]store.Message, len(newestFirst))
+	for i, m := range newestFirst {
+		out[len(newestFirst)-1-i] = m
+	}
+	return out, nil
+}
+
+func firstUserIndex(newestFirst []store.Message) int {
+	for i, m := range newestFirst {
+		if m.Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
+// selectHistoryWindow picks the history the model sees from a
+// chronological (oldest-first) transcript tail:
+//
+//   - The CURRENT turn — from the latest user message to the end — is
+//     always included whole. A fixed message-count window used to cut it:
+//     after ~8 tool iterations the user's own request fell out of the
+//     request and the model kept working without knowing the task.
+//   - Earlier history fills what is left of olderBudget (the total
+//     message budget) after the current turn, trimmed to
+//     start on a user message (a whole-turn boundary). That also guarantees
+//     the window never opens with an orphaned tool result or an assistant
+//     tool call whose results were cut. An orphaned tool result (its
+//     ToolCallID matching no tool_calls entry in the request) gets the
+//     whole request rejected by strict providers — observed against
+//     OpenCode Zen: HTTP 400 "tool result's tool id ... not found".
+//
+// With no user message at all (legacy or synthetic transcripts), it falls
+// back to the last budget messages minus any orphaned tool prefix.
+func selectHistoryWindow(transcript []store.Message, budget int) []store.Message {
+	olderBudget := budget
+	lastUser := -1
+	for i := len(transcript) - 1; i >= 0; i-- {
+		if transcript[i].Role == "user" {
+			lastUser = i
+			break
+		}
+	}
+	if lastUser < 0 {
+		start := len(transcript) - olderBudget
+		if start < 0 {
+			start = 0
+		}
+		tail := transcript[start:]
+		i := 0
+		for i < len(tail) && tail[i].Role == "tool" {
+			i++
+		}
+		return tail[i:]
+	}
+
+	// The budget covers the whole window: the current turn spends it first
+	// (it is never cut), earlier turns get what is left.
+	olderBudget -= len(transcript) - lastUser
+	if olderBudget < 0 {
+		olderBudget = 0
+	}
+	olderStart := lastUser - olderBudget
+	if olderStart < 0 {
+		olderStart = 0
+	}
+	older := transcript[olderStart:lastUser]
+	// Align the older part to a turn boundary.
+	cut := len(older)
+	for i, m := range older {
+		if m.Role == "user" {
+			cut = i
+			break
+		}
+	}
+	if olderStart == 0 && len(older) > 0 && older[0].Role != "user" {
+		// The transcript itself starts mid-turn (no earlier user message
+		// exists to align to): keep it, minus an orphaned tool prefix.
+		cut = 0
+		for cut < len(older) && older[cut].Role == "tool" {
+			cut++
+		}
+	}
+	window := make([]store.Message, 0, len(older)-cut+len(transcript)-lastUser)
+	window = append(window, older[cut:]...)
+	window = append(window, transcript[lastUser:]...)
+	return window
 }
 
 // toLLMMessage converts a persisted store.Message into the llm.Message shape
@@ -358,26 +475,6 @@ func toLLMMessage(msg store.Message) llm.Message {
 		ToolCallID: msg.ToolCallID,
 		Name:       msg.Name,
 	}
-}
-
-// dropOrphanedToolPrefix removes leading "tool" role messages from a
-// chronologically-ordered (oldest-first) history window. A fixed-size
-// sliding window can cut a turn's assistant message (the one carrying
-// ToolCalls) while keeping a later "tool" message that answers one of those
-// calls, leaving that tool result's ToolCallID with no matching ToolCalls
-// entry anywhere in the request. Providers that validate this pairing
-// strictly (observed against OpenCode Zen's "Console Go": HTTP 400 "tool
-// result's tool id ... not found") reject the whole request; providers that
-// don't validate it accept a malformed conversation silently instead.
-// Dropping the orphan is correct either way — without its originating
-// tool_calls entry in the same request, the model has no way to make sense
-// of a bare tool result.
-func dropOrphanedToolPrefix(msgs []llm.Message) []llm.Message {
-	i := 0
-	for i < len(msgs) && msgs[i].Role == "tool" {
-		i++
-	}
-	return msgs[i:]
 }
 
 // ToolDefs returns the tool definitions in fixed order for ChatRequest.

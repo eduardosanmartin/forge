@@ -294,6 +294,11 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	}
 	result.Messages = append(result.Messages, *userMsg)
 
+	// turnQuery is the turn's original request. It stays the retrieval/
+	// skills query on every iteration (userMessage itself becomes "" on
+	// tool-result continuations — see BuildWithQuery).
+	turnQuery := userMessage
+
 	iterationCount := 0
 	var totalLLMTimeMs int64
 	var firstTTFTMs int64
@@ -316,7 +321,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		}
 
 		// Build context via ContextAssembler
-		llmMessages, err := a.ctxAssembler.Build(ctx, sessionID, userMessage)
+		llmMessages, err := a.ctxAssembler.BuildWithQuery(ctx, sessionID, userMessage, turnQuery)
 		if err != nil {
 			result.Error = fmt.Errorf("build context: %w", err)
 			result.Halted = true
