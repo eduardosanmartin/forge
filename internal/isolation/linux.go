@@ -311,7 +311,6 @@ func applySeccomp() error {
 // bpfFilter builds the exact filter applySeccomp installs. Kept separate so
 // tests can assemble it without installing anything.
 func bpfFilter() seccomp.Filter {
-	denyEPERM := seccompErrno(unix.EPERM)
 	groups := allowedSyscallGroups(seccomp.ActionAllow)
 	groups = append(groups, seccomp.SyscallGroup{
 		Names:  []string{"clone3"},
@@ -320,7 +319,10 @@ func bpfFilter() seccomp.Filter {
 	return seccomp.Filter{
 		NoNewPrivs: true, // idempotent: already set for Landlock
 		Policy: seccomp.Policy{
-			DefaultAction: denyEPERM,
+			// Plain ActionErrno: Policy.Validate only accepts bare actions
+			// (an embedded errno fails with "invalid default_action value
+			// 327681"), and the assembler itself emits it as ERRNO|EPERM.
+			DefaultAction: seccomp.ActionErrno,
 			Syscalls:      groups,
 		},
 	}
