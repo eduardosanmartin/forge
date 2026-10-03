@@ -53,7 +53,11 @@ func (m *SessionManager) TaskDiff(ctx context.Context, runID, taskID, stateDir s
 	if !ok || sha == "" {
 		return RunTaskDiffResult{}, fmt.Errorf("task %q of run %q has no commit (only isolated runs with commit_per_task record one, and tasks that changed nothing have none)", taskID, runID)
 	}
-	git := m.gitRunner()
+	sessionID := ""
+	if res, ok := m.GetRun(runID); ok {
+		sessionID = res.SessionID
+	}
+	git := m.gitRunner(sessionID)
 	if git == nil {
 		return RunTaskDiffResult{}, fmt.Errorf("no git runner available")
 	}

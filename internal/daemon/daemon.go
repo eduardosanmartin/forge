@@ -97,6 +97,9 @@ func New(
 	handler.permissions = broker
 	if toolsReg != nil {
 		toolsReg.SetAsker(broker.Ask)
+		// N1: while an isolated run holds the workspace, only its sessions
+		// may change files.
+		toolsReg.SetMutationGuard(mgr.mutationGuard())
 	}
 
 	d := &Daemon{

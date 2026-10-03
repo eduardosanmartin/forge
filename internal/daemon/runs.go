@@ -21,7 +21,78 @@ var (
 	ErrRunNotFound            = errors.New("run not found")
 	ErrRunAlreadyActive       = errors.New("run already active")
 	ErrRunNoCheckpointPending = errors.New("run is not currently awaiting a checkpoint decision")
+	// ErrWorkspaceBusy: another isolated run holds the workspace's checkout.
+	ErrWorkspaceBusy = errors.New("workspace is held by another isolated run")
 )
+
+// workspaceHold records the isolated run whose branch the workspace's
+// single checkout is on (N1, review 2026-10-03). Held from the run's start
+// until it ends (done, failed, killed, canceled) — also while it is paused,
+// because the checkout stays on the run's branch and any write there would
+// be absorbed by the run's next task commit.
+type workspaceHold struct {
+	runID     string
+	sessionID string
+	branch    string
+}
+
+// holdWorkspace takes the workspace for runID (re-entrant for the same run,
+// e.g. a resume). release frees it.
+func (m *SessionManager) holdWorkspace(runID, sessionID, branch string) (release func(), err error) {
+	m.wsMu.Lock()
+	defer m.wsMu.Unlock()
+	if h := m.wsHold; h != nil && h.runID != runID {
+		return nil, fmt.Errorf("%w: run %q is on branch %q — wait for it, or cancel it (run.cancel)", ErrWorkspaceBusy, h.runID, h.branch)
+	}
+	m.wsHold = &workspaceHold{runID: runID, sessionID: sessionID, branch: branch}
+	return func() { m.releaseWorkspace(runID) }, nil
+}
+
+func (m *SessionManager) releaseWorkspace(runID string) {
+	m.wsMu.Lock()
+	defer m.wsMu.Unlock()
+	if m.wsHold != nil && m.wsHold.runID == runID {
+		m.wsHold = nil
+	}
+}
+
+// mutationGuard is installed on the tools registry: while an isolated run
+// holds the workspace, only that run's session (and sessions branched from
+// it, such as its subagents) may change files.
+func (m *SessionManager) mutationGuard() func(ctx context.Context, tool string) error {
+	return func(ctx context.Context, tool string) error {
+		m.wsMu.Lock()
+		h := m.wsHold
+		m.wsMu.Unlock()
+		if h == nil {
+			return nil
+		}
+		sid := tools.SessionIDFromContext(ctx)
+		if sid != "" && sid == h.sessionID {
+			return nil
+		}
+		if sid != "" && m.store != nil {
+			if sess, err := m.store.GetSession(ctx, sid); err == nil {
+				if root, _ := sess.Metadata["branch_root"].(string); root == h.sessionID {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("the workspace is held by isolated run %q on branch %q: a change from another session would end up in that run's next task commit — wait for the run, cancel it, or work in another checkout", h.runID, h.branch)
+	}
+}
+
+// isolatedBranch returns the work branch of an isolated (git.isolation
+// branch) non-dry run, or "" when the run doesn't take the workspace.
+func isolatedBranch(mani *run.Manifest) string {
+	if mani.Mode == run.ModeDryRun || mani.Git.Isolation != "branch" {
+		return ""
+	}
+	if mani.Git.WorkBranch != "" {
+		return mani.Git.WorkBranch
+	}
+	return "forge/run/" + mani.RunID
+}
 
 // RunExecution lifecycle states (RF-11 daemon migration, Fase 1+2 of
 // hojaDeRuta-multiagente.md). This is the daemon's OWN bookkeeping enum —
@@ -164,6 +235,12 @@ func (m *SessionManager) StartRun(ctx context.Context, mani *run.Manifest, state
 		sessID = sess.ID
 	}
 
+	if branch := isolatedBranch(mani); branch != "" {
+		if _, err := m.holdWorkspace(mani.RunID, sessID, branch); err != nil {
+			return nil, err
+		}
+	}
+
 	runner := m.newDaemonManifestRunner(mani, stateDir, sessID)
 	if decompose {
 		runner.Decompose = true
@@ -194,6 +271,12 @@ func (m *SessionManager) ResumeRun(ctx context.Context, mani *run.Manifest, stat
 		return nil, fmt.Errorf("run %q has no session recorded in its persisted state, cannot continue its conversation", mani.RunID)
 	}
 
+	if branch := isolatedBranch(mani); branch != "" {
+		if _, err := m.holdWorkspace(mani.RunID, prev.SessionID, branch); err != nil {
+			return nil, err
+		}
+	}
+
 	runner := m.newDaemonManifestRunner(mani, stateDir, prev.SessionID)
 	_ = ctx // reserved: session existence isn't re-checked here, same as CLI's --resume today
 	return m.launchRun(mani.RunID, prev.SessionID, func(rctx context.Context) (*run.Report, error) {
@@ -212,8 +295,8 @@ func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, s
 		Config:     m.cfg,
 		StateDir:   stateDir,
 		SessionID:  sessionID,
-		RunCommand: m.doneCriteriaCommandRunner(),
-		RunGit:     m.gitRunner(),
+		RunCommand: m.doneCriteriaCommandRunner(sessionID),
+		RunGit:     m.gitRunner(sessionID),
 	}
 	if mani.Mode != run.ModeDryRun {
 		r.Verify = m.manifestVerifier(sessionID)
@@ -347,6 +430,13 @@ func (m *SessionManager) launchRun(runID, sessionID string, call func(context.Co
 // always closed here, so a caller waiting on it is guaranteed the
 // goroutine has actually stopped, not just been asked to.
 func (m *SessionManager) finishRun(exec *RunExecution, report *run.Report, err error, ctxErr error) {
+	// The workspace stays held while the run is merely paused (its branch
+	// is still checked out); every other outcome frees it.
+	defer func() {
+		if st := exec.snapshot().Status; st != RunPausedCheckpoint {
+			m.releaseWorkspace(exec.ID)
+		}
+	}()
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
 	if exec.status == RunRunning || exec.status == RunPausedCheckpoint {
@@ -679,6 +769,15 @@ func (m *SessionManager) RecoverRuns(stateDir string) (int, error) {
 		close(exec.done) // no goroutine owns it
 		m.runs[st.RunID] = exec
 		recovered++
+		if st.WorkBranch != "" && st.MergeCommit == "" {
+			// The checkout is still on this run's branch: keep other
+			// sessions from writing into it until it is resumed or canceled.
+			if m.wsHold == nil {
+				m.wsMu.Lock()
+				m.wsHold = &workspaceHold{runID: st.RunID, sessionID: st.SessionID, branch: st.WorkBranch}
+				m.wsMu.Unlock()
+			}
+		}
 	}
 	return recovered, nil
 }
@@ -750,6 +849,14 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 	if recovered && exec.stateDir != "" {
 		_ = run.MarkCanceled(exec.stateDir, exec.ID, "canceled by user after a daemon restart")
 	}
+	if cancelable {
+		// A canceled run frees the workspace once its goroutine (if any —
+		// a paused or recovered run has none left) has actually stopped.
+		go func(id string, done <-chan struct{}) {
+			<-done
+			m.releaseWorkspace(id)
+		}(exec.ID, exec.done)
+	}
 	return exec.snapshot(), nil
 }
 
@@ -758,11 +865,12 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 // exact same permission policy, OS isolation, timeout and process-tree
 // kill as a shell command the agent itself proposes. Returns nil when the
 // manager has no tools registry (the runner then fails such checks closed).
-func (m *SessionManager) doneCriteriaCommandRunner() run.CommandRunner {
+func (m *SessionManager) doneCriteriaCommandRunner(sessionID string) run.CommandRunner {
 	if m.toolsReg == nil {
 		return nil
 	}
 	return func(ctx context.Context, program string, args []string) (string, int, string, error) {
+		ctx = tools.WithSessionID(ctx, sessionID) // the run's own session: passes the workspace guard
 		argv := make([]any, len(args))
 		for i, a := range args {
 			argv[i] = a
@@ -796,11 +904,12 @@ func (m *SessionManager) doneCriteriaCommandRunner() run.CommandRunner {
 // branch isolation and commit-per-task (RNF-8.1/8.4): every git operation
 // of a run passes permissions.git.allow and the non-configurable git floor,
 // exactly like a git call the agent itself proposes.
-func (m *SessionManager) gitRunner() run.GitRunner {
+func (m *SessionManager) gitRunner(sessionID string) run.GitRunner {
 	if m.toolsReg == nil {
 		return nil
 	}
 	return func(ctx context.Context, subcommand string, args []string) (string, int, string, error) {
+		ctx = tools.WithSessionID(ctx, sessionID) // the run's own session: passes the workspace guard
 		argv := make([]any, len(args))
 		for i, a := range args {
 			argv[i] = a
@@ -860,4 +969,14 @@ func (m *SessionManager) manifestVerifier(sessionID string) run.Verifier {
 		}
 		return v.Met, v.Evidence, nil
 	}
+}
+
+// mutationGuardHolder returns the run ID holding the workspace, or "".
+func (m *SessionManager) mutationGuardHolder() string {
+	m.wsMu.Lock()
+	defer m.wsMu.Unlock()
+	if m.wsHold == nil {
+		return ""
+	}
+	return m.wsHold.runID
 }

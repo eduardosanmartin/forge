@@ -28,6 +28,7 @@ type Registry struct {
 	router        *routing.ModelRouter
 	ask           askState // permission "ask" resolution (ask.go)
 	beforeMutate  func(ctx context.Context, tool string)
+	mutationGuard func(ctx context.Context, tool string) error
 }
 
 // New creates a new Registry with the given permission engine and workspace root.
@@ -178,10 +179,24 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		}, nil
 	}
 
-	// 4. Execute tool — tools that can change workspace files first give
-	// the snapshot hook (forge undo) a chance to record the prior state.
-	if r.beforeMutate != nil && mutatesWorkspace(name) {
-		r.beforeMutate(ctx, name)
+	// 4. Execute tool — tools that can change workspace files first pass the
+	// mutation guard (an isolated run may hold the workspace) and give the
+	// snapshot hook (forge undo) a chance to record the prior state.
+	r.mu.RLock()
+	guard, before := r.mutationGuard, r.beforeMutate
+	r.mu.RUnlock()
+	if mutatesWorkspace(name, args) {
+		if guard != nil {
+			if gErr := guard(ctx, name); gErr != nil {
+				return Result{
+					Content:  "DENIED: " + gErr.Error(),
+					Metadata: map[string]any{"denied": true, "rule": "workspace-held"},
+				}, nil
+			}
+		}
+		if before != nil {
+			before(ctx, name)
+		}
 	}
 	result, err := tool.Execute(ctx, permsReq)
 	if err != nil {
@@ -269,11 +284,27 @@ func (r *Registry) SetBeforeMutate(fn func(ctx context.Context, tool string)) {
 	r.mu.Unlock()
 }
 
-// mutatesWorkspace reports whether a tool can change workspace files.
-func mutatesWorkspace(tool string) bool {
+// SetMutationGuard registers a check run before any workspace-changing
+// tool call (after its permission check); a non-nil error denies the call.
+// The daemon uses it while an isolated run holds the workspace.
+func (r *Registry) SetMutationGuard(fn func(ctx context.Context, tool string) error) {
+	r.mu.Lock()
+	r.mutationGuard = fn
+	r.mu.Unlock()
+}
+
+// readOnlyGit lists git subcommands that never change the work tree,
+// index or refs.
+var readOnlyGit = map[string]bool{"status": true, "log": true, "diff": true, "show": true, "rev-parse": true, "ls-files": true, "blame": true, "describe": true}
+
+// mutatesWorkspace reports whether a call can change workspace files.
+func mutatesWorkspace(tool string, args map[string]any) bool {
 	switch tool {
-	case "fs_write", "shell_exec", "git":
+	case "fs_write", "shell_exec":
 		return true
+	case "git":
+		sub, _ := args["subcommand"].(string)
+		return !readOnlyGit[sub]
 	}
 	return false
 }

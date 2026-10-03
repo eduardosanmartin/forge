@@ -77,6 +77,9 @@ type SessionManager struct {
 	// (Fase 2's job).
 	runsMu sync.RWMutex
 	runs   map[string]*RunExecution
+	// wsMu/wsHold: the isolated run holding the workspace (runs.go).
+	wsMu   sync.Mutex
+	wsHold *workspaceHold
 }
 
 // SessionState holds runtime state for an active session.

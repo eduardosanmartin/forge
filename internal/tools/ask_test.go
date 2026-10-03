@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,5 +113,30 @@ func TestCodeSymbolsTool(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "a.go:4  func  func Open(p string) error") {
 		t.Fatalf("got %q", res.Content)
+	}
+}
+
+// N1: a mutation guard refusal denies the call before it runs (and before
+// the snapshot hook).
+func TestMutationGuardDeniesBeforeExecution(t *testing.T) {
+	dir := t.TempDir()
+	eng, _ := perms.New(perms.PermissionsPolicy{FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}}}, dir, nil)
+	r := NewDefaultRegistry(eng, dir, nil)
+	r.SetMutationGuard(func(ctx context.Context, tool string) error {
+		return errors.New("workspace held by isolated run run-X")
+	})
+	file := filepath.Join(dir, "x.txt")
+	res, err := r.Execute(context.Background(), "fs_write", map[string]any{"path": file, "content": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Content, "DENIED") || !strings.Contains(res.Content, "run-X") {
+		t.Fatalf("got %q", res.Content)
+	}
+	if _, err := os.Stat(file); err == nil {
+		t.Fatal("the write must not have happened")
+	}
+	if res, _ := r.Execute(context.Background(), "fs_read", map[string]any{"path": file}); strings.Contains(res.Content, "run-X") {
+		t.Fatal("reads are not guarded")
 	}
 }

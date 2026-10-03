@@ -34,7 +34,7 @@ func newManagerWithRealShell(t *testing.T, shellAllow []string) *SessionManager 
 // must be refused by the policy and never executed.
 func TestDoneCriteriaCommandRunner_DeniedByPolicy(t *testing.T) {
 	m := newManagerWithRealShell(t, nil) // deny-by-default: nothing allowed
-	run := m.doneCriteriaCommandRunner()
+	run := m.doneCriteriaCommandRunner("")
 	if run == nil {
 		t.Fatal("expected a command runner when a tools registry is wired")
 	}
@@ -49,7 +49,7 @@ func TestDoneCriteriaCommandRunner_DeniedByPolicy(t *testing.T) {
 
 func TestDoneCriteriaCommandRunner_AllowedReportsExitCode(t *testing.T) {
 	m := newManagerWithRealShell(t, []string{"go"})
-	run := m.doneCriteriaCommandRunner()
+	run := m.doneCriteriaCommandRunner("")
 
 	_, code, denied, err := run(context.Background(), "go", []string{"version"})
 	if err != nil || denied != "" || code != 0 {
