@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/eduardosanmartin/forge/internal/bootstrap"
 	"github.com/eduardosanmartin/forge/internal/cost"
@@ -15,6 +16,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
+	"github.com/eduardosanmartin/forge/internal/version"
 )
 
 // Handler dispatches JSON-RPC requests to the session manager.
@@ -27,6 +29,10 @@ type Handler struct {
 	// permissions answers permission.respond / permission.pending; nil
 	// when the daemon has no tools registry to ask for.
 	permissions *permissionBroker
+	// addr is the listener address reported by daemon.status (set once the
+	// transport is listening).
+	addrMu sync.RWMutex
+	addr   string
 }
 
 // NewHandler creates a new Handler. bootstrapMgr is built here (not passed
@@ -607,15 +613,36 @@ func (h *Handler) handleHaltAll(ctx context.Context, req *JSONRPCRequest) *JSONR
 	return h.resultResponse(req.ID, map[string]any{"halted_all": true})
 }
 
+// SetAddr records the address the transport listens on, for daemon.status.
+func (h *Handler) SetAddr(addr string) {
+	h.addrMu.Lock()
+	h.addr = addr
+	h.addrMu.Unlock()
+}
+
+// sessionCounter is implemented by stores that can count sessions directly.
+type sessionCounter interface {
+	CountSessions(ctx context.Context) (int, error)
+}
+
 func (h *Handler) handleStatus(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
-	sessions, _ := h.mgr.ListSessions(ctx, 1, 0)
-	result := StatusResult{
-		Running:  true,
-		Sessions: len(sessions),
-		Addr:     "", // filled by daemon
-		Version:  "0.0.0-dev",
+	// N4: this used to be len(ListSessions(limit 1)) — at most 1 — plus an
+	// empty addr and a hardcoded version.
+	count := 0
+	if c, ok := h.mgr.store.(sessionCounter); ok {
+		count, _ = c.CountSessions(ctx)
+	} else if sessions, err := h.mgr.ListSessions(ctx, 1000000, 0); err == nil {
+		count = len(sessions)
 	}
-	return h.resultResponse(req.ID, result)
+	h.addrMu.RLock()
+	addr := h.addr
+	h.addrMu.RUnlock()
+	return h.resultResponse(req.ID, StatusResult{
+		Running:  true,
+		Sessions: count,
+		Addr:     addr,
+		Version:  version.Version,
+	})
 }
 
 func (h *Handler) handleSwitchModel(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {

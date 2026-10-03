@@ -706,6 +706,13 @@ func (s *Store) Vacuum(ctx context.Context) error {
 	return err
 }
 
+// CountSessions returns how many sessions exist.
+func (s *Store) CountSessions(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&n)
+	return n, err
+}
+
 // Stats returns database statistics.
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var stats Stats

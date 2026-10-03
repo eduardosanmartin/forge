@@ -144,6 +144,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.logger.Warn("failed to write addr file", "error", err)
 	}
 
+	d.handler.SetAddr(d.transport.Addr())
 	d.logger.Info("daemon started", "addr", d.transport.Addr())
 
 	// RF-11.8: rediscover runs a previous daemon process left interrupted
