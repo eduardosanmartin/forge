@@ -33,9 +33,45 @@ func TestRedactEveryPatternClass(t *testing.T) {
 			want: "using key [REDACTED] today",
 		},
 		{
-			name: "private key pem header",
+			// No END line (output truncated mid-key): redact through the end.
+			name: "private key pem without end line",
 			in:   testPEMHead + "\nMIIEpAIBAAKCAQEA",
-			want: "[REDACTED]\nMIIEpAIBAAKCAQEA",
+			want: "[REDACTED]",
+		},
+		{
+			name: "private key pem full block keeps surrounding text",
+			in:   "before\n" + testPEMHead + "\nMIIEpAIBAAKCAQEA\nabcDEF==\n-----END RSA PRIVATE KEY-----\nafter",
+			want: "before\n[REDACTED]\nafter",
+		},
+		{
+			name: "json quoted key",
+			in:   `{"api_key": "abcd1234efgh5678"}`,
+			want: `{"api_key": "[REDACTED]"}`,
+		},
+		{
+			name: "prefixed env var key",
+			in:   "GEMINI_API_KEY=" + testLongVal,
+			want: "GEMINI_API_KEY=[REDACTED]",
+		},
+		{
+			name: "suffixed secret key",
+			in:   "SECRET_KEY=" + testLongVal,
+			want: "SECRET_KEY=[REDACTED]",
+		},
+		{
+			name: "google api key bare",
+			in:   "key AIzaSyA1234567890abcdefghijklmnopqrstuv end",
+			want: "key [REDACTED] end",
+		},
+		{
+			name: "slack token",
+			in:   "slack xoxb-1234567890-abcdefghij",
+			want: "slack [REDACTED]",
+		},
+		{
+			name: "jwt",
+			in:   "auth eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U ok",
+			want: "auth [REDACTED] ok",
 		},
 		{
 			name: "openai style key",
@@ -55,7 +91,7 @@ func TestRedactEveryPatternClass(t *testing.T) {
 		{
 			name: "generic assignment colon quoted form",
 			in:   `password: "` + testLongVal + `"`,
-			want: "password: [REDACTED]",
+			want: `password: "[REDACTED]"`,
 		},
 	}
 	for _, tc := range cases {
@@ -74,6 +110,8 @@ func TestRedactBenignTextUntouched(t *testing.T) {
 		"loaded 3 providers from config",
 		"tokens are cheap until they are not", // keyword without assignment separator
 		"token=x",                             // value shorter than 8 chars
+		"max_tokens: 1234567890",              // keyword only as part of a longer word
+		"tokenizer = sentencepiece_model",     // keyword only as part of a longer word
 		"",
 	}
 	for _, in := range cases {
@@ -87,7 +125,7 @@ func TestRedactCaseInsensitiveAssignment(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"API_KEY: " + testLongVal, "API_KEY: [REDACTED]"},
 		{"Authorization:" + testLongVal, "Authorization:[REDACTED]"},
-		{"TOKEN = \"" + testLongVal + "\"", `TOKEN = [REDACTED]`},
+		{"TOKEN = \"" + testLongVal + "\"", `TOKEN = "[REDACTED]"`},
 	}
 	for _, tc := range cases {
 		if got := logging.Redact(tc.in); got != tc.want {
