@@ -119,6 +119,34 @@ allows it.
   managers do not re-check sizes on load; oversized artifacts are rejected at
   the policy boundary before bytes are written.
 
+### MCP servers
+
+External MCP servers extend the agent's tools without writing a plugin:
+
+```json
+{
+  "mcp": { "servers": {
+    "docs":   { "command": "npx", "args": ["-y", "some-docs-mcp-server"] },
+    "github": { "command": "github-mcp-server", "args": ["stdio"],
+                "env": { "GITHUB_TOKEN": "${env:GITHUB_TOKEN}" } },
+    "remote": { "url": "https://mcp.example.com/mcp" }
+  }},
+  "permissions": { "mcp": { "allow": ["docs/*", "github/get_*"], "ask": ["github/create_pull_request"] } }
+}
+```
+
+- `forge mcp list` connects to each server and shows its tools; `forge mcp
+  approve <server>` approves its current tool list (names, descriptions and
+  schemas reach the model, so they are reviewed like an external plugin). A
+  changed tool list disables the server until approved again.
+- Only tools allowed or asked for in `permissions.mcp` ("server/tool", globs;
+  `"*"` = all) are shown to the model; calls go through the same permission
+  engine, fencing, redaction and prompt-injection flagging as native tools.
+  HTTP servers must be in `network.allowed_hosts`.
+- `forge mcp serve` exposes forge to other agents over stdio (`forge_task`,
+  `forge_run_manifest`, `forge_run_status`, `forge_sessions`); checkpoint
+  approval is deliberately not exposed.
+
 ## Security posture
 
 - **RNF-4.1** Deny-by-default permission engine for fs/shell/git; decisions are

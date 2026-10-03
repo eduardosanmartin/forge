@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -52,6 +53,9 @@ const (
 	// by default. The mutating subset (anchoring_store, anchoring_delete)
 	// is the exception: it is denied by default by the custom write floor.
 	KindCustom Kind = "custom"
+	// KindMCP gates tools of external MCP servers; Request.Command is
+	// "server/tool".
+	KindMCP Kind = "mcp"
 )
 
 // Request describes one operation seeking authorization. Only the fields
@@ -192,12 +196,20 @@ func isCustomMutatingTool(name string) bool {
 // of the "custom" kind, which the custom floor allows by default (see
 // CustomPermissions); mutating custom tools stay deny-by-default behind the
 // custom write floor.
+// MCPPermissions allows (or asks for) MCP tools by "server/tool"; entries
+// may use path.Match globs ("github/*").
+type MCPPermissions struct {
+	Allow []string `json:"allow"`
+	Ask   []string `json:"ask"`
+}
+
 type PermissionsPolicy struct {
 	FS     FSPermissions     `json:"fs"`
 	Shell  ShellPermissions  `json:"shell"`
 	Git    GitPermissions    `json:"git"`
 	GitHub GitHubPermissions `json:"github"`
 	Custom CustomPermissions `json:"custom"`
+	MCP    MCPPermissions    `json:"mcp"`
 }
 
 // patternLists holds one fs pattern list split into its relative and absolute
@@ -235,6 +247,8 @@ type Engine struct {
 	githubAllow []string
 	customDeny  []string
 	customAllow []string
+	mcpAllow    []string
+	mcpAsk      []string
 
 	workspaceRoot string // cleaned absolute path
 	logger        *slog.Logger
@@ -290,6 +304,8 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 		githubAllow:   policy.GitHub.Allow,
 		customDeny:    policy.Custom.Deny,
 		customAllow:   policy.Custom.Allow,
+		mcpAllow:      policy.MCP.Allow,
+		mcpAsk:        policy.MCP.Ask,
 		workspaceRoot: filepath.Clean(workspaceRoot),
 		logger:        logger,
 	}, nil
@@ -452,6 +468,17 @@ func (e *Engine) evaluate(req Request) Decision {
 				return Decision{Allowed: true, Rule: string(KindGitHub) + ":" + allowed}
 			}
 		}
+	case KindMCP:
+		for _, allowed := range e.mcpAllow {
+			if mcpMatch(allowed, req.Command) {
+				return Decision{Allowed: true, Rule: string(KindMCP) + ":" + allowed}
+			}
+		}
+		for _, ask := range e.mcpAsk {
+			if mcpMatch(ask, req.Command) {
+				return Decision{Ask: true, Rule: "ask:" + string(KindMCP) + ":" + ask}
+			}
+		}
 	case KindCustom:
 		// Custom floor (the allow-side mirror of the git floor's
 		// "floor decides" idea): explicit deny rules take precedence;
@@ -522,6 +549,17 @@ func shellListMatch(list []string, req Request) (string, bool) {
 	return "", false
 }
 
+// mcpMatch matches "server/tool" against an entry with path.Match globs.
+// A bare "*" means every tool of every server ("*" alone would not cross
+// the "/" under path.Match).
+func mcpMatch(pattern, name string) bool {
+	if pattern == "*" {
+		return true
+	}
+	ok, err := path.Match(pattern, name)
+	return err == nil && ok
+}
+
 func malformedRequest(req Request) bool {
 	switch req.Kind {
 	case KindFsRead, KindFsWrite:
@@ -532,7 +570,7 @@ func malformedRequest(req Request) bool {
 		return req.Subcommand == ""
 	case KindGitHub:
 		return req.Subcommand == ""
-	case KindCustom:
+	case KindCustom, KindMCP:
 		return req.Command == ""
 	default:
 		return true // empty or unknown kind
@@ -594,4 +632,11 @@ func (e *Engine) workspaceRel(abs string) (rel string, inside bool) {
 		return filepath.ToSlash(abs), false
 	}
 	return filepath.ToSlash(r), true
+}
+
+// Evaluate returns the decision for req WITHOUT writing an audit record —
+// for read-only questions such as "should this MCP tool be shown to the
+// model at all?". Every actual operation goes through Check.
+func (e *Engine) Evaluate(req Request) Decision {
+	return e.evaluate(req)
 }

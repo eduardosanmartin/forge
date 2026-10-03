@@ -202,6 +202,34 @@ type PermissionsPolicy struct {
 	Git    GitPermissions    `json:"git"`
 	GitHub GitHubPermissions `json:"github"`
 	Custom CustomPermissions `json:"custom"`
+	// MCP gates tools of external MCP servers by "server/tool" (globs
+	// allowed: "github/*", "*/list_*"). Deny-by-default: a tool matching
+	// neither list is not even exposed to the model.
+	MCP MCPPermissions `json:"mcp,omitempty"`
+}
+
+// MCPPermissions mirrors perms.MCPPermissions.
+type MCPPermissions struct {
+	Allow []string `json:"allow,omitempty"`
+	Ask   []string `json:"ask,omitempty"`
+}
+
+// MCPServer declares one external MCP server (F6): either a local process
+// spoken to over stdio (Command/Args/Env) or a remote Streamable HTTP
+// endpoint (URL, whose host must be in network.allowed_hosts).
+type MCPServer struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	// Env holds extra environment variables for the server process. A value
+	// "${env:NAME}" is read from forge's own environment, so secrets stay
+	// out of the config file.
+	Env map[string]string `json:"env,omitempty"`
+	URL string            `json:"url,omitempty"`
+}
+
+// MCPConfig is the "mcp" section.
+type MCPConfig struct {
+	Servers map[string]MCPServer `json:"servers,omitempty"`
 }
 
 // defaultPermissionsPolicy returns the built-in baseline policy:
@@ -471,6 +499,7 @@ type Config struct {
 	Daemon          DaemonConfig        `json:"daemon"`
 	Skills          SkillsConfig        `json:"skills"`
 	Embeddings      EmbeddingsConfig    `json:"embeddings"`
+	MCP             MCPConfig           `json:"mcp"`
 	// FallbackChain is an ordered list of "provider/model" entries (same
 	// syntax as forge fanout --models) tried in order on a RETRYABLE
 	// failure — rate limit (429), transient upstream outage (502/503/504),
@@ -596,6 +625,7 @@ type filePermissions struct {
 	Git    *GitPermissions    `json:"git"`
 	GitHub *GitHubPermissions `json:"github"`
 	Custom *CustomPermissions `json:"custom"`
+	MCP    *MCPPermissions    `json:"mcp"`
 }
 
 // fileLimits mirrors LimitsConfig with presence-tracking pointers so that
@@ -634,6 +664,7 @@ type fileConfig struct {
 	Daemon          *DaemonConfig       `json:"daemon"`
 	Skills          *SkillsConfig       `json:"skills"`
 	Embeddings      *EmbeddingsConfig   `json:"embeddings"`
+	MCP             *MCPConfig          `json:"mcp"`
 	// FallbackChain: no pointer needed — nil (key absent from this layer)
 	// vs non-nil (key present, even as "[]" to explicitly clear a lower
 	// layer's chain) is already exactly what json.Unmarshal gives a plain
@@ -797,6 +828,18 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		}
 		if fp.Custom != nil {
 			dst.Permissions.Custom = *fp.Custom
+		}
+		if fp.MCP != nil {
+			dst.Permissions.MCP = *fp.MCP
+		}
+	}
+	if fc.MCP != nil && len(fc.MCP.Servers) > 0 {
+		// Named servers are replaced wholesale per name, like providers.
+		if dst.MCP.Servers == nil {
+			dst.MCP.Servers = make(map[string]MCPServer)
+		}
+		for name, srv := range fc.MCP.Servers {
+			dst.MCP.Servers[name] = srv
 		}
 	}
 	if fc.TUI != nil {

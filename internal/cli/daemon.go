@@ -21,6 +21,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/embedding"
 	"github.com/eduardosanmartin/forge/internal/isolation"
 	"github.com/eduardosanmartin/forge/internal/llm"
+	"github.com/eduardosanmartin/forge/internal/mcpbridge"
 	"github.com/eduardosanmartin/forge/internal/perms"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
@@ -211,6 +212,10 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 			Deny:  app.Config.Permissions.Custom.Deny,
 			Allow: app.Config.Permissions.Custom.Allow,
 		},
+		MCP: perms.MCPPermissions{
+			Allow: app.Config.Permissions.MCP.Allow,
+			Ask:   app.Config.Permissions.MCP.Ask,
+		},
 	}
 	permsEng, err := perms.New(permsPolicy, workspaceRoot, app.Logger)
 	if err != nil {
@@ -364,6 +369,20 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Handle shutdown signals
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
+
+	// F6: external MCP servers (approved ones, allowed tools only), started
+	// in the background so they never delay the daemon's cold start.
+	if len(app.Config.MCP.Servers) > 0 {
+		if path, err := mcpApprovalsPath(); err == nil {
+			if approvals, err := mcpbridge.LoadApprovals(path); err != nil {
+				app.Logger.Warn("mcp disabled: cannot read approvals", "error", err)
+			} else {
+				mgr := mcpbridge.NewManager(app.Config, approvals, permsEng, app.Logger)
+				go mgr.Start(ctx, toolsReg)
+				defer mgr.Close()
+			}
+		}
+	}
 
 	err = d.Start(ctx)
 	printBanner()
