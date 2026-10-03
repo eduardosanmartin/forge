@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-09-14 — **93/96 cubiertos**.
+> Última actualización: 2026-10-03 — **78/96 cubiertos** tras auditoría del código (2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -25,21 +25,21 @@
 - [x] RF-2.1 Proveedores OpenAI-compatibles (Ollama, llama.cpp, vLLM, LM Studio)
 - [x] RF-2.2 Adaptadores propios: Anthropic y Gemini
 - [x] RF-2.3 Cambio de proveedor/modelo sin reiniciar sesión
-- [x] RF-2.4 Ruteo por costo/complejidad (`model_roles`)
+- [~] RF-2.4 Ruteo por costo/complejidad (`model_roles`) (parcial: solo enruta el paso de generación; compactación y retrieval no usan modelo chico)
 - [x] RF-2.5 Ruteo por tipo de paso (`ModelForStepSelector`)
 - [x] RF-2.6 Streaming opt-in (default OFF, TTFT, falla vinculante)
 
 **RF-3. Gestión de contexto y memoria**
 - [x] RF-3.1 Memoria persistente entre sesiones (anchors)
-- [x] RF-3.2 Recuperación selectiva de contexto (retrieval)
-- [x] RF-3.3 Compactación jerárquica progresiva
+- [~] RF-3.2 Recuperación selectiva de contexto (retrieval) (parcial: índice global compartido entre sesiones, duplicados, re-indexado completo por turno)
+- [~] RF-3.3 Compactación jerárquica progresiva (parcial: truncado determinista por mensaje, sin jerarquía ni tope)
 - [x] RF-3.4 Inspección/edición manual de memoria (`forge memory`)
 - [x] RF-3.5 Anclaje explícito (tools + write floor RNF-4.12)
 
 **RF-4. Skills y auto-aprendizaje**
 - [x] RF-4.1 Creación, carga e instalación de skills
 - [x] RF-4.1.1 Wizard interactivo `forge skill new`
-- [x] RF-4.2 Lazy-load por relevancia a la tarea
+- [~] RF-4.2 Lazy-load por relevancia a la tarea (parcial: default manual, embedding hash; las skills desaparecen tras la primera iteración con herramientas)
 - [x] RF-4.3 Propuesta por minería de patrones (`forge skill mine`)
 - [x] RF-4.4 Aprobación humana antes de activar skills auto-generadas
 
@@ -58,7 +58,7 @@
 **RF-7. GUI web (opcional, desacoplada)**
 - [x] RF-7.1 Modo servidor exponiendo API para GUI web (`forge serve`, JSON-RPC 2.0 sobre WebSocket, `internal/daemon`)
 - [x] RF-7.2 GUI como cliente de la misma API que el CLI (`internal/webui`, sin lógica propia — consume `session.*` como el CLI/TUI)
-- [x] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
+- [~] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (parcial: sin diffs de código ni vista de corridas `run.*`; existe: timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
 - [x] RF-7.4 Acceso remoto protegible con autenticación (token compartido: header Bearer para el CLI, cookie de sesión vía `POST /auth/login` para la GUI — `forge daemon set-password`)
 
 **RF-8. Desarrollo guiado por especificación**
@@ -85,7 +85,7 @@
 - [x] RF-11.5 Agotar reintentos = checkpoint HITL implícito
 - [x] RF-11.6 Continuar solo con criterio de "hecho" cumplido
 - [x] RF-11.7 Checkpoint HITL: detener, resumir, esperar input humano
-- [x] RF-11.8 Log/auditoría reanudable (`RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
+- [~] RF-11.8 Log/auditoría reanudable (parcial: el daemon no redescubre corridas pausadas al reiniciar; existe: `RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
 - [x] RF-11.9 Niveles de autonomía configurables
 - [x] RF-11.10 Reporte final de corrida
 
@@ -93,16 +93,16 @@
 - [x] RNF-1.1 Cold start < 200ms (bench: ~19-21ms mediana)
 - [x] RNF-1.2 Overhead < 50ms por turno (bench: p50 1ms)
 - [x] RNF-1.3 Memoria en reposo < 100MB (bench: ~3.3MB heap+stack)
-- [x] RNF-1.4 Sesiones de larga duración sin degradación (`internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
+- [~] RNF-1.4 Sesiones de larga duración sin degradación (parcial: con retrieval activo el store de embeddings crece O(n²); existe: `internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
 - [x] RNF-1.5 Concurrencia realista Perfil A (scheduler asumiendo cero paralelismo físico)
 - [x] RNF-1.6 Reserva de núcleos (`llm.cores`, default NumCPU-2)
 
 **RNF-2. Eficiencia de contexto/tokens**
 - [x] RNF-2.1 Medición y reporte de tokens por turno/sesión/proveedor (TurnMetrics)
-- [x] RNF-2.2 Orden estable para maximizar prompt-caching
+- [~] RNF-2.2 Orden estable para maximizar prompt-caching (parcial: la ventana deslizante desplaza el prefijo cada turno; Anthropic sin `cache_control`)
 - [x] RNF-2.3 Reducción ≥40% vs naive en sesiones >20 turnos (bench)
-- [x] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión)
-- [x] RNF-2.5 Techo de contexto objetivo 4-8k tokens
+- [~] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión) (parcial: mismo motivo que RNF-2.2)
+- [~] RNF-2.5 Techo de contexto objetivo 4-8k tokens (parcial: salidas de herramientas sin tope efectivo — `fs_read` ilimitado, shell 50 KB)
 
 **RNF-3. Modularidad y mantenibilidad**
 - [x] RNF-3.1 Core independiente de proveedor de LLM
@@ -110,10 +110,10 @@
 - [x] RNF-3.3 Tests de integración sobre el contrato de la API interna
 
 **RNF-4. Seguridad**
-- [x] RNF-4.1 Permisos deny-by-default para shell/fs/git (+ custom write floor)
+- [~] RNF-4.1 Permisos deny-by-default para shell/fs/git (+ custom write floor) (parcial: `done_criteria` se ejecuta sin pasar por permisos; `workdir` no confinado; comandos con ruta)
 - [x] RNF-4.2 Plugins con privilegios mínimos y permisos declarados
 - [x] RNF-4.3 Datos no salen del entorno local sin acción explícita
-- [x] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM
+- [~] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM (parcial: no cubre claves JSON entre comillas, `*_API_KEY=`, cuerpo PEM, `AIza…`)
 - [x] RNF-4.5 Contenido no confiable tratado como datos, nunca instrucciones
 - [x] RNF-4.6 Procedencia verificada (checksum/firma) para plugins/skills externos
 - [x] RNF-4.7 Aislamiento de SO para shell del core (seccomp/Landlock en Linux; matiz macOS aceptado por spec)
@@ -137,10 +137,10 @@
 - [x] RNF-7.2 Configuración por proyecto versionable junto al código
 
 **RNF-8. Autonomía segura (ligado a RF-11)**
-- [x] RNF-8.1 Worktree/branch aislado en modo autónomo
+- [ ] RNF-8.1 Worktree/branch aislado en modo autónomo (el runner solo valida que el manifest lo declare; no crea worktree ni rama)
 - [x] RNF-8.2 Piso de seguridad no configurable (git floor, budget walls)
-- [x] RNF-8.3 Criterio de "tarea completada" con verificación positiva (criterio declarado por tarea en manifest)
-- [x] RNF-8.4 Commits atómicos y reversibles por tarea
+- [~] RNF-8.3 Criterio de "tarea completada" con verificación positiva (parcial: un `done_criteria` sin `cmd:` se aprueba sin verificar)
+- [ ] RNF-8.4 Commits atómicos y reversibles por tarea (commit por tarea es un no-op en `internal/run/runner.go`)
 
 **RNF-9. Clasificación de sensibilidad (techo de autonomía)**
 - [x] RNF-9.1 Clasificación única en config versionada (`general`/`regulado`/`datos-sensibles`)
