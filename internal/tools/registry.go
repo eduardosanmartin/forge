@@ -182,6 +182,17 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	fencedContent := RedactAndFence(name, result.Content)
 	redactedMetadata := RedactMetadata(result.Metadata)
 
+	// 6. Prompt-injection heuristics (RNF-4.5): flag, never block. The
+	// warning sits outside the fence, in the harness's voice.
+	if reasons := DetectInjection(result.Content); len(reasons) > 0 {
+		fencedContent = suspiciousWarning(reasons) + fencedContent
+		if redactedMetadata == nil {
+			redactedMetadata = map[string]any{}
+		}
+		redactedMetadata["suspicious"] = true
+		redactedMetadata["suspicious_reasons"] = reasons
+	}
+
 	return Result{
 		Content:  fencedContent,
 		Metadata: redactedMetadata,

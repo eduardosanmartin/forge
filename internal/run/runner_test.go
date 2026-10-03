@@ -58,6 +58,7 @@ func TestRunnerCompletesAllTasks(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(10, 1),
@@ -88,6 +89,7 @@ func TestRunnerOnProgressEmitsTaskLifecycle(t *testing.T) {
 	cfg := config.Defaults()
 	var events []ProgressEvent
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(10, 1),
@@ -130,6 +132,7 @@ func TestRunnerOnProgressEmitsRetryAndFailed(t *testing.T) {
 	cfg := config.Defaults()
 	var events []ProgressEvent
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     failingExecutor(errors.New("boom")),
@@ -166,6 +169,7 @@ func TestRunnerBudgetKillWallClock(t *testing.T) {
 	start := time.Now()
 	calls := 0
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(10, 1),
@@ -193,6 +197,7 @@ func TestRunnerBudgetKillTokens(t *testing.T) {
 	cfg := config.Defaults()
 	count := 0
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: func(_ context.Context, _ Task) (ExecResult, error) {
@@ -215,6 +220,7 @@ func TestRunnerCheckpointPausesWhenNotApproved(t *testing.T) {
 	m.HITL.Checkpoints = append(m.HITL.Checkpoints, Checkpoint{ID: "before-t", Trigger: TriggerBeforeTask, Required: true})
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(10, 1),
@@ -239,6 +245,7 @@ func TestRunnerNoCheckpointHandlerDefaultsToPause(t *testing.T) {
 	m.HITL.Checkpoints = append(m.HITL.Checkpoints, Checkpoint{ID: "before-t", Trigger: TriggerBeforeTask, Required: true})
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(10, 1),
@@ -260,6 +267,7 @@ func TestRunnerHighSensitivityForcesCheckpointPerTask(t *testing.T) {
 	cfg.Project.Sensitivity = config.SensitivitySensitive
 	calls := 0
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(5, 1),
@@ -283,6 +291,7 @@ func TestRunnerRegulatedRequiresPreMerge(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Project.Sensitivity = config.SensitivityRegulated
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -299,6 +308,7 @@ func TestRunnerRetriesExhaustedPauses(t *testing.T) {
 	m.Budget.MaxRetriesPerTask = 1
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: failingExecutor(errors.New("compile error")),
@@ -334,6 +344,7 @@ func TestRunnerRetryFeedsBackPreviousFailure(t *testing.T) {
 	var goalsSeen []string
 	callCount := 0
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: func(_ context.Context, task Task) (ExecResult, error) {
@@ -368,6 +379,7 @@ func TestRunnerDryRunNoExecution(t *testing.T) {
 	cfg := config.Defaults()
 	called := false
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: func(_ context.Context, _ Task) (ExecResult, error) {
@@ -392,6 +404,7 @@ func TestRunnerIsolationRequiredRejected(t *testing.T) {
 	m.Git.Isolation = "none"
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(1, 1),
@@ -408,6 +421,7 @@ func TestStatePersistenceRoundTrip(t *testing.T) {
 	m.HITL.Checkpoints = append(m.HITL.Checkpoints, Checkpoint{ID: "before-t", Trigger: TriggerBeforeTask, Required: true})
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(10, 1),
@@ -443,7 +457,7 @@ func TestStatePersistenceRoundTrip(t *testing.T) {
 func simulateCrashAfterFirstTask(t *testing.T, m *Manifest, sessionID string) string {
 	t.Helper()
 	dir := t.TempDir()
-	prior := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
+	prior := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
 	start := time.Now().Add(-time.Minute)
 	prior.budget = NewBudgetState(m, start)
 	prior.budget.AddTurn(10, 1)
@@ -469,6 +483,7 @@ func TestResumeSkipsCompletedTasks(t *testing.T) {
 
 	var invoked []string
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   config.Defaults(),
 		Executor: func(_ context.Context, task Task) (ExecResult, error) {
@@ -509,13 +524,13 @@ func TestResumeRejectsTerminalStates(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			m := testManifest(ModeCheckpoint)
 			dir := t.TempDir()
-			r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
+			r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
 			r.state = RunState{RunID: m.RunID, Mode: m.Mode, Status: status, StartedAt: time.Now(), UpdatedAt: time.Now()}
 			if err := r.persistState(); err != nil {
 				t.Fatalf("persist state: %v", err)
 			}
 
-			r2 := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
+			r2 := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
 			_, err := r2.Resume(context.Background())
 			if err == nil {
 				t.Fatalf("expected Resume to reject a %s run, got nil error", status)
@@ -526,7 +541,7 @@ func TestResumeRejectsTerminalStates(t *testing.T) {
 
 func TestResumeRequiresStateDir(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1)}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1)}
 	_, err := r.Resume(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "StateDir") {
 		t.Fatalf("expected a StateDir-required error, got %v", err)
@@ -535,7 +550,7 @@ func TestResumeRequiresStateDir(t *testing.T) {
 
 func TestResumeWithoutPriorStateErrors(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: t.TempDir()}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: t.TempDir()}
 	_, err := r.Resume(context.Background())
 	if err == nil {
 		t.Fatal("expected an error resuming a run with no persisted state")
@@ -544,7 +559,7 @@ func TestResumeWithoutPriorStateErrors(t *testing.T) {
 
 func TestResumeRejectsDryRun(t *testing.T) {
 	m := testManifest(ModeDryRun)
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: t.TempDir()}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: t.TempDir()}
 	_, err := r.Resume(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "dry_run") {
 		t.Fatalf("expected a dry_run rejection, got %v", err)
@@ -560,7 +575,7 @@ func TestResumeDoesNotResetWallClockBudget(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
 	m.Budget.MaxWallClock = "1m"
 	dir := t.TempDir()
-	prior := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
+	prior := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
 	longAgo := time.Now().Add(-time.Hour) // already far past the 1m budget
 	prior.budget = NewBudgetState(m, longAgo)
 	prior.state = RunState{
@@ -572,7 +587,7 @@ func TestResumeDoesNotResetWallClockBudget(t *testing.T) {
 		t.Fatalf("persist prior state: %v", err)
 	}
 
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), StateDir: dir}
 	rep, err := r.Resume(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "budget exceeded") {
 		t.Fatalf("expected an immediate budget kill on resume, got report=%+v err=%v", rep, err)
@@ -588,6 +603,7 @@ func TestRunnerRespectsContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -640,6 +656,7 @@ func TestRunnerHighSensitivityToolCallInspection(t *testing.T) {
 			cfg.Project.Sensitivity = config.SensitivitySensitive
 			paused := false
 			r := &Runner{
+				RunGit:   nopGit,
 				Manifest: m,
 				Config:   cfg,
 				Executor: executorWithTools(5, 1, tc.toolCalls),
@@ -675,6 +692,7 @@ func TestRunnerHighSensitivityFallbackWhenToolRecordsUnavailable(t *testing.T) {
 		cfg := config.Defaults()
 		cfg.Project.Sensitivity = config.SensitivitySensitive
 		r := &Runner{
+			RunGit:   nopGit,
 			Manifest: m,
 			Config:   cfg,
 			Executor: okExecutor(5, 1), // ToolCalls nil -> heuristic fallback
@@ -700,6 +718,7 @@ func TestRunnerHighSensitivityFallbackWhenToolRecordsUnavailable(t *testing.T) {
 		cfg := config.Defaults()
 		cfg.Project.Sensitivity = config.SensitivitySensitive
 		r := &Runner{
+			RunGit:   nopGit,
 			Manifest: m,
 			Config:   cfg,
 			Executor: okExecutor(5, 1), // nil ToolCalls, innocuous goal
@@ -724,6 +743,7 @@ func TestRunnerWritesVerifiableAuditLogUnderRegulatedSensitivity(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Project.Sensitivity = config.SensitivityRegulated
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -756,6 +776,7 @@ func TestRunnerNoAuditLogUnderGeneralSensitivity(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Defaults() // SensitivityGeneral by default
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -785,7 +806,7 @@ func TestRunnerAuditLogSurvivesResume(t *testing.T) {
 	// Simulate a crash after t1, as in the resume tests above, but this time
 	// starting from a real audited Run so the audit chain already has
 	// content to resume.
-	prior := &Runner{Manifest: m, Config: cfg, Executor: okExecutor(1, 1), StateDir: dir}
+	prior := &Runner{RunGit: nopGit, Manifest: m, Config: cfg, Executor: okExecutor(1, 1), StateDir: dir}
 	start := time.Now().Add(-time.Minute)
 	prior.budget = NewBudgetState(m, start)
 	prior.state = RunState{
@@ -806,6 +827,7 @@ func TestRunnerAuditLogSurvivesResume(t *testing.T) {
 	}
 
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -854,6 +876,7 @@ func TestRunnerDecomposePopulatesTasksBeforeCheckpoint(t *testing.T) {
 	cfg := config.Defaults()
 	var sawTasksAtCheckpoint int
 	r := &Runner{
+		RunGit:     nopGit,
 		Manifest:   m,
 		Config:     cfg,
 		Executor:   okExecutor(5, 1),
@@ -892,6 +915,7 @@ func TestRunnerDecomposeSkippedWhenTasksAlreadyAuthored(t *testing.T) {
 	cfg := config.Defaults()
 	called := false
 	r := &Runner{
+		RunGit:    nopGit,
 		Manifest:  m,
 		Config:    cfg,
 		Executor:  okExecutor(5, 1),
@@ -914,6 +938,7 @@ func TestRunnerDecomposeErrorFailsRun(t *testing.T) {
 	m := testManifestNoTasks(ModeCheckpoint)
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:     nopGit,
 		Manifest:   m,
 		Config:     cfg,
 		Executor:   okExecutor(5, 1),
@@ -930,6 +955,7 @@ func TestRunnerDecomposeInvalidTaskListRejected(t *testing.T) {
 	m := testManifestNoTasks(ModeCheckpoint)
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:     nopGit,
 		Manifest:   m,
 		Config:     cfg,
 		Executor:   okExecutor(5, 1),
@@ -945,7 +971,7 @@ func TestRunnerDecomposeInvalidTaskListRejected(t *testing.T) {
 func TestRunnerDecomposeWithoutDecomposerErrors(t *testing.T) {
 	m := testManifestNoTasks(ModeCheckpoint)
 	cfg := config.Defaults()
-	r := &Runner{Manifest: m, Config: cfg, Executor: okExecutor(5, 1), Decompose: true}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: cfg, Executor: okExecutor(5, 1), Decompose: true}
 	_, err := r.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "no Decomposer is wired") {
 		t.Fatalf("expected a clear error when Decompose is set without a Decomposer, got %v", err)
@@ -956,6 +982,7 @@ func TestRunnerDryRunPreviewsDecomposedTaskCount(t *testing.T) {
 	m := testManifestNoTasks(ModeDryRun)
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:     nopGit,
 		Manifest:   m,
 		Config:     cfg,
 		Decompose:  true,
@@ -992,6 +1019,7 @@ func TestRunnerDoneCriteriaCmdSuccessCompletesTask(t *testing.T) {
 	cfg := config.Defaults()
 	fake := &fakeCommandRunner{}
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
@@ -1017,6 +1045,7 @@ func TestRunnerDoneCriteriaCmdFailureExhaustsRetries(t *testing.T) {
 	cfg := config.Defaults()
 	fake := &fakeCommandRunner{exitCode: 2, output: "unknown command"}
 	r := &Runner{
+		RunGit:     nopGit,
 		Manifest:   m,
 		Config:     cfg,
 		RunCommand: fake.run,
@@ -1037,6 +1066,7 @@ func TestRunnerDoneCriteriaRejectsShellOperators(t *testing.T) {
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go build ./... && go test ./..."}}
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   cfg,
 		Executor: okExecutor(5, 1),
@@ -1058,6 +1088,7 @@ func TestRunnerDoneCriteriaWithoutCommandRunnerFailsClosed(t *testing.T) {
 	m.Budget.MaxRetriesPerTask = 0
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go version"}}
 	r := &Runner{
+		RunGit:   nopGit,
 		Manifest: m,
 		Config:   config.Defaults(),
 		Executor: okExecutor(5, 1),
@@ -1075,7 +1106,7 @@ func TestRunnerDoneCriteriaDeniedByPolicyFailsTask(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: powershell -EncodedCommand AAAA"}}
 	fake := &fakeCommandRunner{denied: "default-deny:shell.exec"}
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
 	err := r.checkDoneCriteria(context.Background(), m.Tasks[0])
 	if err == nil || !strings.Contains(err.Error(), "denied by permission policy") || !strings.Contains(err.Error(), "default-deny:shell.exec") {
 		t.Fatalf("expected a policy denial naming the rule, got %v", err)
@@ -1087,7 +1118,7 @@ func TestRunnerDoneCriteriaFailureReportsOutputTail(t *testing.T) {
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go test ./..."}}
 	out := strings.Repeat("ok noise line\n", 400) + "FAIL: TestTheRealProblem"
 	fake := &fakeCommandRunner{exitCode: 1, output: out}
-	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
+	r := &Runner{RunGit: nopGit, Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
 	err := r.checkDoneCriteria(context.Background(), m.Tasks[0])
 	if err == nil || !strings.Contains(err.Error(), "FAIL: TestTheRealProblem") {
 		t.Fatalf("expected the END of the output (where the failure is) in the error, got %v", err)
@@ -1099,6 +1130,7 @@ func TestRunnerDoneCriteriaDescriptiveTextIsNeverChecked(t *testing.T) {
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "looks right to me, no command to run"}}
 	cfg := config.Defaults()
 	r := &Runner{
+		RunGit:       nopGit,
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),

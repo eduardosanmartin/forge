@@ -393,6 +393,18 @@ func (m *testToolsRegistry) List() []tools.Tool {
 	return list
 }
 func (m *testToolsRegistry) Execute(ctx context.Context, name string, args map[string]any) (tools.Result, error) {
+	if name == "git" {
+		// A clean repo on "main" where every operation succeeds — enough
+		// for manifest runs' branch isolation (run.gitIsolation).
+		out := ""
+		switch args["subcommand"] {
+		case "branch":
+			out = "main\n"
+		case "log":
+			out = "0123456789abcdef\n"
+		}
+		return tools.Result{Content: tools.Fence("git", out), Metadata: map[string]any{"exit_code": 0}}, nil
+	}
 	return tools.Result{Content: "tool result for " + name, Metadata: map[string]any{"tool": name}}, nil
 }
 

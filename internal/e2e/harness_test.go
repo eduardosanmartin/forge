@@ -340,7 +340,7 @@ func truncate(s string, n int) string {
 // the tests never depend on machine-global git configuration.
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	runGit(t, dir, "init")
+	runGit(t, dir, "init", "-b", "main")
 	runGit(t, dir, "config", "user.email", "e2e@forge.local")
 	runGit(t, dir, "config", "user.name", "Forge E2E")
 }

@@ -114,3 +114,78 @@ func LoadReport(stateDir, runID string) (*Report, error) {
 	}
 	return &rep, nil
 }
+
+// persistManifest writes the run's manifest (with its task list, decomposed
+// or authored) to StateDir/.forge/runs/<run_id>/manifest.json, so a daemon
+// that restarts can resume the run from its ID alone (RF-11.8) instead of
+// needing a client to resend the manifest.
+func (r *Runner) persistManifest() error {
+	if r.StateDir == "" {
+		return nil
+	}
+	dir := filepath.Join(r.StateDir, ".forge", "runs", r.Manifest.RunID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+	data, err := json.MarshalIndent(r.Manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	return os.WriteFile(filepath.Join(dir, "manifest.json"), append(data, '\n'), 0o644)
+}
+
+// LoadManifest reads the manifest persisted for runID under stateDir.
+func LoadManifest(stateDir, runID string) (*Manifest, error) {
+	path := filepath.Join(stateDir, ".forge", "runs", runID, "manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("load manifest %s: %w", path, err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("decode manifest: %w", err)
+	}
+	return &m, nil
+}
+
+// ListStates returns the persisted state of every run under stateDir
+// (.forge/runs/*/state.json), skipping unreadable entries. Used by the
+// daemon at startup to rediscover runs a restart interrupted.
+func ListStates(stateDir string) ([]*RunState, error) {
+	entries, err := os.ReadDir(filepath.Join(stateDir, ".forge", "runs"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []*RunState
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		st, err := LoadState(stateDir, e.Name())
+		if err != nil || st.RunID == "" {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// MarkCanceled records in runID's persisted state that a human canceled
+// it (status failed, with the reason), so a later daemon restart doesn't
+// rediscover it as interrupted again.
+func MarkCanceled(stateDir, runID, reason string) error {
+	st, err := LoadState(stateDir, runID)
+	if err != nil {
+		return err
+	}
+	st.Status = StatusFailed
+	st.Error = reason
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, ".forge", "runs", runID, "state.json"), append(data, '\n'), 0o644)
+}

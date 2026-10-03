@@ -76,7 +76,7 @@ func (m *Manager) Finalize(ctx context.Context, id string) (*Artifacts, error) {
 			MaxRetriesPerTask: 2,
 		},
 		Git: run.GitConfig{
-			Isolation:     "worktree",
+			Isolation:     "branch",
 			CommitPerTask: true,
 		},
 		HITL: run.HITLConfig{

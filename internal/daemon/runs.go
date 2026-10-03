@@ -11,6 +11,7 @@ import (
 
 	"github.com/eduardosanmartin/forge/internal/bootstrap"
 	"github.com/eduardosanmartin/forge/internal/run"
+	"github.com/eduardosanmartin/forge/internal/tools"
 )
 
 // Sentinel errors for run.* RPC handlers (Fase 3) to map onto the right
@@ -42,6 +43,14 @@ const (
 	RunFailed           = "failed"
 	RunKilled           = "killed"
 	RunCanceled         = "canceled"
+	// RunInterrupted and RunPausedRecovered are runs rediscovered on disk
+	// at daemon startup (RecoverRuns): the daemon that owned them died
+	// mid-task, or while they were paused at a checkpoint. Neither has a
+	// live goroutine. Approving a recovered run (ApproveRunCheckpoint) or
+	// run.resume with just its run_id resumes it from its persisted state
+	// and manifest; declining or run.cancel marks it canceled.
+	RunInterrupted     = "interrupted"
+	RunPausedRecovered = "paused_recovered"
 )
 
 // RunExecution tracks one daemon-hosted manifest run.
@@ -61,7 +70,8 @@ type RunExecution struct {
 	ctx               context.Context // this run's own cancellation context, set once at launchRun before the goroutine starts
 	cancel            context.CancelFunc
 	done              chan struct{}
-	pendingCheckpoint *run.Checkpoint // non-nil only while status == RunPausedCheckpoint
+	pendingCheckpoint *run.Checkpoint // non-nil while status == RunPausedCheckpoint (or RunPausedRecovered)
+	stateDir          string          // where the run persists its state (used to resume a recovered run)
 	checkpointCh      chan bool       // Fase 2: ApproveRunCheckpoint sends here; OnCheckpoint blocks reading it
 	checkpointWaiting bool            // guards ApproveRunCheckpoint against a decision with nothing listening
 }
@@ -203,6 +213,7 @@ func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, s
 		StateDir:   stateDir,
 		SessionID:  sessionID,
 		RunCommand: m.doneCriteriaCommandRunner(),
+		RunGit:     m.gitRunner(),
 	}
 	if mani.Mode != run.ModeDryRun {
 		r.Executor = m.manifestExecutor(sessionID)
@@ -416,7 +427,17 @@ func (m *SessionManager) manifestExecutor(sessionID string) run.Executor {
 		for _, tr := range result.ToolTrace {
 			toolCalls = append(toolCalls, tr.Name)
 		}
-		return run.ExecResult{Tokens: tokens, Iterations: iters, ToolCalls: toolCalls}, nil
+		var suspicious []string
+		for _, msg := range msgs {
+			if msg.Role == "tool" && strings.HasPrefix(msg.Content, tools.SuspiciousMarker) {
+				line := msg.Content
+				if i := strings.IndexByte(line, '\n'); i >= 0 {
+					line = line[:i]
+				}
+				suspicious = append(suspicious, msg.Name+": "+line)
+			}
+		}
+		return run.ExecResult{Tokens: tokens, Iterations: iters, ToolCalls: toolCalls, Suspicious: suspicious}, nil
 	}
 }
 
@@ -576,6 +597,20 @@ func (m *SessionManager) ApproveRunCheckpoint(runID string, approved bool) (RunR
 		return RunResult{}, fmt.Errorf("run %q: %w", runID, ErrRunNotFound)
 	}
 	exec.mu.Lock()
+	if exec.status == RunPausedRecovered || exec.status == RunInterrupted {
+		// Rediscovered after a restart: no live goroutine is waiting.
+		// Approval resumes the run (it re-reaches its checkpoint live if
+		// one still applies); declining cancels it.
+		exec.mu.Unlock()
+		if !approved {
+			return m.CancelRun(runID)
+		}
+		resumed, err := m.resumeRecovered(context.Background(), exec)
+		if err != nil {
+			return RunResult{}, err
+		}
+		return resumed.snapshot(), nil
+	}
 	if exec.status != RunPausedCheckpoint || !exec.checkpointWaiting {
 		exec.mu.Unlock()
 		return RunResult{}, fmt.Errorf("run %q: %w", runID, ErrRunNoCheckpointPending)
@@ -591,6 +626,68 @@ func (m *SessionManager) ApproveRunCheckpoint(runID string, approved bool) (RunR
 		// guards against a second send — defensive, never blocks the caller.
 	}
 	return exec.snapshot(), nil
+}
+
+// RecoverRuns registers every run persisted under stateDir whose last
+// recorded status is running or paused — i.e. a run the previous daemon
+// process was still responsible for when it stopped (RF-11.8). They show
+// up in run.list as RunInterrupted / RunPausedRecovered and can be resumed
+// or canceled; nothing is executed automatically. Runs already known to
+// this process and terminal runs (completed/failed/killed) are left alone.
+// Returns how many runs were recovered.
+func (m *SessionManager) RecoverRuns(stateDir string) (int, error) {
+	states, err := run.ListStates(stateDir)
+	if err != nil {
+		return 0, err
+	}
+	recovered := 0
+	m.runsMu.Lock()
+	defer m.runsMu.Unlock()
+	if m.runs == nil {
+		m.runs = make(map[string]*RunExecution)
+	}
+	for _, st := range states {
+		if _, known := m.runs[st.RunID]; known {
+			continue
+		}
+		var status string
+		switch st.Status {
+		case run.StatusRunning:
+			status = RunInterrupted
+		case run.StatusPaused:
+			status = RunPausedRecovered
+		default:
+			continue
+		}
+		exec := &RunExecution{
+			ID:                st.RunID,
+			SessionID:         st.SessionID,
+			CreatedAt:         st.StartedAt.UnixMilli(),
+			UpdatedAt:         st.UpdatedAt.UnixMilli(),
+			status:            status,
+			currentTask:       st.CurrentTaskID,
+			tokensUsed:        st.Budget.TokensUsed,
+			iterUsed:          st.Budget.IterationsUsed,
+			err:               st.Error,
+			pendingCheckpoint: st.PausedCheckpoint,
+			stateDir:          stateDir,
+			done:              make(chan struct{}),
+		}
+		close(exec.done) // no goroutine owns it
+		m.runs[st.RunID] = exec
+		recovered++
+	}
+	return recovered, nil
+}
+
+// resumeRecovered resumes a run found by RecoverRuns from its persisted
+// manifest and state.
+func (m *SessionManager) resumeRecovered(ctx context.Context, exec *RunExecution) (*RunExecution, error) {
+	mani, err := run.LoadManifest(exec.stateDir, exec.ID)
+	if err != nil {
+		return nil, fmt.Errorf("run %q: cannot resume without its persisted manifest (runs started before this version did not save one — resend it with run.resume): %w", exec.ID, err)
+	}
+	return m.ResumeRun(ctx, mani, exec.stateDir)
 }
 
 // GetRun returns a snapshot of a run by ID.
@@ -633,7 +730,8 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 		return RunResult{}, fmt.Errorf("run %q: %w", id, ErrRunNotFound)
 	}
 	exec.mu.Lock()
-	cancelable := exec.status == RunRunning || exec.status == RunPausedCheckpoint
+	recovered := exec.status == RunInterrupted || exec.status == RunPausedRecovered
+	cancelable := exec.status == RunRunning || exec.status == RunPausedCheckpoint || recovered
 	cancel := exec.cancel
 	if cancelable {
 		exec.status = RunCanceled
@@ -645,6 +743,9 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 	exec.mu.Unlock()
 	if cancelable && cancel != nil {
 		cancel()
+	}
+	if recovered && exec.stateDir != "" {
+		_ = run.MarkCanceled(exec.stateDir, exec.ID, "canceled by user after a daemon restart")
 	}
 	return exec.snapshot(), nil
 }
@@ -675,7 +776,7 @@ func (m *SessionManager) doneCriteriaCommandRunner() run.CommandRunner {
 			if rule == "" {
 				rule = strings.TrimSpace(res.Content)
 			}
-			return res.Content, -1, rule, nil
+			return unfence(res.Content), -1, rule, nil
 		}
 		code, ok := res.Metadata["exit_code"].(int)
 		if !ok {
@@ -684,6 +785,51 @@ func (m *SessionManager) doneCriteriaCommandRunner() run.CommandRunner {
 			// the program — surface it rather than treating it as success.
 			return res.Content, -1, "", fmt.Errorf("%s", strings.TrimSpace(res.Content))
 		}
-		return res.Content, code, "", nil
+		return unfence(res.Content), code, "", nil
 	}
+}
+
+// gitRunner adapts the tools registry's git tool into a run.GitRunner for
+// branch isolation and commit-per-task (RNF-8.1/8.4): every git operation
+// of a run passes permissions.git.allow and the non-configurable git floor,
+// exactly like a git call the agent itself proposes.
+func (m *SessionManager) gitRunner() run.GitRunner {
+	if m.toolsReg == nil {
+		return nil
+	}
+	return func(ctx context.Context, subcommand string, args []string) (string, int, string, error) {
+		argv := make([]any, len(args))
+		for i, a := range args {
+			argv[i] = a
+		}
+		res, err := m.toolsReg.Execute(ctx, "git", map[string]any{
+			"subcommand": subcommand,
+			"args":       argv,
+		})
+		if err != nil {
+			return "", -1, "", err
+		}
+		if denied, _ := res.Metadata["denied"].(bool); denied {
+			rule, _ := res.Metadata["rule"].(string)
+			return "", -1, rule, nil
+		}
+		code, ok := res.Metadata["exit_code"].(int)
+		if !ok {
+			return "", -1, "", fmt.Errorf("%s", strings.TrimSpace(res.Content))
+		}
+		return unfence(res.Content), code, "", nil
+	}
+}
+
+// unfence returns the payload of a fenced tool result
+// (<<TOOL_RESULT:x>>\n<CONTENT>\n...\n</CONTENT>\n</TOOL_RESULT:x>), or the
+// content unchanged when it isn't fenced.
+func unfence(content string) string {
+	const open, closing = "<CONTENT>\n", "\n</CONTENT>"
+	i := strings.Index(content, open)
+	j := strings.LastIndex(content, closing)
+	if i < 0 || j < i+len(open) {
+		return content
+	}
+	return content[i+len(open) : j]
 }

@@ -166,7 +166,7 @@ func initConfig(slug string) *config.Config {
 			Shell: config.ShellPermissions{Allow: []string{"go", "git"}, RequireIsolation: true},
 			Git: config.GitPermissions{Allow: []string{
 				"status", "add", "commit", "log", "diff", "branch",
-				"switch", "stash", "restore", "show",
+				"switch", "stash", "restore", "show", "merge",
 			}},
 			// Empty, non-nil slices: renders as "[]" in the generated JSON
 			// (deny-by-default, nothing granted yet) instead of "null" —
@@ -207,7 +207,7 @@ func initManifest(slug string) *run.Manifest {
 			MaxRetriesPerTask: 2,
 		},
 		Git: run.GitConfig{
-			Isolation:     "worktree",
+			Isolation:     "branch",
 			CommitPerTask: true,
 		},
 		HITL: run.HITLConfig{

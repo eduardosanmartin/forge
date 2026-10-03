@@ -746,6 +746,10 @@ type RunStartParams struct {
 type RunResumeParams struct {
 	Manifest run.Manifest `json:"manifest"`
 	StateDir string       `json:"state_dir,omitempty"`
+	// RunID resumes a run from the manifest it persisted when it started
+	// (manifest.json in its state dir) — used for runs rediscovered after a
+	// daemon restart. Ignored when Manifest is sent.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // RunStatusParams for run.status.

@@ -136,6 +136,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	d.logger.Info("daemon started", "addr", d.transport.Addr())
 
+	// RF-11.8: rediscover runs a previous daemon process left interrupted
+	// or paused. Off the startup path (after the listener is up), so it
+	// never delays the cold start.
+	go func() {
+		n, err := d.mgr.RecoverRuns(".")
+		if err != nil {
+			d.logger.Warn("run recovery scan failed", "error", err)
+		} else if n > 0 {
+			d.logger.Info("recovered interrupted/paused runs", "count", n)
+		}
+	}()
+
 	// Wait for context cancellation
 	<-ctx.Done()
 

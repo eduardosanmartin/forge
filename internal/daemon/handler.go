@@ -12,6 +12,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/bootstrap"
 	"github.com/eduardosanmartin/forge/internal/cost"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
+	"github.com/eduardosanmartin/forge/internal/run"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
 )
@@ -985,7 +986,15 @@ func (h *Handler) handleRunResume(ctx context.Context, req *JSONRPCRequest) *JSO
 	if stateDir == "" {
 		stateDir = "."
 	}
-	exec, err := h.mgr.ResumeRun(ctx, &params.Manifest, stateDir)
+	mani := &params.Manifest
+	if mani.RunID == "" && params.RunID != "" {
+		loaded, err := run.LoadManifest(stateDir, params.RunID)
+		if err != nil {
+			return NewErrorResponse(req.ID, ErrCodeInvalidParams, "no manifest sent and none persisted for this run", err.Error())
+		}
+		mani = loaded
+	}
+	exec, err := h.mgr.ResumeRun(ctx, mani, stateDir)
 	if err != nil {
 		if errors.Is(err, ErrRunAlreadyActive) {
 			return NewErrorResponse(req.ID, ErrCodeRunAlreadyActive, err.Error(), nil)

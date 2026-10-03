@@ -21,6 +21,10 @@ type ExecResult struct {
 	Tokens     int
 	Iterations int
 	ToolCalls  []string
+	// Suspicious lists why tool output read during the task looked like it
+	// carried instructions for the model (prompt injection, RNF-4.5). A
+	// non-empty list is an extraordinary case that pauses the run (RF-11).
+	Suspicious []string
 }
 
 // Executor executes one task goal and returns its result.
@@ -97,6 +101,11 @@ type Runner struct {
 	// permission-gated shell path (see CommandRunner). Nil makes every
 	// "cmd:" check fail closed.
 	RunCommand CommandRunner
+	// RunGit executes the git operations of branch isolation (RNF-8.1)
+	// and commit-per-task (RNF-8.4) through the permission-gated git tool
+	// (see GitRunner, gitIsolation). Required whenever the manifest asks
+	// for isolation; nil makes such a run fail before any task starts.
+	RunGit GitRunner
 	// Decompose, when true, calls Decomposer to populate Manifest.Tasks
 	// before the task loop starts (only when the manifest declares no
 	// explicit tasks — an already-authored task list is never overwritten).
@@ -162,6 +171,13 @@ type RunState struct {
 	PausedCheckpoint *Checkpoint `json:"paused_checkpoint,omitempty"`
 	PauseReason      string      `json:"pause_reason,omitempty"`
 	Error            string      `json:"error,omitempty"`
+	// Git isolation (RNF-8.1/8.4): the run's work branch, the branch it
+	// started from, one commit per completed task, and the merge commit
+	// once an approved before_merge checkpoint merged it.
+	WorkBranch  string            `json:"work_branch,omitempty"`
+	BaseBranch  string            `json:"base_branch,omitempty"`
+	TaskCommits map[string]string `json:"task_commits,omitempty"`
+	MergeCommit string            `json:"merge_commit,omitempty"`
 }
 
 // Report is the final RF-11.10 report.
@@ -177,6 +193,12 @@ type Report struct {
 	Deviations        []string    `json:"deviations,omitempty"`
 	BudgetUsed        BudgetState `json:"budget_used"`
 	ValidationState   string      `json:"validation_state"` // all_tasks_passed | partial | failed
+	// Git isolation outcome (RNF-8.1/8.4), set for isolated runs.
+	WorkBranch  string            `json:"work_branch,omitempty"`
+	BaseBranch  string            `json:"base_branch,omitempty"`
+	TaskCommits map[string]string `json:"task_commits,omitempty"`
+	MergeCommit string            `json:"merge_commit,omitempty"`
+	GitNotes    []string          `json:"git_notes,omitempty"`
 }
 
 const (
@@ -441,6 +463,7 @@ func (r *Runner) Run(ctx context.Context) (*Report, error) {
 	if r.Manifest.Mode == ModeDryRun {
 		return r.dryRunReport(), nil
 	}
+	_ = r.persistManifest() // best-effort: lets a restarted daemon resume by run ID
 
 	return r.execute(ctx, false)
 }
@@ -544,9 +567,28 @@ func (r *Runner) validateForExecution() error {
 		return fmt.Errorf("sensitivity ceiling: %w", err)
 	}
 	if r.Manifest.IsolationRequired() && (r.Manifest.Git.Isolation == "" || r.Manifest.Git.Isolation == "none") {
-		return fmt.Errorf("mode %q requires git.isolation worktree or branch (RNF-8.1) — manifest declares %q", r.Manifest.Mode, r.Manifest.Git.Isolation)
+		return fmt.Errorf("mode %q requires git.isolation branch (RNF-8.1) — manifest declares %q", r.Manifest.Mode, r.Manifest.Git.Isolation)
+	}
+	if r.Manifest.Mode != ModeDryRun {
+		switch r.Manifest.Git.Isolation {
+		case "worktree":
+			// A worktree needs every tool (fs, shell, git) rooted at the
+			// worktree directory, but the daemon's tools are bound to its
+			// single workspace. Running the tasks on the workspace instead
+			// would silently NOT isolate them — refuse instead.
+			return fmt.Errorf("git.isolation \"worktree\" is not supported by the run engine yet — use \"branch\": the run gets its own branch, one commit per task, and merges only after an approved before_merge checkpoint (RNF-8.1)")
+		case "branch":
+			if r.RunGit == nil {
+				return fmt.Errorf("git.isolation \"branch\" requires a git runner, and none is wired (refusing to run without the declared isolation)")
+			}
+		}
 	}
 	return nil
+}
+
+// isolated reports whether this run uses branch isolation.
+func (r *Runner) isolated() bool {
+	return r.Manifest.Mode != ModeDryRun && r.Manifest.Git.Isolation == "branch" && r.RunGit != nil
 }
 
 // execute runs the task loop against the already-initialized r.state/r.budget
@@ -582,6 +624,25 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			if !approved {
 				return r.pauseReport(*cp, "after_spec_decomposition")
 			}
+		}
+	}
+
+	// RNF-8.1: isolated runs work on their own branch. A cold start creates
+	// it (clean tree required); a resume switches back to it.
+	git := gitIsolation{run: r.RunGit}
+	if r.isolated() {
+		if resuming && r.state.WorkBranch != "" {
+			if err := git.ensureOn(ctx, r.state.WorkBranch); err != nil {
+				return r.failReport(fmt.Errorf("resume: return to work branch %q: %w", r.state.WorkBranch, err))
+			}
+		} else {
+			work, base, err := git.begin(ctx, r.Manifest)
+			if err != nil {
+				return r.failReport(fmt.Errorf("branch isolation (RNF-8.1): %w", err))
+			}
+			r.state.WorkBranch, r.state.BaseBranch = work, base
+			r.state.UpdatedAt = r.now()
+			_ = r.persistState()
 		}
 	}
 
@@ -745,6 +806,42 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			return r.failReport(fmt.Errorf("%s", r.state.Error))
 		}
 
+		// RF-11 extraordinary case: untrusted content carrying instructions
+		// for the agent pauses the run for a human, even when the task
+		// otherwise passed. Checked BEFORE the task's commit: declining leaves its
+		// work uncommitted on the work branch for inspection.
+		if len(lastExecRes.Suspicious) > 0 {
+			cp := Checkpoint{ID: "suspicious-content", Trigger: TriggerAfterTask, Required: true}
+			approved, err := r.handleCheckpoint(ctx, cp, fmt.Sprintf("task %s read tool output that looks like prompt injection: %s", task.ID, strings.Join(lastExecRes.Suspicious, "; ")))
+			if err != nil {
+				return r.failReport(err)
+			}
+			if !approved {
+				r.state.CurrentTaskID = task.ID
+				return r.pauseReport(cp, "suspicious tool output (possible prompt injection)")
+			}
+			reportPaused = append(reportPaused, cp.ID)
+		}
+
+		// RNF-8.4: commit the task's work as one atomic, revertible commit
+		// BEFORE recording it complete — a pause or crash right after must
+		// never leave a "completed" task's changes uncommitted.
+		if r.isolated() && r.Manifest.Git.CommitPerTask {
+			sha, err := git.commitTask(ctx, r.Manifest.RunID, task)
+			if err != nil {
+				r.state.Status = StatusFailed
+				r.state.Error = fmt.Sprintf("commit task %s: %v", task.ID, err)
+				_ = r.persistState()
+				return r.failReport(fmt.Errorf("%s", r.state.Error))
+			}
+			if sha != "" {
+				if r.state.TaskCommits == nil {
+					r.state.TaskCommits = make(map[string]string)
+				}
+				r.state.TaskCommits[task.ID] = sha
+			}
+		}
+
 		r.state.CompletedTasks = append(r.state.CompletedTasks, task.ID)
 		r.state.UpdatedAt = r.now()
 		r.state.Budget = r.budget
@@ -794,15 +891,12 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 			reportPaused = append(reportPaused, afterCP.ID)
 		}
 
-		// Commit per task is logical at this point (git ops would happen here when wired
-		// to a real worktree). Dry_run already returned; otherwise we record the intent.
-		if r.Manifest.Git.CommitPerTask && r.Manifest.Mode != ModeDryRun {
-			// No-op for this slice beyond audit; real git commit is a follow-up via
-			// worktree branch integration (phase-2 store.BranchSession already provides the isolation primitive).
-		}
 	}
 
-	// Pre-merge HITL (RNF-9.2 for regulado and spec 7.1).
+	// Pre-merge HITL (RNF-9.2 for regulado and spec 7.1). mergeApproved
+	// records whether a human explicitly approved merging into the base
+	// branch — the ONLY way an isolated run's work reaches it (RNF-8.1).
+	mergeApproved := false
 	if cp := r.findCheckpoint(TriggerBeforeMerge); cp != nil && cp.Required {
 		approved, err := r.handleCheckpoint(ctx, *cp, "before merge to base_branch")
 		if err != nil {
@@ -811,6 +905,7 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 		if !approved {
 			return r.pauseReport(*cp, "before_merge")
 		}
+		mergeApproved = true
 		reportPaused = append(reportPaused, cp.ID)
 	} else if cfgSensitivityRequiresPreMerge(r.Config.Project.Sensitivity) {
 		// Defense in depth: regulated without explicit pre-merge should have been rejected at
@@ -823,7 +918,27 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 		if !approved {
 			return r.pauseReport(cp, "before_merge sensitivity")
 		}
+		mergeApproved = true
 		reportPaused = append(reportPaused, cp.ID)
+	}
+
+	var gitNotes []string
+	if r.isolated() && r.state.MergeCommit == "" {
+		switch {
+		case mergeApproved && r.Manifest.Git.MergeToBase == "auto_if_all_hitl_passed":
+			sha, err := git.merge(ctx, r.Manifest.RunID, r.state.WorkBranch, r.state.BaseBranch)
+			if err != nil {
+				r.state.Status = StatusFailed
+				r.state.Error = fmt.Sprintf("merge %s into %s: %v", r.state.WorkBranch, r.state.BaseBranch, err)
+				_ = r.persistState()
+				return r.failReport(fmt.Errorf("%s", r.state.Error))
+			}
+			r.state.MergeCommit = sha
+		case !mergeApproved:
+			gitNotes = append(gitNotes, fmt.Sprintf("work left on branch %q, not merged: no before_merge checkpoint was approved (RNF-8.1 merges only with explicit approval)", r.state.WorkBranch))
+		default:
+			gitNotes = append(gitNotes, fmt.Sprintf("work left on branch %q for a manual merge into %q (git.merge_to_base is %q)", r.state.WorkBranch, r.state.BaseBranch, r.Manifest.Git.MergeToBase))
+		}
 	}
 
 	r.state.Status = StatusCompleted
@@ -841,6 +956,11 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 		PausedCheckpoints: reportPaused,
 		BudgetUsed:        r.budget,
 		ValidationState:   "all_tasks_passed",
+		WorkBranch:        r.state.WorkBranch,
+		BaseBranch:        r.state.BaseBranch,
+		TaskCommits:       r.state.TaskCommits,
+		MergeCommit:       r.state.MergeCommit,
+		GitNotes:          gitNotes,
 	}
 	if r.StateDir != "" {
 		_ = r.persistReport(rep)
