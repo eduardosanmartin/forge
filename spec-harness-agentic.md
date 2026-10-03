@@ -91,7 +91,7 @@
 - [x] RF-11.10 Reporte final de corrida
 
 **RNF-1. Rendimiento**
-- [x] RNF-1.1 Cold start < 200ms (bench: ~19-21ms mediana)
+- [x] RNF-1.1 Cold start < 200ms (bench in-process: ~19-21ms mediana; binario real con embeddings, lanzamiento→puerto aceptando: mediana 196 ms tras arrancar el backend de embeddings en segundo plano — antes 5,3 s, 2026-10-03)
 - [x] RNF-1.2 Overhead < 50ms por turno (bench: p50 1ms)
 - [x] RNF-1.3 Memoria en reposo < 100MB (bench: ~3.3MB heap+stack)
 - [x] RNF-1.4 Sesiones de larga duración sin degradación (2026-10-03: el crecimiento O(n²) del índice de retrieval quedó corregido; existe: `internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
@@ -138,7 +138,7 @@
 - [x] RNF-7.2 Configuración por proyecto versionable junto al código
 
 **RNF-8. Autonomía segura (ligado a RF-11)**
-- [x] RNF-8.1 Worktree/branch aislado en modo autónomo (2026-10-03: `git.isolation: branch` real — rama propia, árbol limpio, merge solo tras checkpoint `before_merge` aprobado; `worktree` se rechaza explícitamente hasta que las tools soporten otra raíz)
+- [x] RNF-8.1 Worktree/branch aislado en modo autónomo (2026-10-03: una sola corrida aislada por workspace y solo sus sesiones pueden escribir mientras la tiene; límite conocido: ediciones hechas fuera de forge (un editor) entran al siguiente commit de tarea; `git.isolation: branch` real — rama propia, árbol limpio, merge solo tras checkpoint `before_merge` aprobado; `worktree` se rechaza explícitamente hasta que las tools soporten otra raíz)
 - [x] RNF-8.2 Piso de seguridad no configurable (git floor, budget walls)
 - [x] RNF-8.3 Criterio de "tarea completada" con verificación positiva (2026-10-03: `cmd:` vía shell con permisos; criterios descriptivos verificados por un turno con veredicto JSON; tareas sin verificación positiva quedan listadas en el reporte)
 - [x] RNF-8.4 Commits atómicos y reversibles por tarea (2026-10-03: un commit por tarea tras su criterio de hecho; merge `--no-ff`)
