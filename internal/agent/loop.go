@@ -485,141 +485,12 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			}
 			result.Messages = append(result.Messages, *assistantMsg)
 
-			// Execute each tool call — RF-1.2 parallel path:
-			// When every call in this iteration is spawn_subagent and count >=2,
-			// dispatch them through the bounded worker pool in scheduler.go
-			// (agent.max_parallel_children, 2-4 default 2). Each child branches
-			// to a distinct session so they do not share a SQLite write txn;
-			// LLM calls run in parallel while DB appends serialize via single
-			// SQLite connection + WAL busy_timeout. Parent tool-result appends
-			// are serialized after join to avoid racing MAX(seq) on the parent
-			// session. Mixed or non-spawn batches stay sequential
-			// (file/session safety).
-			allSpawn := len(choice.Message.ToolCalls) >= 2
-			for _, tc := range choice.Message.ToolCalls {
-				if tc.Function.Name != "spawn_subagent" {
-					allSpawn = false
-					break
-				}
-			}
-			if allSpawn {
-				// Single halt check before parallel fan-out.
-				if sess, gErr := a.store.GetSession(ctx, sessionID); gErr == nil {
-					if halted, _ := sess.Metadata["halted"].(bool); halted {
-						reason, _ := sess.Metadata["halt_reason"].(string)
-						result.Error = fmt.Errorf("session halted during tool execution: %s", reason)
-						result.Halted = true
-					}
-				} else {
-					result.Error = fmt.Errorf("get session during tool execution: %w", gErr)
-					result.Halted = true
-				}
-				if !result.Halted {
-					// executeToolCallsParallel has no per-child progress hook of
-					// its own, so "started" fires for the whole batch up front
-					// here rather than as each child actually begins.
-					if opts.OnToolEvent != nil {
-						for _, tc := range choice.Message.ToolCalls {
-							opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
-						}
-					}
-					// Bounded parallel dispatch lives in scheduler.go
-					// (executeToolCallsParallel); tool results are appended
-					// serially here, after the join.
-					for _, out := range a.executeToolCallsParallel(ctx, sessionID, choice.Message.ToolCalls) {
-						totalToolCallCount++
-						if opts.OnToolEvent != nil {
-							// executeToolCallsParallel folds a tool error into
-							// result.Content ("ERROR: ...") rather than a
-							// separate error value — same convention the
-							// serial path below follows.
-							if strings.HasPrefix(out.result.Content, "ERROR: ") {
-								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "error", out.result.Content)
-							} else {
-								opts.OnToolEvent(out.call.ID, out.call.Function.Name, "finished", "")
-							}
-						}
-						toolResultMsg := &store.Message{
-							SessionID:  sessionID,
-							Role:       "tool",
-							Content:    out.result.Content,
-							ToolCallID: out.call.ID,
-							Name:       out.call.Function.Name,
-						}
-						_, _, err = a.store.AppendMessage(ctx, toolResultMsg)
-						if err != nil {
-							result.Error = fmt.Errorf("append tool result: %w", err)
-							result.Halted = true
-							break
-						}
-						result.Messages = append(result.Messages, *toolResultMsg)
-					}
-				}
-			} else {
-				for _, tc := range choice.Message.ToolCalls {
-					// Check for halt during tool execution
-					session, err := a.store.GetSession(ctx, sessionID)
-					if err != nil {
-						result.Error = fmt.Errorf("get session during tool execution: %w", err)
-						result.Halted = true
-						break
-					}
-					if halted, _ := session.Metadata["halted"].(bool); halted {
-						reason, _ := session.Metadata["halt_reason"].(string)
-						result.Error = fmt.Errorf("session halted during tool execution: %s", reason)
-						result.Halted = true
-						break
-					}
-
-					var args map[string]any
-					if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-						args = map[string]any{"_error": "invalid arguments: " + err.Error()}
-					}
-
-					// Execute tool (toolsReg.Execute handles perms check + execution + fencing + redaction).
-					// RF-1.3: carry parent session ID for spawn_subagent so the tool can branch correctly without model-supplied IDs.
-					if opts.OnToolEvent != nil {
-						opts.OnToolEvent(tc.ID, tc.Function.Name, "started", "")
-					}
-					toolCtx := tools.WithSessionID(ctx, sessionID)
-					toolResult, err := a.toolsReg.Execute(toolCtx, tc.Function.Name, args)
-					if err != nil {
-						toolResult = tools.Result{
-							Content: "ERROR: " + err.Error(),
-						}
-					}
-					if opts.OnToolEvent != nil {
-						// Execute reports most failures (unknown tool, bad
-						// args, permission denial) as Result{Content: "ERROR:
-						// ..."} with a NIL error — err != nil is the rarer
-						// case. Check both so a live progress display sees
-						// "error" for both.
-						if err != nil {
-							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", err.Error())
-						} else if strings.HasPrefix(toolResult.Content, "ERROR: ") {
-							opts.OnToolEvent(tc.ID, tc.Function.Name, "error", toolResult.Content)
-						} else {
-							opts.OnToolEvent(tc.ID, tc.Function.Name, "finished", "")
-						}
-					}
-					totalToolCallCount++
-
-					// Append tool result message
-					toolResultMsg := &store.Message{
-						SessionID:  sessionID,
-						Role:       "tool",
-						Content:    toolResult.Content,
-						ToolCallID: tc.ID,
-						Name:       tc.Function.Name,
-					}
-					_, _, err = a.store.AppendMessage(ctx, toolResultMsg)
-					if err != nil {
-						result.Error = fmt.Errorf("append tool result: %w", err)
-						result.Halted = true
-						break
-					}
-					result.Messages = append(result.Messages, *toolResultMsg)
-				}
+			msgs, ran, tcErr := a.runToolCalls(ctx, sessionID, choice.Message.ToolCalls, opts.OnToolEvent)
+			totalToolCallCount += ran
+			result.Messages = append(result.Messages, msgs...)
+			if tcErr != nil {
+				result.Error = tcErr
+				result.Halted = true
 			}
 
 			if result.Halted {
@@ -688,6 +559,122 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	result.Metrics.IterationCount = iterationCount
 
 	return result, result.Error
+}
+
+// runToolCalls executes one iteration's tool calls and persists each
+// result as a "tool" message, returning the persisted messages, how many
+// calls ran, and a non-nil error when the turn must stop (session halted,
+// store failure). onEvent, when set, observes each call ("started", then
+// "finished" or "error").
+//
+// RF-1.2 parallel path: when every call is spawn_subagent and there are at
+// least two, they run through the bounded worker pool in scheduler.go
+// (agent.max_parallel_children). Each child branches to a distinct session
+// so they never share a SQLite write txn; their results are appended
+// serially after the join to avoid racing MAX(seq) on the parent session.
+// Mixed or non-spawn batches run sequentially (file/session safety), with
+// a halt check before each call.
+func (a *Agent) runToolCalls(ctx context.Context, sessionID string, calls []llm.ToolCall, onEvent func(toolCallID, name, status, errMsg string)) ([]store.Message, int, error) {
+	var persisted []store.Message
+	ran := 0
+	persist := func(call llm.ToolCall, content string) error {
+		msg := &store.Message{
+			SessionID:  sessionID,
+			Role:       "tool",
+			Content:    content,
+			ToolCallID: call.ID,
+			Name:       call.Function.Name,
+		}
+		if _, _, err := a.store.AppendMessage(ctx, msg); err != nil {
+			return fmt.Errorf("append tool result: %w", err)
+		}
+		persisted = append(persisted, *msg)
+		return nil
+	}
+	// Tools report most failures (unknown tool, bad args, permission
+	// denial) as Result{Content: "ERROR: ..."} with a nil error; both
+	// shapes count as "error" for observers.
+	finished := func(call llm.ToolCall, content string) {
+		if onEvent == nil {
+			return
+		}
+		if strings.HasPrefix(content, "ERROR: ") {
+			onEvent(call.ID, call.Function.Name, "error", content)
+		} else {
+			onEvent(call.ID, call.Function.Name, "finished", "")
+		}
+	}
+
+	allSpawn := len(calls) >= 2
+	for _, tc := range calls {
+		if tc.Function.Name != "spawn_subagent" {
+			allSpawn = false
+			break
+		}
+	}
+
+	if allSpawn {
+		if err := a.haltCheck(ctx, sessionID); err != nil {
+			return persisted, ran, err
+		}
+		// executeToolCallsParallel has no per-child progress hook of its
+		// own, so "started" fires for the whole batch up front.
+		if onEvent != nil {
+			for _, tc := range calls {
+				onEvent(tc.ID, tc.Function.Name, "started", "")
+			}
+		}
+		for _, out := range a.executeToolCallsParallel(ctx, sessionID, calls) {
+			ran++
+			finished(out.call, out.result.Content)
+			if err := persist(out.call, out.result.Content); err != nil {
+				return persisted, ran, err
+			}
+		}
+		return persisted, ran, nil
+	}
+
+	for _, tc := range calls {
+		if err := a.haltCheck(ctx, sessionID); err != nil {
+			return persisted, ran, err
+		}
+
+		var args map[string]any
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			args = map[string]any{"_error": "invalid arguments: " + err.Error()}
+		}
+
+		if onEvent != nil {
+			onEvent(tc.ID, tc.Function.Name, "started", "")
+		}
+		// toolsReg.Execute handles perms check + execution + fencing +
+		// redaction. RF-1.3: the parent session ID rides on ctx so
+		// spawn_subagent can branch without a model-supplied ID.
+		toolResult, err := a.toolsReg.Execute(tools.WithSessionID(ctx, sessionID), tc.Function.Name, args)
+		if err != nil {
+			toolResult = tools.Result{Content: "ERROR: " + err.Error()}
+		}
+		finished(tc, toolResult.Content)
+		ran++
+		if err := persist(tc, toolResult.Content); err != nil {
+			return persisted, ran, err
+		}
+	}
+	return persisted, ran, nil
+}
+
+// haltCheck returns an error when the session is halted (emergency stop)
+// or can't be read, so tool execution stops before the next call.
+func (a *Agent) haltCheck(ctx context.Context, sessionID string) error {
+	session, err := a.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("get session during tool execution: %w", err)
+	}
+	if halted, _ := session.Metadata["halted"].(bool); halted {
+		reason, _ := session.Metadata["halt_reason"].(string)
+		return fmt.Errorf("session halted during tool execution: %s", reason)
+	}
+	return nil
 }
 
 // callLLMStreamWithFailover wraps callLLMStream with the same sticky+cooldown
