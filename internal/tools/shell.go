@@ -162,13 +162,10 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 		timedOut = true
 	}
 
-	// Truncate output to 50KB
-	const maxOutput = 50 * 1024
-	truncated := false
-	if len(output) > maxOutput {
-		output = output[:maxOutput]
-		truncated = true
-	}
+	// Cap what reaches the model's context: first ShellHeadBytes and last
+	// ShellTailBytes, rune-aligned (see outputcap.go).
+	outputBytes := len(output)
+	output, truncated := headTail(output, ShellHeadBytes, ShellTailBytes)
 
 	exitCode := 0
 	if err != nil {
@@ -183,9 +180,10 @@ func (t *shellExecTool) Execute(ctx context.Context, req perms.Request) (Result,
 	}
 
 	metadata := map[string]any{
-		"exit_code":   exitCode,
-		"duration_ms": elapsedMs,
-		"truncated":   truncated,
+		"exit_code":    exitCode,
+		"duration_ms":  elapsedMs,
+		"truncated":    truncated,
+		"output_bytes": outputBytes,
 	}
 	if isolated {
 		metadata["isolated"] = true

@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // defaultSummaryChars is the historical per-message summary cap used when
@@ -164,7 +165,13 @@ func (c *Compactor) createSummary(turns []Turn) string {
 		// Truncate content for summary
 		content := t.Content
 		if len(content) > c.summaryChars {
-			content = content[:c.summaryChars] + "..."
+			// Cut on a rune boundary: a byte cut split multi-byte
+			// characters (any accented Spanish text) into invalid UTF-8.
+			cut := c.summaryChars
+			for cut > 0 && !utf8.RuneStart(content[cut]) {
+				cut--
+			}
+			content = content[:cut] + "..."
 		}
 		parts = append(parts, t.Role+": "+content)
 	}

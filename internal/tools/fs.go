@@ -6,8 +6,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/eduardosanmartin/forge/internal/pathmatch"
 	"github.com/eduardosanmartin/forge/internal/perms"
@@ -20,7 +24,7 @@ func newFsReadTool() *fsReadTool { return &fsReadTool{} }
 
 func (t *fsReadTool) Name() string { return "fs_read" }
 func (t *fsReadTool) Description() string {
-	return "Read a file from the filesystem. Supports offset/limit for paging. Binary files are returned as base64."
+	return "Read a file from the filesystem, at most 16 KB per call (offset/limit page through larger files; the result says where to continue). Binary files are returned as base64."
 }
 
 func (t *fsReadTool) JSONSchema() map[string]any {
@@ -37,7 +41,7 @@ func (t *fsReadTool) JSONSchema() map[string]any {
 			},
 			"limit": map[string]any{
 				"type":        "number",
-				"description": "Maximum bytes to read (default: entire file from offset)",
+				"description": "Maximum bytes to read (default and maximum 16384)",
 			},
 		},
 		"required": []string{"path"},
@@ -57,31 +61,57 @@ func (t *fsReadTool) Execute(ctx context.Context, req perms.Request) (Result, er
 		absPath = path
 	}
 
-	// Read the file
-	data, err := os.ReadFile(absPath)
+	// Page size: the caller's limit, capped at DefaultReadLimitBytes so a
+	// single result can't flood the context window (RNF-2.5).
+	capped := limit <= 0 || limit > DefaultReadLimitBytes
+	if capped {
+		limit = DefaultReadLimitBytes
+	}
+
+	f, err := os.Open(absPath)
 	if err != nil {
 		return Result{}, err
 	}
-
-	// Apply offset
-	if offset > 0 {
-		if offset >= int64(len(data)) {
-			data = []byte{}
-		} else {
-			data = data[offset:]
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return Result{}, err
+	}
+	total := info.Size()
+	if offset < 0 {
+		offset = 0
+	}
+	var data []byte
+	if offset < total {
+		want := total - offset
+		if want > limit {
+			want = limit
+		}
+		data = make([]byte, want)
+		n, rerr := f.ReadAt(data, offset)
+		if rerr != nil && n < len(data) && !errors.Is(rerr, io.EOF) {
+			return Result{}, rerr
+		}
+		data = data[:n]
+	}
+	// Don't split a UTF-8 character at the page end (unless that would
+	// leave nothing, e.g. genuinely binary data).
+	if end := offset + int64(len(data)); end < total && !utf8.Valid(data) {
+		for cut := 1; cut < utf8.UTFMax && cut < len(data); cut++ {
+			if utf8.Valid(data[:len(data)-cut]) {
+				data = data[:len(data)-cut]
+				break
+			}
 		}
 	}
-
-	// Apply limit (limit <= 0 means no limit)
-	if limit > 0 && int64(len(data)) > limit {
-		data = data[:limit]
-	}
+	next := offset + int64(len(data))
 
 	// Check if content is valid UTF-8
 	isBinary := !isValidUTF8(data)
 	var content string
 	metadata := make(map[string]any)
 	metadata["size"] = len(data)
+	metadata["file_size"] = total
 	metadata["offset"] = offset
 	if limit >= 0 {
 		metadata["limit"] = limit
@@ -95,6 +125,15 @@ func (t *fsReadTool) Execute(ctx context.Context, req perms.Request) (Result, er
 	} else {
 		content = string(data)
 		metadata["encoding"] = "utf8"
+	}
+	if next < total {
+		metadata["truncated"] = true
+		metadata["next_offset"] = next
+	}
+	if next < total && capped {
+		// Only when the cap (not the caller's own limit) cut the read: a
+		// caller paging explicitly already knows where it stopped.
+		content += fmt.Sprintf("\n\n[truncated: showed bytes %d-%d of %d; call fs_read with offset=%d to continue]", offset, next, total, next)
 	}
 
 	return Result{Content: content, Metadata: metadata}, nil

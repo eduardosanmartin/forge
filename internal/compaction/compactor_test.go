@@ -3,6 +3,7 @@ package compaction
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestCompactorBasic(t *testing.T) {
@@ -159,5 +160,22 @@ func TestCompactorSummaryCharsPerMessage(t *testing.T) {
 	}
 	if !summaryFound {
 		t.Fatalf("expected a summary turn, got none")
+	}
+}
+
+func TestCompactSummaryNeverSplitsRunes(t *testing.T) {
+	c := NewCompactor(Config{SummaryCharsPerMessage: 5})
+	var turns []Turn
+	for i := 0; i < 40; i++ {
+		turns = append(turns, Turn{Role: "user", Content: "ñññññññññññ acción", Tokens: 100})
+	}
+	out, _, err := c.Compact(turns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tr := range out {
+		if !utf8.ValidString(tr.Content) {
+			t.Fatalf("summary contains invalid UTF-8: %q", tr.Content)
+		}
 	}
 }
