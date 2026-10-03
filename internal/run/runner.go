@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eduardosanmartin/forge/internal/config"
 )
@@ -91,9 +91,12 @@ type Runner struct {
 	// Resume can hand the same session back to the executor and keep the
 	// conversational context tasks built up, instead of starting cold.
 	SessionID string
-	// WorkspaceRoot is the working directory for a task's mechanical
-	// done_criteria command (see checkDoneCriteria). "" = ".".
+	// WorkspaceRoot is the workspace the run operates on. "" = ".".
 	WorkspaceRoot string
+	// RunCommand executes mechanical done_criteria checks through the
+	// permission-gated shell path (see CommandRunner). Nil makes every
+	// "cmd:" check fail closed.
+	RunCommand CommandRunner
 	// Decompose, when true, calls Decomposer to populate Manifest.Tasks
 	// before the task loop starts (only when the manifest declares no
 	// explicit tasks — an already-authored task list is never overwritten).
@@ -327,16 +330,29 @@ const doneCriteriaCmdPrefix = "cmd:"
 // command must not silently eat the whole run's remaining budget.
 const doneCriteriaTimeout = 2 * time.Minute
 
+// CommandRunner runs one done_criteria program through the same
+// permission, OS-isolation, timeout and process-tree-kill path as the
+// agent's own shell_exec tool, so an LLM-proposed check (decomposition
+// writes done_criteria) can never do more than the agent itself is allowed
+// to. denied is non-empty when the policy refused the command — the
+// program never ran. err reports an infrastructure failure (not a non-zero
+// exit, which is exitCode).
+type CommandRunner func(ctx context.Context, program string, args []string) (output string, exitCode int, denied string, err error)
+
 // checkDoneCriteria mechanically verifies task.DoneCriteria when it starts
 // with "cmd:" (after trimming whitespace); any other value (including
 // empty) is purely descriptive and always passes — this is opt-in, not a
-// behavior change for every existing manifest. The command runs directly
-// via exec (no shell): split on whitespace like shell_exec's command+args,
-// so no pipes/redirects/quoting — keep it to a single invocation such as
-// "cmd: go test ./internal/foo/...". Exit 0 is success; anything else
-// (non-zero exit, timeout, command not found) is a task failure, returned
-// the same way an executor error is so it counts against
-// max_retries_per_task instead of silently trusting the model.
+// behavior change for every existing manifest. The command is split on
+// whitespace like shell_exec's command+args (no shell: no pipes/redirects/
+// quoting — keep it to a single invocation such as
+// "cmd: go test ./internal/foo/...") and executed via r.RunCommand, never
+// via a raw exec: done_criteria text comes from the manifest or from the
+// LLM decomposer, so it is untrusted input and must pass the permission
+// policy (RNF-4.1) and OS isolation (RNF-4.7). With no RunCommand wired the
+// check fails closed. Exit 0 is success; anything else (denial, non-zero
+// exit, timeout, command not found) is a task failure, returned the same
+// way an executor error is so it counts against max_retries_per_task
+// instead of silently trusting the model.
 func (r *Runner) checkDoneCriteria(ctx context.Context, task Task) error {
 	trimmed := strings.TrimSpace(task.DoneCriteria)
 	cmdLine, ok := strings.CutPrefix(trimmed, doneCriteriaCmdPrefix)
@@ -359,26 +375,36 @@ func (r *Runner) checkDoneCriteria(ctx context.Context, task Task) error {
 			return fmt.Errorf("task %s: done_criteria %q contains a shell operator (%q) — done_criteria runs as a single direct program invocation, not through a shell; use one plain command or split into multiple tasks", task.ID, task.DoneCriteria, tok)
 		}
 	}
-
-	root := r.WorkspaceRoot
-	if root == "" {
-		root = "."
+	if r.RunCommand == nil {
+		return fmt.Errorf("task %s: done_criteria %q cannot be verified: no permission-gated command runner is wired (refusing to execute it unchecked)", task.ID, cmdLine)
 	}
+
 	checkCtx, cancel := context.WithTimeout(ctx, doneCriteriaTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(checkCtx, fields[0], fields[1:]...)
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		const maxOutput = 2000
-		outStr := string(out)
-		if len(outStr) > maxOutput {
-			outStr = outStr[:maxOutput] + "...[truncated]"
-		}
-		return fmt.Errorf("task %s: done_criteria check %q failed: %w\noutput:\n%s", task.ID, cmdLine, err, outStr)
+	out, exitCode, denied, err := r.RunCommand(checkCtx, fields[0], fields[1:])
+	switch {
+	case denied != "":
+		return fmt.Errorf("task %s: done_criteria check %q denied by permission policy (%s) — allow %q in permissions.shell.allow or use a different check", task.ID, cmdLine, denied, fields[0])
+	case err != nil:
+		return fmt.Errorf("task %s: done_criteria check %q failed: %w", task.ID, cmdLine, err)
+	case exitCode != 0:
+		return fmt.Errorf("task %s: done_criteria check %q failed: exit code %d\noutput:\n%s", task.ID, cmdLine, exitCode, tailForReport(out, 2000))
 	}
 	return nil
+}
+
+// tailForReport keeps the LAST max bytes of s (compilers and test runners
+// print the actual failure at the end), cut on a UTF-8 boundary.
+func tailForReport(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := len(s) - max
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return "[truncated]..." + s[cut:]
 }
 
 // Run executes the manifest task loop from a cold start. It is the entrypoint

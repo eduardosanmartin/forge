@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,10 +198,11 @@ func (m *SessionManager) ResumeRun(ctx context.Context, mani *run.Manifest, stat
 // terminal, since no CLI process owns this run's stdout.
 func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, sessionID string) *run.Runner {
 	r := &run.Runner{
-		Manifest:  mani,
-		Config:    m.cfg,
-		StateDir:  stateDir,
-		SessionID: sessionID,
+		Manifest:   mani,
+		Config:     m.cfg,
+		StateDir:   stateDir,
+		SessionID:  sessionID,
+		RunCommand: m.doneCriteriaCommandRunner(),
 	}
 	if mani.Mode != run.ModeDryRun {
 		r.Executor = m.manifestExecutor(sessionID)
@@ -645,4 +647,43 @@ func (m *SessionManager) CancelRun(id string) (RunResult, error) {
 		cancel()
 	}
 	return exec.snapshot(), nil
+}
+
+// doneCriteriaCommandRunner adapts the tools registry's shell_exec into a
+// run.CommandRunner, so a manifest task's "cmd:" done_criteria passes the
+// exact same permission policy, OS isolation, timeout and process-tree
+// kill as a shell command the agent itself proposes. Returns nil when the
+// manager has no tools registry (the runner then fails such checks closed).
+func (m *SessionManager) doneCriteriaCommandRunner() run.CommandRunner {
+	if m.toolsReg == nil {
+		return nil
+	}
+	return func(ctx context.Context, program string, args []string) (string, int, string, error) {
+		argv := make([]any, len(args))
+		for i, a := range args {
+			argv[i] = a
+		}
+		res, err := m.toolsReg.Execute(ctx, "shell_exec", map[string]any{
+			"command": program,
+			"args":    argv,
+		})
+		if err != nil {
+			return "", -1, "", err
+		}
+		if denied, _ := res.Metadata["denied"].(bool); denied {
+			rule, _ := res.Metadata["rule"].(string)
+			if rule == "" {
+				rule = strings.TrimSpace(res.Content)
+			}
+			return res.Content, -1, rule, nil
+		}
+		code, ok := res.Metadata["exit_code"].(int)
+		if !ok {
+			// No exit code means the registry reported a validation or
+			// execution error as content ("ERROR: ...") instead of running
+			// the program — surface it rather than treating it as success.
+			return res.Content, -1, "", fmt.Errorf("%s", strings.TrimSpace(res.Content))
+		}
+		return res.Content, code, "", nil
+	}
 }

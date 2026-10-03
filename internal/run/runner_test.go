@@ -972,14 +972,30 @@ func TestRunnerDryRunPreviewsDecomposedTaskCount(t *testing.T) {
 
 // --- mechanical done_criteria verification (5.3: don't trust the model's own claim of success) ---
 
+// fakeCommandRunner stands in for the daemon's permission-gated shell_exec
+// adapter: it records the call and returns a canned outcome.
+type fakeCommandRunner struct {
+	calls    [][]string
+	output   string
+	exitCode int
+	denied   string
+}
+
+func (f *fakeCommandRunner) run(_ context.Context, program string, args []string) (string, int, string, error) {
+	f.calls = append(f.calls, append([]string{program}, args...))
+	return f.output, f.exitCode, f.denied, nil
+}
+
 func TestRunnerDoneCriteriaCmdSuccessCompletesTask(t *testing.T) {
 	m := testManifest(ModeCheckpoint)
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go version"}}
 	cfg := config.Defaults()
+	fake := &fakeCommandRunner{}
 	r := &Runner{
 		Manifest:     m,
 		Config:       cfg,
 		Executor:     okExecutor(5, 1),
+		RunCommand:   fake.run,
 		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return true, nil },
 	}
 	rep, err := r.Run(context.Background())
@@ -989,6 +1005,9 @@ func TestRunnerDoneCriteriaCmdSuccessCompletesTask(t *testing.T) {
 	if rep.Status != StatusCompleted {
 		t.Fatalf("status = %q, want completed", rep.Status)
 	}
+	if len(fake.calls) != 1 || strings.Join(fake.calls[0], " ") != "go version" {
+		t.Fatalf("command runner calls = %v, want exactly [go version]", fake.calls)
+	}
 }
 
 func TestRunnerDoneCriteriaCmdFailureExhaustsRetries(t *testing.T) {
@@ -996,10 +1015,12 @@ func TestRunnerDoneCriteriaCmdFailureExhaustsRetries(t *testing.T) {
 	m.Budget.MaxRetriesPerTask = 1
 	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go __not_a_real_subcommand__"}}
 	cfg := config.Defaults()
+	fake := &fakeCommandRunner{exitCode: 2, output: "unknown command"}
 	r := &Runner{
-		Manifest: m,
-		Config:   cfg,
-		Executor: okExecutor(5, 1), // the agent turn itself "succeeds" — only the mechanical check fails
+		Manifest:   m,
+		Config:     cfg,
+		RunCommand: fake.run,
+		Executor:   okExecutor(5, 1), // the agent turn itself "succeeds" — only the mechanical check fails
 		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
 			return cp.ID != "implicit-retries-exhausted", nil
 		},
@@ -1026,6 +1047,50 @@ func TestRunnerDoneCriteriaRejectsShellOperators(t *testing.T) {
 	_, err := r.Run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "shell operator") {
 		t.Fatalf("expected a clear shell-operator rejection, got %v", err)
+	}
+}
+
+// C1 regression (2026-10-02 review): an LLM-proposed done_criteria used to
+// run through a raw exec, bypassing permissions and OS isolation. Without a
+// permission-gated runner the check must fail closed, never execute.
+func TestRunnerDoneCriteriaWithoutCommandRunnerFailsClosed(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Budget.MaxRetriesPerTask = 0
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go version"}}
+	r := &Runner{
+		Manifest: m,
+		Config:   config.Defaults(),
+		Executor: okExecutor(5, 1),
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) {
+			return cp.ID != "implicit-retries-exhausted", nil
+		},
+	}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "paused") {
+		t.Fatalf("expected the unverifiable check to fail the task, got %v", err)
+	}
+}
+
+func TestRunnerDoneCriteriaDeniedByPolicyFailsTask(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: powershell -EncodedCommand AAAA"}}
+	fake := &fakeCommandRunner{denied: "default-deny:shell.exec"}
+	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
+	err := r.checkDoneCriteria(context.Background(), m.Tasks[0])
+	if err == nil || !strings.Contains(err.Error(), "denied by permission policy") || !strings.Contains(err.Error(), "default-deny:shell.exec") {
+		t.Fatalf("expected a policy denial naming the rule, got %v", err)
+	}
+}
+
+func TestRunnerDoneCriteriaFailureReportsOutputTail(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Tasks = []Task{{ID: "t1", Goal: "task one", DoneCriteria: "cmd: go test ./..."}}
+	out := strings.Repeat("ok noise line\n", 400) + "FAIL: TestTheRealProblem"
+	fake := &fakeCommandRunner{exitCode: 1, output: out}
+	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(5, 1), RunCommand: fake.run}
+	err := r.checkDoneCriteria(context.Background(), m.Tasks[0])
+	if err == nil || !strings.Contains(err.Error(), "FAIL: TestTheRealProblem") {
+		t.Fatalf("expected the END of the output (where the failure is) in the error, got %v", err)
 	}
 }
 
