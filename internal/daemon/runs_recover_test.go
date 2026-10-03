@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -88,5 +90,24 @@ func TestCancelRecoveredRun(t *testing.T) {
 	}
 	if res, _ := m.GetRun("c"); res.Status != RunCanceled {
 		t.Fatalf("status = %s, want canceled", res.Status)
+	}
+}
+
+// RF-7.3: the GUI shows the diff of each task's commit.
+func TestTaskDiffFromPersistedCommits(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	writeRunState(t, dir, run.RunState{RunID: "d", Status: run.StatusCompleted, StartedAt: now, UpdatedAt: now,
+		TaskCommits: map[string]string{"t1": "0123456789abcdef"}})
+	m := newTestSessionManagerForRuns()
+	res, err := m.TaskDiff(context.Background(), "d", "t1", dir)
+	if err != nil {
+		t.Fatalf("TaskDiff: %v", err)
+	}
+	if res.Commit != "0123456789abcdef" || !strings.Contains(res.Diff, "+added line") {
+		t.Fatalf("diff = %+v", res)
+	}
+	if _, err := m.TaskDiff(context.Background(), "d", "t2", dir); err == nil || !strings.Contains(err.Error(), "no commit") {
+		t.Fatalf("a task without a commit must explain why, got %v", err)
 	}
 }

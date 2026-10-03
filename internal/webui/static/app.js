@@ -823,6 +823,142 @@ RESOURCE_RENDERERS.skills = (root) => renderToggleableList(root, {
 
 // ------------------------------------------------------------ resources: jobs ---
 
+// RF-7.3: autonomous runs (run.*) — status, pending checkpoints, and the
+// diff of each task's commit (RNF-8.4) via run.task_diff.
+RESOURCE_RENDERERS.runs = (root) => {
+  const h = document.createElement("div");
+  h.className = "res-h";
+  h.textContent = "Autonomous runs";
+  root.appendChild(h);
+  const loading = document.createElement("div");
+  loading.className = "res-empty";
+  loading.textContent = "Loading…";
+  root.appendChild(loading);
+
+  RPC.call("run.list", {}).then((res) => {
+    loading.remove();
+    const runs = (res.runs || []).sort((a, b) => b.updated_at - a.updated_at);
+    if (runs.length === 0) {
+      const e = document.createElement("div");
+      e.className = "res-empty";
+      e.textContent = "No runs. Start one with: forge run --manifest run.json";
+      root.appendChild(e);
+      return;
+    }
+    for (const r of runs) root.appendChild(renderRunCard(r));
+  }).catch((e) => {
+    loading.textContent = "Could not load runs: " + e.message;
+  });
+};
+
+function renderRunCard(r) {
+  const card = document.createElement("div");
+  card.className = "run-card";
+  const head = document.createElement("div");
+  head.className = "run-head";
+  head.innerHTML = `<span class="name">${escapeHtml(r.id)}</span>`;
+  const pill = document.createElement("span");
+  pill.className = "status-pill " + (r.status || "").toLowerCase();
+  pill.textContent = r.status;
+  head.appendChild(pill);
+  card.appendChild(head);
+
+  const rep = r.report || {};
+  const sub = document.createElement("div");
+  sub.className = "run-sub";
+  const done = (rep.completed_tasks || []).length;
+  const parts = [
+    rep.total_tasks ? `${done}/${rep.total_tasks} tasks` : (r.current_task ? `task ${r.current_task}` : ""),
+    `${r.tokens_used || 0} tokens`,
+    rep.work_branch ? `branch ${rep.work_branch}` : "",
+    fmtRelative(r.updated_at),
+  ].filter(Boolean);
+  sub.textContent = parts.join(" · ");
+  card.appendChild(sub);
+
+  const awaiting = r.pending_checkpoint &&
+    (r.status === "paused_checkpoint" || r.status === "paused_recovered");
+  if (awaiting || r.status === "interrupted") {
+    const cp = document.createElement("div");
+    cp.className = "run-cp";
+    cp.textContent = r.status === "interrupted"
+      ? "Interrupted by a daemon restart — resume or cancel."
+      : `Checkpoint pending: ${r.pending_checkpoint.id} (${r.pending_checkpoint.trigger})`;
+    card.appendChild(cp);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "run-actions";
+  const act = (label, fn) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.onclick = async () => {
+      b.disabled = true;
+      try { await fn(); } catch (e) { alert(label + " failed: " + e.message); }
+      renderResourceTab();
+    };
+    actions.appendChild(b);
+  };
+  if (awaiting || r.status === "interrupted") {
+    act(r.status === "interrupted" ? "Resume" : "Approve", () => RPC.call("run.approve_checkpoint", { run_id: r.id, approved: true }));
+    act("Decline", () => RPC.call("run.approve_checkpoint", { run_id: r.id, approved: false }));
+  }
+  if (["running", "paused_checkpoint", "interrupted", "paused_recovered"].includes(r.status)) {
+    act("Cancel", () => RPC.call("run.cancel", { run_id: r.id }));
+  }
+  if (actions.childElementCount) card.appendChild(actions);
+
+  const commits = rep.task_commits || {};
+  for (const taskId of Object.keys(commits).sort()) {
+    const row = document.createElement("div");
+    row.className = "task-row";
+    row.innerHTML = `<span>${escapeHtml(taskId)} <code>${escapeHtml(commits[taskId].slice(0, 10))}</code></span>`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Diff";
+    let pre = null;
+    btn.onclick = async () => {
+      if (pre) { pre.remove(); pre = null; return; }
+      btn.disabled = true;
+      try {
+        const res = await RPC.call("run.task_diff", { run_id: r.id, task_id: taskId });
+        pre = renderDiff(res.diff + (res.truncated ? "\n… (truncated)" : ""));
+        row.after(pre);
+      } catch (e) {
+        alert("Diff failed: " + e.message);
+      }
+      btn.disabled = false;
+    };
+    row.appendChild(btn);
+    card.appendChild(row);
+  }
+  for (const note of rep.git_notes || []) {
+    const n = document.createElement("div");
+    n.className = "run-sub";
+    n.textContent = note;
+    card.appendChild(n);
+  }
+  return card;
+}
+
+// renderDiff colors a unified diff line by line (text only — never HTML
+// from the diff itself).
+function renderDiff(text) {
+  const pre = document.createElement("pre");
+  pre.className = "diff";
+  for (const line of String(text).split("\n")) {
+    const span = document.createElement("span");
+    if (line.startsWith("+") && !line.startsWith("+++")) span.className = "add";
+    else if (line.startsWith("-") && !line.startsWith("---")) span.className = "del";
+    else if (line.startsWith("@@")) span.className = "hunk";
+    else if (/^(diff --git|index |commit |\+\+\+|---)/.test(line)) span.className = "meta";
+    span.textContent = line + "\n";
+    pre.appendChild(span);
+  }
+  return pre;
+}
+
 RESOURCE_RENDERERS.jobs = (root) => {
   const h = document.createElement("div");
   h.className = "res-h";
@@ -1042,6 +1178,11 @@ function wireEvents() {
     }
     if (method === "permission.resolved.event") {
       dropPermission(params && params.request_id);
+      return;
+    }
+    if ((method === "run.checkpoint.event" || method === "run.progress.event") &&
+        state.resourcesOpen && state.resourcesTab === "runs") {
+      renderResourceTab();
       return;
     }
     if (method === "session.event") {

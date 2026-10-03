@@ -402,6 +402,8 @@ func (m *testToolsRegistry) Execute(ctx context.Context, name string, args map[s
 			out = "main\n"
 		case "log":
 			out = "0123456789abcdef\n"
+		case "show":
+			out = "commit 0123\n\ndiff --git a/x.go b/x.go\n+added line\n"
 		}
 		return tools.Result{Content: tools.Fence("git", out), Metadata: map[string]any{"exit_code": 0}}, nil
 	}

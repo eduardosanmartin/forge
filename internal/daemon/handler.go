@@ -57,6 +57,8 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 		return h.handlePermissionRespond(req)
 	case MethodPermissionPending:
 		return h.handlePermissionPending(req)
+	case MethodRunTaskDiff:
+		return h.handleRunTaskDiff(ctx, req)
 	case MethodCreateSession:
 		return h.handleCreateSession(ctx, req)
 	case MethodGetSession:
@@ -1251,6 +1253,24 @@ func (h *Handler) handlePermissionPending(req *JSONRPCRequest) *JSONRPCResponse 
 	res := PermissionPendingResult{Requests: []PermissionRequestPayload{}}
 	if h.permissions != nil {
 		res.Requests = h.permissions.Pending()
+	}
+	return h.resultResponse(req.ID, res)
+}
+
+func (h *Handler) handleRunTaskDiff(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse {
+	var params RunTaskDiffParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if params.RunID == "" || params.TaskID == "" {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "run_id and task_id are required", nil)
+	}
+	res, err := h.mgr.TaskDiff(ctx, params.RunID, params.TaskID, params.StateDir)
+	if err != nil {
+		if errors.Is(err, ErrRunNotFound) {
+			return NewErrorResponse(req.ID, ErrCodeRunNotFound, err.Error(), nil)
+		}
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, err.Error(), nil)
 	}
 	return h.resultResponse(req.ID, res)
 }
