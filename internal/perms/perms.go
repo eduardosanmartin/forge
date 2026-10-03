@@ -87,6 +87,10 @@ type Request struct {
 // Decision is the outcome of one permission check.
 type Decision struct {
 	Allowed bool
+	// Ask is set (with Allowed false) when no allow rule matched but an
+	// "ask" rule did: the operation may run if a human approves it now
+	// (Registry.Execute asks through its Asker). Floors never ask.
+	Ask bool
 	// Rule names what decided: "malformed-request", "git-floor",
 	// "floor:custom", "custom-write-floor:<tool>", "default-deny:<kind>",
 	// or an allowing rule "<kind>:<pattern>" (fs), "<kind>:<basename>"
@@ -101,6 +105,9 @@ type Decision struct {
 type FSPermissions struct {
 	Read  []string `json:"read"`
 	Write []string `json:"write"`
+	// AskWrite lists path patterns whose writes run only with live human
+	// approval (same pattern syntax as Write).
+	AskWrite []string `json:"ask_write,omitempty"`
 }
 
 // ShellPermissions allows shell executables by base name (case-insensitive).
@@ -111,6 +118,9 @@ type FSPermissions struct {
 // intentional and was explicitly requested by the owner.
 type ShellPermissions struct {
 	Allow []string `json:"allow"`
+	// Ask lists commands (same syntax as Allow, argument patterns
+	// included) that run only with live human approval.
+	Ask []string `json:"ask,omitempty"`
 }
 
 // GitPermissions allows git subcommands (lowercase convention; uppercase is
@@ -118,6 +128,10 @@ type ShellPermissions struct {
 // regardless of this list.
 type GitPermissions struct {
 	Allow []string `json:"allow"`
+	// Ask lists subcommands that run only with live human approval.
+	// The git floor still applies first: destructive operations are
+	// denied, never asked.
+	Ask []string `json:"ask,omitempty"`
 }
 
 // GitHubPermissions allows the fixed read-only github tool subcommands
@@ -210,8 +224,11 @@ func splitPatterns(patterns []string) patternLists {
 // Engine is an immutable permission evaluator: construct once with New,
 // then call Check from any number of goroutines.
 type Engine struct {
-	fsRead  patternLists
-	fsWrite patternLists
+	fsRead     patternLists
+	fsWrite    patternLists
+	fsAskWrite patternLists
+	shellAsk   []string
+	gitAsk     []string
 
 	shellAllow  []string
 	gitAllow    []string
@@ -241,6 +258,15 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	if err := validateShellAllowList("permissions.shell.allow", policy.Shell.Allow); err != nil {
 		return nil, err
 	}
+	if err := validateShellAllowList("permissions.shell.ask", policy.Shell.Ask); err != nil {
+		return nil, err
+	}
+	if err := validatePatternList("permissions.fs.ask_write", policy.FS.AskWrite); err != nil {
+		return nil, err
+	}
+	if err := validateAllowList("permissions.git.ask", policy.Git.Ask); err != nil {
+		return nil, err
+	}
 	if err := validateAllowList("permissions.git.allow", policy.Git.Allow); err != nil {
 		return nil, err
 	}
@@ -256,6 +282,9 @@ func New(policy PermissionsPolicy, workspaceRoot string, logger *slog.Logger) (*
 	return &Engine{
 		fsRead:        splitPatterns(policy.FS.Read),
 		fsWrite:       splitPatterns(policy.FS.Write),
+		fsAskWrite:    splitPatterns(policy.FS.AskWrite),
+		shellAsk:      policy.Shell.Ask,
+		gitAsk:        policy.Git.Ask,
 		shellAllow:    policy.Shell.Allow,
 		gitAllow:      policy.Git.Allow,
 		githubAllow:   policy.GitHub.Allow,
@@ -382,42 +411,20 @@ func (e *Engine) evaluate(req Request) Decision {
 		if pat, ok := e.matchFS(req.Path, e.fsWrite); ok {
 			return Decision{Allowed: true, Rule: string(KindFsWrite) + ":" + pat}
 		}
+		if pat, ok := e.matchFS(req.Path, e.fsAskWrite); ok {
+			return Decision{Ask: true, Rule: "ask:" + string(KindFsWrite) + ":" + pat}
+		}
 	case KindShell:
 		// Shell floor first, like the git floor: no allow entry can
 		// authorize what it forbids.
 		if d, floored := e.shellFloor(req); floored {
 			return d
 		}
-		base := commandBase(req.Command)
-		argLine := strings.Join(req.Args, " ")
-		for _, allowed := range e.shellAllow {
-			// An entry may carry an argument pattern after the program
-			// ("go test *", "npm run lint"): the program part matches as
-			// below, and the joined argument line must then match the
-			// pattern ("*" = any run of characters, "?" = one). An entry
-			// without one keeps its original meaning: any arguments.
-			cmdPat, argPat, hasArgPat := splitShellEntry(allowed)
-			// Base-name comparison is case-insensitive on ALL platforms:
-			// Windows filenames are case-preserving-insensitive and POSIX
-			// builds prefer predictability over pedantry here. When the
-			// program part contains glob meta (*, ?, [...]) it is matched as
-			// a case-insensitive glob against the base name; "*" alone thus
-			// matches any executable and effectively disables deny-by-default
-			// for shell (owner explicitly requested this escape hatch).
-			// A program part with a path separator ("./scripts/check.sh")
-			// names that exact program path, never a base name.
-			var cmdOK bool
-			if strings.ContainsAny(cmdPat, `/\`) {
-				cmdOK = strings.EqualFold(normalizeProgramPath(cmdPat), normalizeProgramPath(req.Command))
-			} else if containsShellGlobMeta(cmdPat) {
-				cmdOK = shellGlobMatches(cmdPat, base)
-			} else {
-				cmdOK = strings.EqualFold(base, cmdPat)
-			}
-			if !cmdOK || (hasArgPat && !wildcardMatch(argPat, argLine)) {
-				continue
-			}
-			return Decision{Allowed: true, Rule: string(KindShell) + ":" + allowed}
+		if entry, ok := shellListMatch(e.shellAllow, req); ok {
+			return Decision{Allowed: true, Rule: string(KindShell) + ":" + entry}
+		}
+		if entry, ok := shellListMatch(e.shellAsk, req); ok {
+			return Decision{Ask: true, Rule: "ask:" + string(KindShell) + ":" + entry}
 		}
 	case KindGit:
 		// Floor first: no configuration can authorize what it forbids.
@@ -432,6 +439,11 @@ func (e *Engine) evaluate(req Request) Decision {
 			// "COMMIT" is not a recognized spelling and stays unmatched.
 			if req.Subcommand == allowed {
 				return Decision{Allowed: true, Rule: string(KindGit) + ":" + allowed}
+			}
+		}
+		for _, ask := range e.gitAsk {
+			if req.Subcommand == ask {
+				return Decision{Ask: true, Rule: "ask:" + string(KindGit) + ":" + ask}
 			}
 		}
 	case KindGitHub:
@@ -477,6 +489,39 @@ func (e *Engine) evaluate(req Request) Decision {
 // malformedRequest reports whether req is too incomplete to evaluate.
 // Unknown kinds are malformed rather than silently denied-with-a-rule, so
 // future kinds fail loudly during rollout.
+// shellListMatch reports the first entry of list matching a shell request.
+// An entry may carry an argument pattern after the program ("go test *",
+// "npm run lint"): the program part matches as below, and the joined
+// argument line must then match the pattern ("*" = any run of characters,
+// "?" = one). An entry without one keeps its original meaning: any
+// arguments. A program part with a path separator ("./scripts/check.sh")
+// names that exact program path, never a base name. Base-name comparison
+// is case-insensitive on ALL platforms: Windows filenames are
+// case-preserving-insensitive and POSIX builds prefer predictability over
+// pedantry here. When the program part contains glob meta (*, ?, [...]) it
+// is matched as a case-insensitive glob against the base name; "*" alone
+// thus matches any executable and effectively disables deny-by-default for
+// shell (owner explicitly requested this escape hatch).
+func shellListMatch(list []string, req Request) (string, bool) {
+	base := commandBase(req.Command)
+	argLine := strings.Join(req.Args, " ")
+	for _, entry := range list {
+		cmdPat, argPat, hasArgPat := splitShellEntry(entry)
+		var cmdOK bool
+		if strings.ContainsAny(cmdPat, `/\`) {
+			cmdOK = strings.EqualFold(normalizeProgramPath(cmdPat), normalizeProgramPath(req.Command))
+		} else if containsShellGlobMeta(cmdPat) {
+			cmdOK = shellGlobMatches(cmdPat, base)
+		} else {
+			cmdOK = strings.EqualFold(base, cmdPat)
+		}
+		if cmdOK && (!hasArgPat || wildcardMatch(argPat, argLine)) {
+			return entry, true
+		}
+	}
+	return "", false
+}
+
 func malformedRequest(req Request) bool {
 	switch req.Kind {
 	case KindFsRead, KindFsWrite:

@@ -192,14 +192,17 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Build permission engine - convert config.PermissionsPolicy to perms.PermissionsPolicy
 	permsPolicy := perms.PermissionsPolicy{
 		FS: perms.FSPermissions{
-			Read:  app.Config.Permissions.FS.Read,
-			Write: app.Config.Permissions.FS.Write,
+			Read:     app.Config.Permissions.FS.Read,
+			Write:    app.Config.Permissions.FS.Write,
+			AskWrite: app.Config.Permissions.FS.AskWrite,
 		},
 		Shell: perms.ShellPermissions{
 			Allow: app.Config.Permissions.Shell.Allow,
+			Ask:   app.Config.Permissions.Shell.Ask,
 		},
 		Git: perms.GitPermissions{
 			Allow: app.Config.Permissions.Git.Allow,
+			Ask:   app.Config.Permissions.Git.Ask,
 		},
 		GitHub: perms.GitHubPermissions{
 			Allow: app.Config.Permissions.GitHub.Allow,

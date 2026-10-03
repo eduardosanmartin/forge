@@ -1030,8 +1030,20 @@ function wireEvents() {
     else if (e.key.toLowerCase() === "r") { e.preventDefault(); toggleResources(); }
   });
 
-  RPC.onStatusChange(setStatus);
+  RPC.onStatusChange((connected) => {
+    setStatus(connected);
+    if (connected) loadPendingPermissions();
+  });
+  wirePermissions();
   RPC.onNotify((method, params) => {
+    if (method === "permission.request.event") {
+      enqueuePermission(params);
+      return;
+    }
+    if (method === "permission.resolved.event") {
+      dropPermission(params && params.request_id);
+      return;
+    }
     if (method === "session.event") {
       refreshSessions();
       return;
@@ -1041,6 +1053,64 @@ function wireEvents() {
       loadMessages().then(renderThread);
     }
   });
+}
+
+// ----------------------------------------------------- permission ask ---
+// A tool call matched a permissions.*.ask rule: the daemon holds it until
+// a client answers (first answer wins) or it times out (= deny).
+
+const permQueue = [];
+
+function enqueuePermission(req) {
+  if (!req || !req.request_id || permQueue.some((r) => r.request_id === req.request_id)) return;
+  permQueue.push(req);
+  renderPermission();
+}
+
+function dropPermission(id) {
+  const i = permQueue.findIndex((r) => r.request_id === id);
+  if (i >= 0) permQueue.splice(i, 1);
+  renderPermission();
+}
+
+function renderPermission() {
+  const overlay = document.getElementById("perm-overlay");
+  const req = permQueue[0];
+  if (!req) {
+    overlay.hidden = true;
+    return;
+  }
+  document.getElementById("perm-summary").textContent = req.summary || req.tool;
+  document.getElementById("perm-rule").textContent = req.rule || "";
+  document.getElementById("perm-count").textContent =
+    permQueue.length > 1 ? `${permQueue.length} pending` : (req.tool || "");
+  overlay.hidden = false;
+  overlay.querySelector(".perm-primary").focus();
+}
+
+function wirePermissions() {
+  for (const btn of document.querySelectorAll("#perm-dialog button[data-decision]")) {
+    btn.addEventListener("click", async () => {
+      const req = permQueue[0];
+      if (!req) return;
+      try {
+        await RPC.call("permission.respond", { request_id: req.request_id, decision: btn.dataset.decision });
+      } catch {
+        // Already answered elsewhere or expired: the resolved event (or
+        // the next pending refresh) clears it.
+      }
+      dropPermission(req.request_id);
+    });
+  }
+}
+
+async function loadPendingPermissions() {
+  try {
+    const res = await RPC.call("permission.pending");
+    for (const r of (res && res.requests) || []) enqueuePermission(r);
+  } catch {
+    // Older daemon without permission asking: nothing to show.
+  }
 }
 
 function init() {

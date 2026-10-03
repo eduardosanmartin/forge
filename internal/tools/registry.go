@@ -26,6 +26,7 @@ type Registry struct {
 	requireIso    bool     // refuse shell_exec when isolation is required but unavailable (Linux only)
 	mu            sync.RWMutex
 	router        *routing.ModelRouter
+	ask           askState // permission "ask" resolution (ask.go)
 }
 
 // New creates a new Registry with the given permission engine and workspace root.
@@ -160,8 +161,12 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	// req.Args remains the shell-only argv channel.
 	permsReq.Input = args
 
-	// 3. Check permissions
+	// 3. Check permissions. An "ask" decision becomes allowed only with a
+	// live human approval (or an earlier approval for this session).
 	decision := r.permsEngine.Check(permsReq)
+	if decision.Ask {
+		decision = r.resolveAsk(ctx, name, permsReq, decision)
+	}
 	if !decision.Allowed {
 		return Result{
 			Content: "DENIED: " + decision.Rule,

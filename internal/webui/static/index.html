@@ -18,6 +18,20 @@
     </form>
   </div>
 
+  <div id="perm-overlay" hidden>
+    <div id="perm-dialog" role="alertdialog" aria-labelledby="perm-title" aria-describedby="perm-summary">
+      <h2 id="perm-title">Permission requested</h2>
+      <p class="perm-dim">The agent wants to run an operation that needs your approval.</p>
+      <code id="perm-summary"></code>
+      <p class="perm-meta"><span id="perm-rule"></span> · <span id="perm-count"></span></p>
+      <div class="perm-actions">
+        <button type="button" data-decision="deny" class="perm-deny">Deny</button>
+        <button type="button" data-decision="allow_session">Allow for this session</button>
+        <button type="button" data-decision="allow_once" class="perm-primary">Allow once</button>
+      </div>
+    </div>
+  </div>
+
   <div id="app">
     <div id="topbar">
       <div class="topbar-left">

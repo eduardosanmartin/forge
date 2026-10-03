@@ -356,9 +356,10 @@ func (t *Transport) dispatchNotification(notif *JSONRPCNotification) {
 	for _, cc := range t.conns {
 		// Global notifications (empty sessionID) go to all clients
 		// Session-specific notifications go only to subscribed clients
-		if notif.Method == MethodEmergencyHalt || len(cc.subscriptions) == 0 || cc.subscriptions[notif.Method] {
+		global := notif.Method == MethodEmergencyHalt || notif.Method == MethodPermissionRequestEvent || notif.Method == MethodPermissionResolvedEvent
+		if global || len(cc.subscriptions) == 0 || cc.subscriptions[notif.Method] {
 			// For session-specific events, check subscription
-			if notif.Method != MethodEmergencyHalt && len(cc.subscriptions) > 0 {
+			if !global && len(cc.subscriptions) > 0 {
 				// Extract sessionID from notification params if possible
 				// For simplicity, broadcast to all subscribed clients for session events
 				select {
@@ -374,6 +375,14 @@ func (t *Transport) dispatchNotification(notif *JSONRPCNotification) {
 			}
 		}
 	}
+}
+
+// HasClients reports whether any client is connected (a permission "ask"
+// with nobody to ask is denied immediately instead of waiting).
+func (t *Transport) HasClients() bool {
+	t.connsMu.RLock()
+	defer t.connsMu.RUnlock()
+	return len(t.conns) > 0
 }
 
 // Subscribe adds a session subscription for a client.

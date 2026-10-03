@@ -76,6 +76,41 @@ a:hover { color: var(--accent-strong); }
 #login-form button:hover { background: var(--accent-strong); }
 .login-error { color: var(--error); font-size: 12px; }
 
+/* ----------------------------------------------------------- permission */
+
+#perm-overlay {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.45);
+  z-index: 60;
+  padding: 16px;
+}
+#perm-overlay[hidden] { display: none; }
+#perm-dialog {
+  width: 460px; max-width: 100%;
+  padding: 22px;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: var(--bg-elev);
+  display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.45);
+}
+#perm-dialog h2 { margin: 0; font-family: var(--font-display); font-size: 17px; }
+#perm-dialog .perm-dim, #perm-dialog .perm-meta { margin: 0; color: var(--dim); font-size: 12.5px; }
+#perm-summary {
+  display: block; white-space: pre-wrap; word-break: break-all;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 11px; font-size: 12.5px;
+}
+.perm-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.perm-actions button {
+  background: var(--bg); color: inherit; border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 11px; cursor: pointer;
+}
+.perm-actions button:hover { border-color: var(--accent); }
+.perm-actions .perm-primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+.perm-actions .perm-deny:hover { border-color: var(--error); color: var(--error); }
+
 /* ---------------------------------------------------------------- shell */
 
 #app {

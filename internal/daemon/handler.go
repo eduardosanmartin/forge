@@ -24,6 +24,9 @@ type Handler struct {
 	pluginMgr    *pluginwasm.Manager
 	skillMgr     *skill.Manager
 	bootstrapMgr *bootstrap.Manager
+	// permissions answers permission.respond / permission.pending; nil
+	// when the daemon has no tools registry to ask for.
+	permissions *permissionBroker
 }
 
 // NewHandler creates a new Handler. bootstrapMgr is built here (not passed
@@ -50,6 +53,10 @@ func (h *Handler) HandleRequest(ctx context.Context, req *JSONRPCRequest) *JSONR
 	}
 
 	switch req.Method {
+	case MethodPermissionRespond:
+		return h.handlePermissionRespond(req)
+	case MethodPermissionPending:
+		return h.handlePermissionPending(req)
 	case MethodCreateSession:
 		return h.handleCreateSession(ctx, req)
 	case MethodGetSession:
@@ -1224,4 +1231,26 @@ func (h *Handler) resultResponse(id *json.RawMessage, result any) *JSONRPCRespon
 		return NewErrorResponse(id, ErrCodeInternalError, "marshal result failed", err.Error())
 	}
 	return resp
+}
+
+func (h *Handler) handlePermissionRespond(req *JSONRPCRequest) *JSONRPCResponse {
+	if h.permissions == nil {
+		return NewErrorResponse(req.ID, ErrCodeInternalError, "permission asking is not enabled on this daemon", nil)
+	}
+	var params PermissionRespondParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, "invalid params", err.Error())
+	}
+	if err := h.permissions.Respond(params.RequestID, params.Decision); err != nil {
+		return NewErrorResponse(req.ID, ErrCodeInvalidParams, err.Error(), nil)
+	}
+	return h.resultResponse(req.ID, map[string]bool{"ok": true})
+}
+
+func (h *Handler) handlePermissionPending(req *JSONRPCRequest) *JSONRPCResponse {
+	res := PermissionPendingResult{Requests: []PermissionRequestPayload{}}
+	if h.permissions != nil {
+		res.Requests = h.permissions.Pending()
+	}
+	return h.resultResponse(req.ID, res)
 }

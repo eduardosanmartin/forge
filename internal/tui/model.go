@@ -82,6 +82,9 @@ type Model struct {
 
 	// Client abstraction for daemon calls (optional for tests).
 	client TUIClient
+	// permQueue holds permission requests (permissions.*.ask) waiting for
+	// an answer, oldest first; the first one is shown as a modal.
+	permQueue []daemon.PermissionRequestPayload
 
 	// Session state.
 	sessionID string
@@ -911,6 +914,51 @@ func (m Model) cmdRunApproveCheckpoint(runID string, approved bool) tea.Cmd {
 	}
 }
 
+// permissionResponder is implemented by clients that can answer
+// permission requests (the real ClientAdapter); test doubles without it
+// simply can't answer, and the daemon denies on timeout.
+type permissionResponder interface {
+	PermissionRespond(requestID, decision string) error
+}
+
+type permRespondMsg struct{ err error }
+
+func (m Model) cmdPermissionRespond(requestID, decision string) tea.Cmd {
+	pr, ok := m.client.(permissionResponder)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		return permRespondMsg{err: pr.PermissionRespond(requestID, decision)}
+	}
+}
+
+func (m *Model) dropPermission(requestID string) {
+	for i, p := range m.permQueue {
+		if p.RequestID == requestID {
+			m.permQueue = append(m.permQueue[:i], m.permQueue[i+1:]...)
+			return
+		}
+	}
+}
+
+// renderPermissionPrompt draws the modal for the oldest pending request.
+func (m Model) renderPermissionPrompt() string {
+	req := m.permQueue[0]
+	warn := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Warning)).Bold(true)
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color(m.palette.Dim))
+	var sb strings.Builder
+	sb.WriteString(warn.Render("⚠ permission requested") + "\n\n")
+	sb.WriteString(req.Summary + "\n")
+	sb.WriteString(dim.Render(req.Rule))
+	if n := len(m.permQueue); n > 1 {
+		sb.WriteString(dim.Render(fmt.Sprintf("  ·  %d pending", n)))
+	}
+	sb.WriteString("\n\n[y] allow once   [s] allow for this session   [n/esc] deny")
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(m.palette.Warning)).Background(lipgloss.Color(m.palette.BGElevated)).Width(m.width).Padding(0, 1)
+	return box.Render(sb.String())
+}
+
 func (m Model) cmdRunCancel(runID string) tea.Cmd {
 	if m.client == nil || runID == "" {
 		return nil
@@ -1542,6 +1590,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case permRespondMsg:
+		if msg.err != nil {
+			m.showError(msg.err)
+		}
+		return m, nil
+
 	case runCancelMsg:
 		if msg.err != nil {
 			m.showError(msg.err)
@@ -1592,6 +1646,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Any other key when rail panel visible? Let global handle but esc is priority.
 			// For simplicity, allow esc only; other keys close as well? Spec: Esc closes any panel.
 			// Keep rail panel until esc or toggle.
+		}
+		// A pending permission request (permissions.*.ask) is modal: it
+		// takes every key until answered — y once, s for the session,
+		// n or esc to deny. Unanswered, the daemon denies it on timeout.
+		if len(m.permQueue) > 0 {
+			req := m.permQueue[0]
+			decision := ""
+			switch msg.String() {
+			case "y":
+				decision = "allow_once"
+			case "s":
+				decision = "allow_session"
+			case "n", "esc":
+				decision = "deny"
+			}
+			if decision == "" {
+				return m, nil
+			}
+			m.dropPermission(req.RequestID)
+			return m, m.cmdPermissionRespond(req.RequestID, decision)
 		}
 		// Run panel (Fase 4) intercepts before help/sessions/model panels —
 		// y/n approve or decline a pending checkpoint, c cancels the run,
@@ -2188,6 +2262,27 @@ func (m *Model) handleDaemonEvent(notif daemon.JSONRPCNotification) tea.Cmd {
 		m.runID = payload.RunID
 		m.runPanelVisible = true
 		return m.cmdRunStatus(payload.RunID)
+
+	case daemon.MethodPermissionRequestEvent:
+		var payload daemon.PermissionRequestPayload
+		if err := json.Unmarshal(notif.Params, &payload); err != nil {
+			m.showError(err)
+			return nil
+		}
+		for _, p := range m.permQueue {
+			if p.RequestID == payload.RequestID {
+				return nil
+			}
+		}
+		m.permQueue = append(m.permQueue, payload)
+		return nil
+
+	case daemon.MethodPermissionResolvedEvent:
+		var payload daemon.PermissionResolvedPayload
+		if err := json.Unmarshal(notif.Params, &payload); err == nil {
+			m.dropPermission(payload.RequestID)
+		}
+		return nil
 
 	case daemon.MethodEmergencyHalt:
 		var payload daemon.EmergencyHaltPayload
@@ -3291,6 +3386,9 @@ func (m Model) View() tea.View {
 		centered := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, box,
 			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BG))))
 		float(centered)
+	}
+	if len(m.permQueue) > 0 {
+		float(m.renderPermissionPrompt())
 	}
 	bg := lipgloss.NewStyle().Background(lipgloss.Color(m.palette.BG)).Foreground(lipgloss.Color(m.palette.Text)).Width(m.width).Height(m.height).Render(content)
 	v := tea.NewView(bg)

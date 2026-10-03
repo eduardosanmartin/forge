@@ -102,6 +102,11 @@ allows it.
   if an entry names that exact path (`"./scripts/check.sh"`), so an allowed
   name can't be shadowed by a file the agent wrote. `workdir` for shell/git
   must stay inside the workspace.
+- `ask` lists (`shell.ask`, `git.ask`, `fs.ask_write`) hold a matching
+  operation until a connected client approves it: the TUI shows a modal
+  (`y` once, `s` for the session, `n`/`esc` deny) and the web GUI a dialog.
+  No client connected, no answer within 5 minutes, or a cancelled turn =
+  deny. Floors (git floor, shell floor) are never askable.
 - `network.allowed_hosts` gates every provider endpoint by host (or exact
   host:port); an empty list denies all egress.
 - `limits.plugin_wasm_max_bytes` caps the plugin `.wasm` entrypoint at install

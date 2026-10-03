@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
+	"github.com/eduardosanmartin/forge/internal/tools"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
 )
 
@@ -1219,5 +1220,29 @@ func TestOverlay_HelpInFrame(t *testing.T) {
 	frameRows(t, view, 24)
 	if !strings.Contains(view, "Slash Commands") {
 		t.Fatal("help should be visible in-frame")
+	}
+}
+
+// F1: a permission request is a modal that takes every key until answered.
+func TestPermissionRequestModal(t *testing.T) {
+	m := newTestModel()
+	notif, _ := daemon.NewNotification(daemon.MethodPermissionRequestEvent, daemon.PermissionRequestPayload{
+		RequestID:  "r1",
+		AskRequest: tools.AskRequest{Tool: "shell_exec", Rule: "ask:shell.exec:npm", Summary: "npm install left-pad"},
+	})
+	m.handleDaemonEvent(*notif)
+	if len(m.permQueue) != 1 {
+		t.Fatalf("queue = %d, want 1", len(m.permQueue))
+	}
+	if !strings.Contains(m.View().Content, "npm install left-pad") {
+		t.Fatalf("modal not rendered")
+	}
+	next, _ := m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	if len(next.(Model).permQueue) != 1 {
+		t.Fatal("an unrelated key must not dismiss the modal")
+	}
+	next, _ = next.(Model).Update(tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if len(next.(Model).permQueue) != 0 {
+		t.Fatal("n must answer (deny) and close the modal")
 	}
 }

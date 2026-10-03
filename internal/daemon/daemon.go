@@ -91,6 +91,13 @@ func New(
 	mgr.SetDeltaPublisher(func(sessionID string, notif *JSONRPCNotification) {
 		transport.Broadcast(sessionID, notif)
 	})
+	// F1: permissions.*.ask rules are resolved by asking connected
+	// clients (permission.request.event / permission.respond).
+	broker := newPermissionBroker(func(n *JSONRPCNotification) { transport.Broadcast("", n) }, transport.HasClients)
+	handler.permissions = broker
+	if toolsReg != nil {
+		toolsReg.SetAsker(broker.Ask)
+	}
 
 	d := &Daemon{
 		addr:      addr,

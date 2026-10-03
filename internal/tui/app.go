@@ -114,6 +114,12 @@ func (a *ClientAdapter) RunStatus(runID string) (*daemon.RunResult, error) {
 	}
 	return &res, nil
 }
+
+// PermissionRespond answers a permission request (permissions.*.ask).
+func (a *ClientAdapter) PermissionRespond(requestID, decision string) error {
+	return a.c.Call(context.Background(), daemon.MethodPermissionRespond, daemon.PermissionRespondParams{RequestID: requestID, Decision: decision}, nil)
+}
+
 func (a *ClientAdapter) RunApproveCheckpoint(runID string, approved bool) (*daemon.RunResult, error) {
 	var res daemon.RunResult
 	ctx := context.Background()

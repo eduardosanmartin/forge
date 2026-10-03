@@ -141,6 +141,9 @@ type DaemonConfig struct {
 type FSPermissions struct {
 	Read  []string `json:"read"`
 	Write []string `json:"write"`
+	// AskWrite: path patterns whose writes need live human approval
+	// (permission "ask": a client is prompted; no answer = deny).
+	AskWrite []string `json:"ask_write,omitempty"`
 }
 
 // ShellPermissions allows shell executables by base name (case-insensitive).
@@ -152,6 +155,8 @@ type FSPermissions struct {
 type ShellPermissions struct {
 	Allow            []string `json:"allow"`
 	RequireIsolation bool     `json:"require_isolation"`
+	// Ask: commands (same syntax as Allow) that need live human approval.
+	Ask []string `json:"ask,omitempty"`
 }
 
 // GitPermissions allows git subcommands (lowercase convention). Destructive
@@ -159,6 +164,9 @@ type ShellPermissions struct {
 // regardless of this list (RNF-8.2).
 type GitPermissions struct {
 	Allow []string `json:"allow"`
+	// Ask: subcommands that need live human approval (the git floor still
+	// denies destructive operations first).
+	Ask []string `json:"ask,omitempty"`
 }
 
 // GitHubPermissions allows the fixed read-only github tool subcommands
