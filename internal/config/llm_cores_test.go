@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -76,16 +77,19 @@ func TestValidate_LLMCores(t *testing.T) {
 func TestLoad_LLMCoresField(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "config.json")
-	writeConfigFile(t, path, `{
+	// Validate rejects cores > NumCPU, so the value must fit the machine
+	// (CI runners have 3-4 logical CPUs; a fixed 4 failed on a 3-CPU one).
+	cores := min(2, runtime.NumCPU())
+	writeConfigFile(t, path, fmt.Sprintf(`{
 		"schema_version": 4,
-		"llm": {"cores": 4}
-	}`)
+		"llm": {"cores": %d}
+	}`, cores))
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.LLM.Cores != 4 {
-		t.Errorf("llm.cores = %d, want 4", cfg.LLM.Cores)
+	if cfg.LLM.Cores != cores {
+		t.Errorf("llm.cores = %d, want %d", cfg.LLM.Cores, cores)
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate on loaded config: %v", err)

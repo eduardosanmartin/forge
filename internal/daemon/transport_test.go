@@ -162,6 +162,9 @@ func TestTransportWebSocketConnect(t *testing.T) {
 
 	// Send a ping to verify connection works
 	ctxPing, cancelPing := context.WithTimeout(ctx, 2*time.Second)
+	// coder/websocket only processes control frames (pongs) while something
+	// reads; without a reader Ping always times out.
+	conn.CloseRead(ctx)
 	err = conn.Ping(ctxPing)
 	cancelPing()
 	if err != nil {
@@ -287,6 +290,9 @@ func TestTransportHeartbeat(t *testing.T) {
 	defer conn.Close(websocket.StatusNormalClosure, "test done")
 
 	ctxPing, cancelPing := context.WithTimeout(ctx, 2*time.Second)
+	// coder/websocket only processes control frames (pongs) while something
+	// reads; without a reader Ping always times out.
+	conn.CloseRead(ctx)
 	err = conn.Ping(ctxPing)
 	cancelPing()
 	if err != nil {
@@ -314,6 +320,15 @@ func TestTransportBroadcast(t *testing.T) {
 		t.Fatalf("websocket dial failed: %v", err)
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "test done")
+
+	// Dial returns once the handshake completes, which can be before the
+	// server registers the connection; a Broadcast in that gap reaches no one.
+	for !tx.HasClients() {
+		if ctx.Err() != nil {
+			t.Fatal("server never registered the client connection")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	notif, _ := NewNotification("test.broadcast", map[string]string{"msg": "hello"})
 	tx.Broadcast("", notif)

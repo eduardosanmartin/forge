@@ -104,9 +104,8 @@ func TestCodeSymbolsTool(t *testing.T) {
 	eng, _ := perms.New(perms.PermissionsPolicy{FS: perms.FSPermissions{Read: []string{"./**"}}}, dir, nil)
 	r := New(eng, dir, nil)
 	r.Register(NewCodeSymbolsTool(repomap.New(dir)))
-	wd, _ := os.Getwd()
-	defer os.Chdir(wd)
-	_ = os.Chdir(dir) // fs.read paths resolve against the process cwd
+	// No os.Chdir: the permission check must not depend on the process cwd
+	// (CI macOS, 2026-10-03: /var vs /private/var denied it).
 	res, err := r.Execute(context.Background(), "code_symbols", map[string]any{"query": "open"})
 	if err != nil {
 		t.Fatal(err)

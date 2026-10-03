@@ -63,6 +63,9 @@ func New(root string) *Index {
 	return &Index{root: root, files: map[string]*File{}, maxAge: 30 * time.Second, maxSize: 512 * 1024}
 }
 
+// Root returns the directory this index covers.
+func (ix *Index) Root() string { return ix.root }
+
 var skipDirs = map[string]bool{".git": true, ".forge": true, "node_modules": true, "vendor": true, "dist": true, "build": true, "target": true, "__pycache__": true, ".venv": true}
 
 var sourceExt = map[string]bool{".go": true, ".py": true, ".js": true, ".jsx": true, ".ts": true, ".tsx": true, ".rs": true, ".java": true, ".cs": true, ".rb": true, ".php": true, ".kt": true, ".swift": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true}

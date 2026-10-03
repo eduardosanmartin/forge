@@ -103,6 +103,13 @@ func newStack(t *testing.T, baseURL string, models []string) *stack {
 	t.Helper()
 
 	ws := ownTempDir(t, "forge-e2e-ws")
+	// macOS temp dirs live under /var, a symlink to /private/var; after
+	// Chdir, os.Getwd reports the resolved form, so relative tool paths fell
+	// outside a /var-spelled workspace root and fs_write was denied
+	// (CI macos-latest, 2026-10-03). Use the resolved form throughout.
+	if resolved, err := filepath.EvalSymlinks(ws); err == nil {
+		ws = resolved
+	}
 	initGitRepo(t, ws)
 
 	if err := os.Chdir(ws); err != nil {

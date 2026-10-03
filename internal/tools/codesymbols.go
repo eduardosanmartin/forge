@@ -36,9 +36,10 @@ func (t *CodeSymbolsTool) JSONSchema() map[string]any {
 }
 
 // PermsRequest: reading workspace code is gated like fs.read of the
-// workspace root.
+// indexed root. The path is the index's own root, not ".", which would
+// resolve against the process cwd instead of the workspace.
 func (t *CodeSymbolsTool) PermsRequest(args map[string]any) (perms.Request, error) {
-	return perms.Request{Kind: perms.KindFsRead, Path: ".", Input: args}, nil
+	return perms.Request{Kind: perms.KindFsRead, Path: t.index.Root(), Input: args}, nil
 }
 
 func (t *CodeSymbolsTool) Execute(_ context.Context, req perms.Request) (Result, error) {
