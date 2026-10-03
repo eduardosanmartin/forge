@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **91/96 cubiertos** (2026-10-03, tras Fases 1-6 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **92/97 cubiertos** (2026-10-03, tras Fases 1-7 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -49,6 +49,7 @@
 - [x] RF-5.3 Manifiesto de plugin
 - [x] RF-5.3.1 Wizard interactivo `forge plugin new`
 - [x] RF-5.4 Habilitar/deshabilitar sin recompilar
+- [x] RF-5.5 Integración MCP: cliente (servidores externos aprobados por hash, permisos `mcp` por servidor/herramienta) y servidor (`forge mcp serve`) — agregado 2026-10-03
 
 **RF-6. CLI**
 - [x] RF-6.1 Comandos core (sesiones, plugins, skills, proveedores)
@@ -211,6 +212,7 @@ Este proyecto no busca ser "mejor en todos los ejes" que herramientas con equipo
 - RF-5.3 Debe existir un manifiesto de plugin (metadatos, permisos solicitados, versiÃ³n, dependencias).
 - **RF-5.3.1 Debe proporcionar un wizard CLI interactivo (`forge plugin new`) que guÃ­e al usuario paso a paso para crear un plugin nuevo: nombre, versiÃ³n, descripciÃ³n, permisos solicitados (FS/shell/git/red), punto de entrada WASM, dependencias, y generaciÃ³n del `manifest.toml` y estructura de directorios inicial.**
 - RF-5.4 El sistema debe permitir habilitar/deshabilitar plugins sin recompilar el binario principal.
+- RF-5.5 (agregado 2026-10-03) Debe integrarse con el Model Context Protocol en ambos sentidos: usar herramientas de servidores MCP externos — sujetas a verificación de procedencia (RNF-4.6) y al modelo de permisos (RNF-4.1) — y exponer sus propias capacidades como servidor MCP. Es una segunda vía de extensión junto a los plugins WASM (RNF-3.2): MCP cubre integraciones que requieren procesos o red, que el sandbox WASM no permite.
 
 ### RF-6. CLI
 - RF-6.1 CLI minimalista con comandos core: iniciar sesión, listar sesiones, adjuntar a sesión en curso, ejecutar tarea puntual (one-shot), **gestionar plugins/skills (`forge plugin new`, `forge skill new`, `forge plugin list`, `forge skill list`, `forge plugin enable/disable`, `forge skill enable/disable`)**, gestionar proveedores.
