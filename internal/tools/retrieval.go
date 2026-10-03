@@ -75,7 +75,13 @@ func (t *RetrievalSearchTool) Execute(ctx context.Context, req perms.Request) (R
 		}
 	}
 
-	results, err := t.retriever.Search(query, k)
+	// Scoped to the calling session (the agent loop puts its ID on ctx):
+	// one session must never search another's history.
+	sessionID := SessionIDFromContext(ctx)
+	if sessionID == "" {
+		return Result{Content: "ERROR: retrieval_search needs a session context"}, nil
+	}
+	results, err := t.retriever.SearchSession(sessionID, query, k, nil)
 	if err != nil {
 		return Result{Content: fmt.Sprintf("ERROR: %v", err)}, nil
 	}

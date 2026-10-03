@@ -192,74 +192,92 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 			}
 		}
 
-		// V1: Retrieval — inject the chunks of indexed history most
-		// similar to the current user message. The index is in-memory per
-		// daemon process (acceptable for v1): the SessionManager re-indexes
-		// the session transcript after each turn. Empty index, no hits, or
-		// an empty user message → no injection.
-		if enableRetrieval && c.v1Deps.Retriever != nil && query != "" {
-			if chunks, searchErr := c.v1Deps.Retriever.Search(query, retrievalTopK); searchErr == nil && len(chunks) > 0 {
-				var sb strings.Builder
-				sb.WriteString("RELEVANT CONTEXT (v1):\n")
-				for _, ch := range chunks {
-					sb.WriteString(fmt.Sprintf("- [%s] %s (score %.2f)\n", ch.Role, ch.Content, ch.Score))
-				}
-				messages = append(messages, llm.Message{
-					Role:    "system",
-					Content: sb.String(),
-				})
-			}
-		}
-
-		// Skills (v1, RF-4.2): two mutually exclusive activation modes.
-		// LazyLoad true: semantic matching — only enabled skills whose
-		// description matches the current user message get injected
-		// (Skills.Relevant, scored against an embedding).
-		// LazyLoad false: manual activation — no matching call at all.
-		// The active set is whatever Skills.ActiveManual(SkillsEnabled)
-		// resolves to (project's configured list + every global skill),
-		// injected unconditionally on every turn regardless of message
-		// content. See config.SkillsConfig's doc comment for why false is
-		// the honest default today (RF-4.2's embedding is a hash
-		// placeholder until Fase 4 of hojaDeRuta-embeddings-skills.md).
-		if enableSkills && c.v1Deps.Skills != nil && query != "" {
-			var skills []skill.Skill
-			if c.v1Deps.SkillsLazyLoad {
-				skills, _ = c.v1Deps.Skills.Relevant(query)
-			} else {
-				skills = c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled)
-			}
-			for _, sk := range skills {
-				messages = append(messages, llm.Message{
-					Role:    "system",
-					Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
-				})
-			}
-		}
 	}
 
-	// 4. History window. With compaction enabled and the compactor wired,
-	// sessions longer than compactionThreshold persisted messages get a
-	// compacted VIEW: one deterministic summary system message for the
-	// older turns plus the most recent turns verbatim. It is computed
-	// statelessly from the fetched transcript on every Build — no marker
-	// in session metadata — because the Compactor is deterministic and
-	// cheap to re-run, and a marker could go stale across flag toggles.
-	// Non-destructive by construction: the SQLite store keeps the full
-	// transcript; only what the model sees changes.
+	// 4. History window, computed BEFORE the retrieval/skills injections so
+	// retrieval can skip messages the model already sees verbatim. With
+	// compaction enabled and the compactor wired, sessions longer than
+	// compactionThreshold persisted messages get a compacted VIEW: one
+	// deterministic summary system message for the older turns plus the
+	// most recent turns verbatim. It is computed statelessly from the
+	// fetched transcript on every Build — no marker in session metadata —
+	// because the Compactor is deterministic and cheap to re-run, and a
+	// marker could go stale across flag toggles. Non-destructive by
+	// construction: the SQLite store keeps the full transcript; only what
+	// the model sees changes.
+	var summary string
+	var window []store.Message
 	compacted := false
 	if enableCompaction && c.v1Deps.Compactor != nil {
-		compacted = c.appendCompactedHistory(ctx, sessionID, &messages)
+		summary, window, compacted = c.compactedHistory(ctx, sessionID)
 	}
-
 	if !compacted {
 		recent, err := c.recentTranscript(ctx, sessionID)
 		if err != nil {
 			return nil, fmt.Errorf("get recent messages: %w", err)
 		}
-		for _, msg := range selectHistoryWindow(recent, c.maxHistoryTurns*2) {
-			messages = append(messages, toLLMMessage(msg))
+		window = selectHistoryWindow(recent, c.maxHistoryTurns*2)
+	}
+
+	// V1: Retrieval — inject the chunks of THIS session's indexed history
+	// most similar to the turn's request, skipping any message already in
+	// the verbatim window (repeating it would only spend tokens). The index
+	// is in-memory per daemon process and per session; the SessionManager
+	// indexes new messages incrementally after each turn. Empty index, no
+	// hits, or an empty query → no injection.
+	if enableRetrieval && c.v1Deps.Retriever != nil && query != "" {
+		inWindow := make(map[int64]bool, len(window))
+		for _, m := range window {
+			if m.ID != 0 {
+				inWindow[m.ID] = true
+			}
 		}
+		if chunks, searchErr := c.v1Deps.Retriever.SearchSession(sessionID, query, retrievalTopK, inWindow); searchErr == nil && len(chunks) > 0 {
+			var sb strings.Builder
+			sb.WriteString("RELEVANT CONTEXT (v1):\n")
+			for _, ch := range chunks {
+				sb.WriteString(fmt.Sprintf("- [%s] %s (score %.2f)\n", ch.Role, ch.Content, ch.Score))
+			}
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: sb.String(),
+			})
+		}
+	}
+
+	// Skills (v1, RF-4.2): two mutually exclusive activation modes.
+	// LazyLoad true: semantic matching — only enabled skills whose
+	// description matches the turn's request get injected
+	// (Skills.Relevant, scored against an embedding).
+	// LazyLoad false: manual activation — no matching call at all.
+	// The active set is whatever Skills.ActiveManual(SkillsEnabled)
+	// resolves to (project's configured list + every global skill),
+	// injected unconditionally on every turn regardless of message
+	// content. See config.SkillsConfig's doc comment for why false is
+	// the honest default today.
+	if enableSkills && c.v1Deps.Skills != nil && query != "" {
+		var skills []skill.Skill
+		if c.v1Deps.SkillsLazyLoad {
+			skills, _ = c.v1Deps.Skills.Relevant(query)
+		} else {
+			skills = c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled)
+		}
+		for _, sk := range skills {
+			messages = append(messages, llm.Message{
+				Role:    "system",
+				Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
+			})
+		}
+	}
+
+	if compacted {
+		messages = append(messages, llm.Message{
+			Role:    "system",
+			Content: "COMPACTED HISTORY (v1):\n" + summary,
+		})
+	}
+	for _, msg := range window {
+		messages = append(messages, toLLMMessage(msg))
 	}
 
 	// 5. Current user message. Callers (the agent loop) persist the user
@@ -294,9 +312,10 @@ const retrievalTopK = 3
 // and an anchor score), so the threshold lives here as a named constant.
 const compactionThreshold = 40
 
-// appendCompactedHistory appends the compacted view of the session history
-// to messages when the session exceeds compactionThreshold persisted
-// messages. It reports whether the compacted view was applied; when false
+// compactedHistory returns the compacted view of the session history — the
+// joined summaries of the older turns and the verbatim window — when the
+// session exceeds compactionThreshold persisted messages. ok reports
+// whether the compacted view applies; when false
 // (session at or below the threshold, or any store/compactor error) the
 // caller falls back to the plain sliding window.
 //
@@ -307,10 +326,10 @@ const compactionThreshold = 40
 // transcript is fed to Compact so every message outside the verbatim
 // window is covered by a summary (Compact's internal keep-recent slice
 // overlaps the window instead of leaving a gap).
-func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID string, messages *[]llm.Message) bool {
+func (c *ContextAssembler) compactedHistory(ctx context.Context, sessionID string) (summary string, window []store.Message, ok bool) {
 	transcript, err := c.store.GetMessagesSince(ctx, sessionID, 0)
 	if err != nil || len(transcript) <= compactionThreshold {
-		return false
+		return "", nil, false
 	}
 
 	turns := make([]compaction.Turn, 0, len(transcript))
@@ -323,7 +342,7 @@ func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID
 	}
 	compactedTurns, _, err := c.v1Deps.Compactor.Compact(turns)
 	if err != nil {
-		return false
+		return "", nil, false
 	}
 
 	var summaries []string
@@ -333,18 +352,9 @@ func (c *ContextAssembler) appendCompactedHistory(ctx context.Context, sessionID
 		}
 	}
 	if len(summaries) == 0 {
-		return false
+		return "", nil, false
 	}
-
-	*messages = append(*messages, llm.Message{
-		Role:    "system",
-		Content: "COMPACTED HISTORY (v1):\n" + strings.Join(summaries, "\n"),
-	})
-
-	for _, msg := range selectHistoryWindow(transcript, c.maxHistoryTurns*2) {
-		*messages = append(*messages, toLLMMessage(msg))
-	}
-	return true
+	return strings.Join(summaries, "\n"), selectHistoryWindow(transcript, c.maxHistoryTurns*2), true
 }
 
 // historyPageSize is how many messages recentTranscript fetches per store

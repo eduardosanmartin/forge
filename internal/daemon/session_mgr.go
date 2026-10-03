@@ -571,7 +571,7 @@ func (m *SessionManager) indexSession(ctx context.Context, sessionID string) {
 			Content: msg.Content,
 		})
 	}
-	if err := m.v1Deps.Retriever.Index(index); err != nil {
+	if err := m.v1Deps.Retriever.IndexSession(sessionID, index); err != nil {
 		if m.logger != nil {
 			m.logger.Warn("v1 retrieval: indexing failed",
 				"session_id", sessionID, "error", err)

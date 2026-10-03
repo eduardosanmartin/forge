@@ -669,7 +669,7 @@ func TestSessionManagerExecuteTurnIndexesTranscriptWhenRetrievalEnabled(t *testi
 
 	// The mock provider answers without tool calls, so the turn persists
 	// one user + one assistant message — both must be indexed.
-	if got := retriever.Len(); got != 2 {
+	if got := retriever.Size(session.ID); got != 2 {
 		t.Errorf("retriever indexed %d chunks, want 2 (user + assistant)", got)
 	}
 }
@@ -700,7 +700,7 @@ func TestSessionManagerExecuteTurnSkipsIndexingWhenRetrievalDisabled(t *testing.
 		t.Fatalf("execute turn failed: %v", err)
 	}
 
-	if got := retriever.Len(); got != 0 {
+	if got := retriever.Size(session.ID); got != 0 {
 		t.Errorf("retriever indexed %d chunks with retrieval disabled, want 0", got)
 	}
 }

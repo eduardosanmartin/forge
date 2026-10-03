@@ -203,7 +203,7 @@ func TestContextAssembler_Build_AnchoringV1_V0FactsCoexist(t *testing.T) {
 func TestContextAssembler_Build_RetrievalV1_InjectsSimilarChunk(t *testing.T) {
 	ctx := context.Background()
 	retriever := newTestRetriever(t)
-	if err := retriever.Index([]retrieval.Message{
+	if err := retriever.IndexSession("session-1", []retrieval.Message{
 		{ID: 1, Role: "user", Content: "the deploy pipeline uses terraform"},
 		{ID: 2, Role: "assistant", Content: "the tests run with go test -race"},
 	}); err != nil {
@@ -242,7 +242,7 @@ func TestContextAssembler_Build_RetrievalV1_InjectsSimilarChunk(t *testing.T) {
 func TestContextAssembler_Build_RetrievalV1_DisabledCases(t *testing.T) {
 	ctx := context.Background()
 	indexedRetriever := newTestRetriever(t)
-	if err := indexedRetriever.Index([]retrieval.Message{
+	if err := indexedRetriever.IndexSession("session-1", []retrieval.Message{
 		{ID: 1, Role: "user", Content: "indexed content"},
 	}); err != nil {
 		t.Fatalf("index: %v", err)

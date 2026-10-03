@@ -432,7 +432,7 @@ func indexSessionForBench(ctx context.Context, st *store.Store, retriever *retri
 			Content: msg.Content,
 		})
 	}
-	if err := retriever.Index(index); err != nil {
+	if err := retriever.IndexSession(sessionID, index); err != nil {
 		return fmt.Errorf("index transcript: %w", err)
 	}
 	return nil

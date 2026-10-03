@@ -179,9 +179,9 @@ func TestRegistry_Execute_AnchoringStorePersistsAndReads(t *testing.T) {
 // first (cosine 1.0); semantic ranking arrives with a real embedding model.
 func TestRegistry_Execute_RetrievalSearchReturnsTopChunk(t *testing.T) {
 	registry, _, retriever, _ := setupV1Registry(t)
-	ctx := context.Background()
+	ctx := WithSessionID(context.Background(), "s")
 
-	err := retriever.Index([]retrieval.Message{
+	err := retriever.IndexSession("s", []retrieval.Message{
 		{ID: 1, Role: "user", Content: "the deploy pipeline uses terraform"},
 		{ID: 2, Role: "assistant", Content: "the tests run with go test -race"},
 	})

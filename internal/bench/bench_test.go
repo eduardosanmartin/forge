@@ -144,8 +144,11 @@ func TestBenchV1PromptTokensBounded(t *testing.T) {
 		t.Fatalf("runArm(v1): %v", err)
 	}
 
-	if stats.retrievalInjections < 38 {
-		t.Errorf("retrieval injections = %d, want >= 38 (every turn after the first re-index)", stats.retrievalInjections)
+	// Retrieval skips messages already in the verbatim window, so it only
+	// injects once the session has history outside the window (~turn 9 of
+	// 40 with the default window), not on every turn as before.
+	if stats.retrievalInjections < 30 {
+		t.Errorf("retrieval injections = %d, want >= 30 (every turn with history outside the window)", stats.retrievalInjections)
 	}
 	if stats.compactionViews < 15 {
 		t.Errorf("compacted-view turns = %d, want >= 15 (transcript crosses the threshold around turn 19)", stats.compactionViews)
@@ -176,8 +179,8 @@ func TestBenchV1PromptTokensBounded(t *testing.T) {
 // tiny 3-turn scenario, computed by hand from Build's layout:
 //
 //	system(1) + history(2t-1, including the just-persisted current user
-//	message, appended exactly once) plus one anchored-facts message and one
-//	retrieval message in the v1 arm when active.
+//	message, appended exactly once) plus one anchored-facts message in the
+//	v1 arm (and a retrieval message only once history leaves the window).
 //
 // Tool definitions are NOT counted here: they travel only via ChatRequest.Tools
 // (ToolDefs()), not as extra system messages in Build's output — Build used
@@ -213,7 +216,10 @@ func TestBenchTinyScenarioMessageCounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runArm(v1): %v", err)
 	}
-	wantV1 := []int{3, 6, 8} // naive + 1 anchored-facts message; +1 retrieval from turn 2
+	// naive + 1 anchored-facts message. No retrieval message: in a 3-turn
+	// session every indexed message is already in the verbatim window, and
+	// retrieval no longer repeats those (it used to: [3 6 8]).
+	wantV1 := []int{3, 5, 7}
 	if !reflect.DeepEqual(v1.perTurnMessages, wantV1) {
 		t.Errorf("v1 per-turn messages = %v, want %v", v1.perTurnMessages, wantV1)
 	}
