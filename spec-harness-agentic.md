@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **80/96 cubiertos** (2026-10-03, tras Fase 1 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **83/96 cubiertos** (2026-10-03, tras Fases 1-2 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -31,7 +31,7 @@
 
 **RF-3. Gestión de contexto y memoria**
 - [x] RF-3.1 Memoria persistente entre sesiones (anchors)
-- [~] RF-3.2 Recuperación selectiva de contexto (retrieval) (parcial: índice global compartido entre sesiones, duplicados, re-indexado completo por turno)
+- [x] RF-3.2 Recuperación selectiva de contexto (retrieval) (2026-10-03: índice por sesión, incremental, sin repetir lo que ya está en la ventana)
 - [~] RF-3.3 Compactación jerárquica progresiva (parcial: truncado determinista por mensaje, sin jerarquía ni tope)
 - [x] RF-3.4 Inspección/edición manual de memoria (`forge memory`)
 - [x] RF-3.5 Anclaje explícito (tools + write floor RNF-4.12)
@@ -39,7 +39,7 @@
 **RF-4. Skills y auto-aprendizaje**
 - [x] RF-4.1 Creación, carga e instalación de skills
 - [x] RF-4.1.1 Wizard interactivo `forge skill new`
-- [~] RF-4.2 Lazy-load por relevancia a la tarea (parcial: default manual, embedding hash; las skills desaparecen tras la primera iteración con herramientas)
+- [~] RF-4.2 Lazy-load por relevancia a la tarea (parcial: default manual, embedding hash; corregido 2026-10-03 que las skills desaparecían tras la primera iteración con herramientas)
 - [x] RF-4.3 Propuesta por minería de patrones (`forge skill mine`)
 - [x] RF-4.4 Aprobación humana antes de activar skills auto-generadas
 
@@ -93,7 +93,7 @@
 - [x] RNF-1.1 Cold start < 200ms (bench: ~19-21ms mediana)
 - [x] RNF-1.2 Overhead < 50ms por turno (bench: p50 1ms)
 - [x] RNF-1.3 Memoria en reposo < 100MB (bench: ~3.3MB heap+stack)
-- [~] RNF-1.4 Sesiones de larga duración sin degradación (parcial: con retrieval activo el store de embeddings crece O(n²); existe: `internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
+- [x] RNF-1.4 Sesiones de larga duración sin degradación (2026-10-03: el crecimiento O(n²) del índice de retrieval quedó corregido; existe: `internal/perf/longsession_test.go`: 200 turnos reales, overhead/heap tardío comparado contra temprano — ver limitación de alcance documentada ahí: proxy de una sesión larga, no soak test literal de horas)
 - [x] RNF-1.5 Concurrencia realista Perfil A (scheduler asumiendo cero paralelismo físico)
 - [x] RNF-1.6 Reserva de núcleos (`llm.cores`, default NumCPU-2)
 
@@ -102,7 +102,7 @@
 - [~] RNF-2.2 Orden estable para maximizar prompt-caching (parcial: la ventana deslizante desplaza el prefijo cada turno; Anthropic sin `cache_control`)
 - [x] RNF-2.3 Reducción ≥40% vs naive en sesiones >20 turnos (bench)
 - [~] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión) (parcial: mismo motivo que RNF-2.2)
-- [~] RNF-2.5 Techo de contexto objetivo 4-8k tokens (parcial: salidas de herramientas sin tope efectivo — `fs_read` ilimitado, shell 50 KB)
+- [x] RNF-2.5 Techo de contexto objetivo 4-8k tokens (2026-10-03: `fs_read` paginado a 16 KB, shell cabeza 4 KB + cola 8 KB, turno actual completo + historia en el resto del presupuesto; validación en vivo pendiente de RNF-10)
 
 **RNF-3. Modularidad y mantenibilidad**
 - [x] RNF-3.1 Core independiente de proveedor de LLM
