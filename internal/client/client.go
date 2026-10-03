@@ -386,6 +386,11 @@ func (c *Client) dispatch(notif daemon.JSONRPCNotification) {
 // may be nil). Typed failures come back as *RPCError; transport problems as
 // wrapped standard errors.
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
+	// A non-blocking Write ignores ctx, so without this a canceled call was
+	// still sent (and might run, e.g. a turn) before failing at random.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("call %s: %w", method, err)
+	}
 	id := strconv.FormatInt(c.nextID.Add(1), 10)
 	req := daemon.JSONRPCRequest{
 		JSONRPC: "2.0",

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -347,16 +348,16 @@ func TestAgent_ConcurrentExecuteTurn_DifferentSessions(t *testing.T) {
 	cfg := config.Defaults()
 	storeImpl := newMockStore()
 
-	callCount := 0
+	var callCount atomic.Int64 // Chat runs from concurrent turns
 	llmReg := &mockLLMRegistry{
 		provider: newMockProvider(func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-			callCount++
+			n := callCount.Add(1)
 			return llm.ChatResponse{
 				Choices: []llm.Choice{
 					{
 						Message: llm.Message{
 							Role:    "assistant",
-							Content: "Response " + string(rune('0'+callCount)),
+							Content: "Response " + string(rune('0'+n)),
 						},
 					},
 				},

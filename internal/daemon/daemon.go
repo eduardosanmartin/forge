@@ -37,6 +37,10 @@ type Daemon struct {
 	skillMgr  *skill.Manager
 	mu        sync.Mutex
 	running   bool
+	// started is closed once transport startup finished (either way).
+	// IsRunning reports ready only after it, and Stop waits for it, so a
+	// stop that lands during startup cannot race the transport's setup.
+	started chan struct{}
 }
 
 // New creates a new Daemon instance.
@@ -129,6 +133,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("daemon already running")
 	}
 	d.running = true
+	started := make(chan struct{})
+	d.started = started
 	d.mu.Unlock()
 
 	// Start transport
@@ -136,6 +142,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.mu.Lock()
 		d.running = false
 		d.mu.Unlock()
+		close(started)
 		return fmt.Errorf("start transport: %w", err)
 	}
 
@@ -145,6 +152,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	d.handler.SetAddr(d.transport.Addr())
+	close(started) // ready: listening and discoverable through the addr file
 	d.logger.Info("daemon started", "addr", d.transport.Addr())
 
 	// RF-11.8: rediscover runs a previous daemon process left interrupted
@@ -173,7 +181,10 @@ func (d *Daemon) Stop() error {
 		return nil
 	}
 	d.running = false
+	started := d.started
 	d.mu.Unlock()
+
+	<-started // never tear down a transport that is still starting
 
 	d.logger.Info("daemon stopping")
 
@@ -221,8 +232,17 @@ func (d *Daemon) removeAddrFile() {
 // IsRunning returns true if the daemon is running.
 func (d *Daemon) IsRunning() bool {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.running
+	running, started := d.running, d.started
+	d.mu.Unlock()
+	if !running {
+		return false
+	}
+	select {
+	case <-started:
+		return true
+	default:
+		return false // still starting: not ready to serve yet
+	}
 }
 
 // GetSessionManager returns the session manager for CLI commands.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/config"
@@ -158,9 +159,9 @@ func TestSpawnViaTool_SequentialMultiChildInOneTurn(t *testing.T) {
 	storeImpl := newBranchMockStore()
 	_, _, _ = storeImpl.AppendMessage(ctx, &store.Message{SessionID: "parent-1", Role: "user", Content: "seed"})
 
-	callNum := 0
+	var callNum atomic.Int64 // children run from parallel tool calls
 	provider := newMockProvider(func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-		callNum++
+		n := callNum.Add(1)
 		lastUser := ""
 		for i := len(req.Messages) - 1; i >= 0; i-- {
 			if req.Messages[i].Role == "user" {
@@ -174,7 +175,7 @@ func TestSpawnViaTool_SequentialMultiChildInOneTurn(t *testing.T) {
 		if lastUser == "task B" {
 			return llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "result B"}}}}, nil
 		}
-		if callNum == 1 {
+		if n == 1 {
 			return llm.ChatResponse{
 				Choices: []llm.Choice{{Message: llm.Message{
 					Role:    "assistant",
