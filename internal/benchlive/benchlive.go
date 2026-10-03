@@ -93,6 +93,7 @@ type PrefillPoint struct {
 // KVCache compares the same prompt sent cold and then again (RNF-2.4:
 // a stable prefix lets the server skip re-processing it).
 type KVCache struct {
+	TargetTokens       int     `json:"target_tokens"`
 	PromptTokens       int     `json:"prompt_tokens"`
 	ColdPrefillMs      float64 `json:"cold_prefill_ms"`
 	WarmPrefillMs      float64 `json:"warm_prefill_ms"`
@@ -207,9 +208,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		progress(fmt.Sprintf("prefill ~%d tok: %d tok in %.0f ms (%.1f tok/s)", size, pt.PromptTokens, pt.PrefillMs, pt.PrefillTokPerS))
 	}
 
-	// KV-cache prefix reuse: the same ~4k prompt twice.
-	kvPrompt := fillerPrompt(4096, nonce())
-	if 4096+64 < cfg.NumCtx {
+	// KV-cache prefix reuse: the same prompt twice, at the largest
+	// measured context size up to 4096 tokens (on slow CPUs a 4k cold
+	// prefill alone can take minutes).
+	kvSize := 0
+	for _, size := range cfg.ContextSizes {
+		if size <= 4096 && size > kvSize && size+64 < cfg.NumCtx {
+			kvSize = size
+		}
+	}
+	kvPrompt := fillerPrompt(kvSize, nonce())
+	if kvSize > 0 {
 		cold, err := c.chat(ctx, kvPrompt, 4)
 		if err != nil {
 			return nil, fmt.Errorf("kv-cache cold: %w", err)
@@ -219,6 +228,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			return nil, fmt.Errorf("kv-cache warm: %w", err)
 		}
 		kv := KVCache{
+			TargetTokens:      kvSize,
 			PromptTokens:      cold.PromptEvalCount,
 			ColdPrefillMs:     ms(cold.PromptEvalDuration),
 			WarmPrefillMs:     ms(warmKV.PromptEvalDuration),
@@ -233,7 +243,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			kv.PrefixReusePercent = 100 * float64(kv.PromptTokens-kv.WarmEvaluatedToks) / float64(kv.PromptTokens)
 		}
 		res.KVCache = kv
-		progress(fmt.Sprintf("kv-cache: TTFT cold %.0f ms -> warm %.0f ms (%.1fx, %.0f%% prefix reused)", kv.ColdTTFTMs, kv.WarmTTFTMs, kv.TTFTSpeedup, kv.PrefixReusePercent))
+		progress(fmt.Sprintf("kv-cache (~%d tok): TTFT cold %.0f ms -> warm %.0f ms (%.1fx, %.0f%% prefix reused)", kvSize, kv.ColdTTFTMs, kv.WarmTTFTMs, kv.TTFTSpeedup, kv.PrefixReusePercent))
 	}
 
 	// Representative tasks.

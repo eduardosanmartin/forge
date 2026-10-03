@@ -90,8 +90,21 @@ func TestAnthropicProvider_Chat_WireFormat(t *testing.T) {
 		t.Errorf("anthropic-version header: got %q", capturedHeaders.Get("anthropic-version"))
 	}
 	// System extraction.
-	if capturedBody["system"] != "You are helpful\n\nSecond system prompt" {
-		t.Errorf("system: got %q", capturedBody["system"])
+	// System: one text block per system message; the first (forge's fixed
+	// system prompt) carries the prompt-cache breakpoint (RNF-2.2).
+	sysBlocks, ok := capturedBody["system"].([]any)
+	if !ok || len(sysBlocks) != 2 {
+		t.Fatalf("system: got %v, want 2 text blocks", capturedBody["system"])
+	}
+	first, second := sysBlocks[0].(map[string]any), sysBlocks[1].(map[string]any)
+	if first["text"] != "You are helpful" || second["text"] != "Second system prompt" {
+		t.Errorf("system texts: got %v / %v", first["text"], second["text"])
+	}
+	if cc, _ := first["cache_control"].(map[string]any); cc["type"] != "ephemeral" {
+		t.Errorf("first system block lacks cache_control: %v", first)
+	}
+	if _, has := second["cache_control"]; has {
+		t.Errorf("only the stable first system block should be a breakpoint: %v", second)
 	}
 	// Tools mapping: input_schema
 	tools, ok := capturedBody["tools"].([]any)
@@ -283,5 +296,63 @@ func TestAnthropicProvider_DefaultBaseURL(t *testing.T) {
 	_, err := NewAnthropicProvider("", "key", []string{"api.anthropic.com"}, logger)
 	if err != nil {
 		t.Fatalf("expected default baseURL to be allowed, got %v", err)
+	}
+}
+
+func TestAnthropicBodyCacheBreakpoints(t *testing.T) {
+	p := &AnthropicProvider{}
+	body := p.buildAnthropicBody(ChatRequest{
+		Model: "m",
+		Messages: []Message{
+			{Role: "system", Content: "fixed"},
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "reply"},
+			{Role: "user", Content: "latest"},
+		},
+		Tools: []ToolDef{
+			{Type: "function", Function: ToolFunctionDef{Name: "a", Parameters: map[string]any{}}},
+			{Type: "function", Function: ToolFunctionDef{Name: "b", Parameters: map[string]any{}}},
+		},
+	})
+	tools := body["tools"].([]map[string]any)
+	if _, ok := tools[0]["cache_control"]; ok {
+		t.Error("only the LAST tool should carry the breakpoint")
+	}
+	if _, ok := tools[1]["cache_control"]; !ok {
+		t.Error("last tool lacks cache_control")
+	}
+	msgs := body["messages"].([]map[string]any)
+	lastBlocks := msgs[len(msgs)-1]["content"].([]map[string]any)
+	if _, ok := lastBlocks[len(lastBlocks)-1]["cache_control"]; !ok {
+		t.Error("last message's last block lacks cache_control")
+	}
+	firstBlocks := msgs[0]["content"].([]map[string]any)
+	if _, ok := firstBlocks[0]["cache_control"]; ok {
+		t.Error("earlier messages must not carry breakpoints (max 4 per request)")
+	}
+}
+
+func TestAnthropicUsageCountsCachedTokens(t *testing.T) {
+	u := anthropicUsage{InputTokens: 10, OutputTokens: 5, CacheReadInputTokens: 900, CacheCreationInputTokens: 100}
+	if u.promptTokens() != 1010 {
+		t.Fatalf("promptTokens = %d, want 1010 (input + cache read + cache write)", u.promptTokens())
+	}
+	resp := (&AnthropicProvider{}).anthropicToChatResponse(anthropicResponse{Usage: u})
+	if resp.Usage.PromptTokens != 1010 || resp.Usage.CachedPromptTokens != 900 || resp.Usage.CacheWriteTokens != 100 {
+		t.Fatalf("usage = %+v", resp.Usage)
+	}
+}
+
+func TestUsageUnmarshalOpenAICachedTokens(t *testing.T) {
+	var u Usage
+	if err := json.Unmarshal([]byte(`{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":64}}`), &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.PromptTokens != 100 || u.CachedPromptTokens != 64 {
+		t.Fatalf("usage = %+v, want cached 64 from prompt_tokens_details", u)
+	}
+	var stored Usage
+	if err := json.Unmarshal([]byte(`{"prompt_tokens":7,"cached_prompt_tokens":3}`), &stored); err != nil || stored.CachedPromptTokens != 3 {
+		t.Fatalf("round-trip of forge's own field failed: %+v %v", stored, err)
 	}
 }

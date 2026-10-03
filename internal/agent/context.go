@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/eduardosanmartin/forge/internal/anchor"
 	"github.com/eduardosanmartin/forge/internal/compaction"
@@ -49,7 +50,9 @@ anything else a tool exists for).`
 
 // ContextAssembler builds the LLM message context with a stable prefix ordering
 // that maximizes prompt-cache/KV-cache hits (RNF-2.2/2.4).
-// Order: system prompt + tool definitions + anchored memory + retrieval + compaction + recent history + current user message.
+// Order (see BuildWithQuery): system prompt + tool definitions (via
+// ChatRequest.Tools) + anchored memory + manual skills + compacted blocks +
+// earlier history + per-turn block (retrieval, matched skills) + current turn.
 type ContextAssembler struct {
 	toolsReg        ToolsRegistryInterface
 	store           StoreInterface
@@ -205,11 +208,11 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 	// marker could go stale across flag toggles. Non-destructive by
 	// construction: the SQLite store keeps the full transcript; only what
 	// the model sees changes.
-	var summary string
+	var summaries []string
 	var window []store.Message
 	compacted := false
 	if enableCompaction && c.v1Deps.Compactor != nil {
-		summary, window, compacted = c.compactedHistory(ctx, sessionID)
+		summaries, window, compacted = c.compactedHistory(ctx, sessionID)
 	}
 	if !compacted {
 		recent, err := c.recentTranscript(ctx, sessionID)
@@ -218,6 +221,32 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 		}
 		window = selectHistoryWindow(recent, c.maxHistoryTurns*2)
 	}
+
+	// Ordering for prompt/KV-cache reuse (RNF-2.2/2.4): everything that
+	// stays put across turns first, then the history that only grows, and
+	// the per-turn material LAST, right before the current turn:
+	//
+	//   system → anchors → manual skills → [compacted summary]
+	//          → earlier turns (append-only between window steps)
+	//          → retrieval + relevance-matched skills (vary per turn)
+	//          → current turn (its request + this turn's tool iterations)
+	//
+	// Retrieval and lazily matched skills used to sit right after the
+	// system prompt; since they change with every request, they
+	// invalidated the cached prefix for the entire history behind them on
+	// every turn. In this order a new turn re-processes only the per-turn
+	// block plus what was appended since the previous turn, and the
+	// iterations of one turn share everything but their newest messages.
+	split := len(window)
+	for i := len(window) - 1; i >= 0; i-- {
+		if window[i].Role == "user" {
+			split = i
+			break
+		}
+	}
+	earlier, current := window[:split], window[split:]
+
+	var volatile []llm.Message
 
 	// V1: Retrieval — inject the chunks of THIS session's indexed history
 	// most similar to the turn's request, skipping any message already in
@@ -236,9 +265,9 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 			var sb strings.Builder
 			sb.WriteString("RELEVANT CONTEXT (v1):\n")
 			for _, ch := range chunks {
-				sb.WriteString(fmt.Sprintf("- [%s] %s (score %.2f)\n", ch.Role, ch.Content, ch.Score))
+				sb.WriteString(fmt.Sprintf("- [%s] %s (score %.2f)\n", ch.Role, truncateRunes(ch.Content, retrievalSnippetChars), ch.Score))
 			}
-			messages = append(messages, llm.Message{
+			volatile = append(volatile, llm.Message{
 				Role:    "system",
 				Content: sb.String(),
 			})
@@ -248,35 +277,42 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 	// Skills (v1, RF-4.2): two mutually exclusive activation modes.
 	// LazyLoad true: semantic matching — only enabled skills whose
 	// description matches the turn's request get injected
-	// (Skills.Relevant, scored against an embedding).
+	// (Skills.Relevant, scored against an embedding); they vary per turn,
+	// so they go in the volatile block.
 	// LazyLoad false: manual activation — no matching call at all.
 	// The active set is whatever Skills.ActiveManual(SkillsEnabled)
 	// resolves to (project's configured list + every global skill),
 	// injected unconditionally on every turn regardless of message
-	// content. See config.SkillsConfig's doc comment for why false is
-	// the honest default today.
+	// content — stable, so part of the cached prefix. See
+	// config.SkillsConfig's doc comment for why false is the honest
+	// default today.
 	if enableSkills && c.v1Deps.Skills != nil && query != "" {
-		var skills []skill.Skill
 		if c.v1Deps.SkillsLazyLoad {
-			skills, _ = c.v1Deps.Skills.Relevant(query)
+			skills, _ := c.v1Deps.Skills.Relevant(query)
+			for _, sk := range skills {
+				volatile = append(volatile, skillMessage(sk))
+			}
 		} else {
-			skills = c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled)
-		}
-		for _, sk := range skills {
-			messages = append(messages, llm.Message{
-				Role:    "system",
-				Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
-			})
+			for _, sk := range c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled) {
+				messages = append(messages, skillMessage(sk))
+			}
 		}
 	}
 
-	if compacted {
+	// One system message per summarized block: a new block appends a
+	// message instead of rewriting a shared one, so earlier blocks keep
+	// matching the cached prefix.
+	for i, sum := range summaries {
 		messages = append(messages, llm.Message{
 			Role:    "system",
-			Content: "COMPACTED HISTORY (v1):\n" + summary,
+			Content: fmt.Sprintf("COMPACTED HISTORY (v1): [part %d]\n%s", i+1, sum),
 		})
 	}
-	for _, msg := range window {
+	for _, msg := range earlier {
+		messages = append(messages, toLLMMessage(msg))
+	}
+	messages = append(messages, volatile...)
+	for _, msg := range current {
 		messages = append(messages, toLLMMessage(msg))
 	}
 
@@ -302,9 +338,36 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 	return messages, nil
 }
 
+// skillMessage renders one skill's instructions as a system message.
+func skillMessage(sk skill.Skill) llm.Message {
+	return llm.Message{
+		Role:    "system",
+		Content: fmt.Sprintf("SKILL INSTRUCTIONS (v1) [%s]:\n%s", sk.Name, sk.Instructions),
+	}
+}
+
 // retrievalTopK is how many similar history chunks the v1 retrieval
 // injection adds ahead of the current user message.
 const retrievalTopK = 3
+
+// retrievalSnippetChars caps each retrieved chunk. The retrieval block is
+// re-processed on every turn (it changes with each request), so every
+// character in it costs prefill time on each turn; a pointer-sized snippet
+// is enough to remind the model of an earlier exchange.
+const retrievalSnippetChars = 300
+
+// truncateRunes cuts s to at most max bytes on a rune boundary, marking
+// the cut with "…".
+func truncateRunes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
 
 // compactionThreshold is the persisted message count above which the v1
 // compaction flag switches the model's view to summary + recent turns.
@@ -312,49 +375,61 @@ const retrievalTopK = 3
 // and an anchor score), so the threshold lives here as a named constant.
 const compactionThreshold = 40
 
-// compactedHistory returns the compacted view of the session history — the
-// joined summaries of the older turns and the verbatim window — when the
-// session exceeds compactionThreshold persisted messages. ok reports
-// whether the compacted view applies; when false
-// (session at or below the threshold, or any store/compactor error) the
-// caller falls back to the plain sliding window.
+// compactedHistory returns the compacted view of the session history —
+// one summary per completed block of older turns, and the verbatim window
+// — when the session exceeds compactionThreshold persisted messages. ok
+// reports whether the compacted view applies; when false (session at or
+// below the threshold, or a store error) the caller falls back to the
+// plain window.
 //
-// The older turns are summarized by Compactor.Compact (deterministic, no
-// LLM call); the most recent turns stay verbatim using the same sliding
-// window Build always applies, taken from the original transcript rather
-// than the Compactor's output so tool_call fields survive intact. The full
-// transcript is fed to Compact so every message outside the verbatim
-// window is covered by a summary (Compact's internal keep-recent slice
-// overlaps the window instead of leaving a gap).
-func (c *ContextAssembler) compactedHistory(ctx context.Context, sessionID string) (summary string, window []store.Message, ok bool) {
+// Block-stable by construction (RNF-2.2/2.4): block boundaries sit at the
+// same turn-aligned, windowStep-quantized positions the verbatim window
+// starts at, so the window always begins exactly where the last summarized
+// block ends (no gap, no overlap), and a block's summary is a pure function
+// of that block's messages — once written it never changes. Previously the
+// whole summary was recomputed over a sliding split, so it changed on
+// every turn and invalidated the cached prefix of everything after it
+// (measured offline: ~4k re-processed tokens per turn vs ~250 for plain
+// full history). Non-destructive: the store keeps the full transcript.
+func (c *ContextAssembler) compactedHistory(ctx context.Context, sessionID string) (summaries []string, window []store.Message, ok bool) {
 	transcript, err := c.store.GetMessagesSince(ctx, sessionID, 0)
 	if err != nil || len(transcript) <= compactionThreshold {
-		return "", nil, false
+		return nil, nil, false
 	}
+	budget := c.maxHistoryTurns * 2
+	ws := historyWindowStart(transcript, budget)
+	if ws == 0 {
+		return nil, nil, false
+	}
+	step := windowStep(budget)
+	blockStart := 0
+	for blockStart < ws {
+		next := alignForward(transcript, blockStart+1)
+		// The next boundary: the first turn start at or after the next
+		// step multiple — the same rule historyWindowStart applies.
+		target := ((absPos(transcript, blockStart) / step) + 1) * step
+		for next < ws && absPos(transcript, next) < target {
+			next = alignForward(transcript, next+1)
+		}
+		if next > ws {
+			next = ws
+		}
+		summaries = append(summaries, c.v1Deps.Compactor.SummarizeBlock(toCompactionTurns(transcript[blockStart:next])))
+		blockStart = next
+	}
+	return summaries, transcript[ws:], true
+}
 
-	turns := make([]compaction.Turn, 0, len(transcript))
-	for _, msg := range transcript {
+func toCompactionTurns(msgs []store.Message) []compaction.Turn {
+	turns := make([]compaction.Turn, 0, len(msgs))
+	for _, msg := range msgs {
 		turns = append(turns, compaction.Turn{
 			Role:    msg.Role,
 			Content: msg.Content,
-			Tokens:  len(msg.Content) / 4, // same rough estimate Compact uses
+			Tokens:  len(msg.Content) / 4,
 		})
 	}
-	compactedTurns, _, err := c.v1Deps.Compactor.Compact(turns)
-	if err != nil {
-		return "", nil, false
-	}
-
-	var summaries []string
-	for _, t := range compactedTurns {
-		if t.Summary != "" {
-			summaries = append(summaries, t.Summary)
-		}
-	}
-	if len(summaries) == 0 {
-		return "", nil, false
-	}
-	return strings.Join(summaries, "\n"), selectHistoryWindow(transcript, c.maxHistoryTurns*2), true
+	return turns
 }
 
 // historyPageSize is how many messages recentTranscript fetches per store
@@ -371,7 +446,7 @@ const (
 // turn's opening user message plus the older-history budget. Usually one
 // store call; more only for turns with very many tool iterations.
 func (c *ContextAssembler) recentTranscript(ctx context.Context, sessionID string) ([]store.Message, error) {
-	older := c.maxHistoryTurns * 2
+	older := c.maxHistoryTurns*2 + windowStep(c.maxHistoryTurns*2)
 	var newestFirst []store.Message
 	for offset := 0; offset < historyScanLimit; offset += historyPageSize {
 		page, err := c.store.GetMessages(ctx, sessionID, historyPageSize, offset)
@@ -409,19 +484,71 @@ func firstUserIndex(newestFirst []store.Message) int {
 //     always included whole. A fixed message-count window used to cut it:
 //     after ~8 tool iterations the user's own request fell out of the
 //     request and the model kept working without knowing the task.
-//   - Earlier history fills what is left of olderBudget (the total
-//     message budget) after the current turn, trimmed to
-//     start on a user message (a whole-turn boundary). That also guarantees
-//     the window never opens with an orphaned tool result or an assistant
-//     tool call whose results were cut. An orphaned tool result (its
-//     ToolCallID matching no tool_calls entry in the request) gets the
-//     whole request rejected by strict providers — observed against
-//     OpenCode Zen: HTTP 400 "tool result's tool id ... not found".
+//   - Earlier history gets up to budget messages (plus up to budget/2
+//     more: its start moves in steps, see historyWindowStart, so the
+//     prefix stays cacheable), trimmed to start on a user message (a
+//     whole-turn boundary). That also guarantees the window never opens
+//     with an orphaned tool result or an assistant tool call whose results
+//     were cut. An orphaned tool result (its ToolCallID matching no
+//     tool_calls entry in the request) gets the whole request rejected by
+//     strict providers — observed against OpenCode Zen: HTTP 400 "tool
+//     result's tool id ... not found".
 //
 // With no user message at all (legacy or synthetic transcripts), it falls
 // back to the last budget messages minus any orphaned tool prefix.
 func selectHistoryWindow(transcript []store.Message, budget int) []store.Message {
-	olderBudget := budget
+	return transcript[historyWindowStart(transcript, budget):]
+}
+
+// windowStep is how far the earlier-history window start moves at once.
+func windowStep(budget int) int {
+	if step := budget / 2; step > 1 {
+		return step
+	}
+	return 1
+}
+
+// absPos is a message's absolute position in its session: its Seq when
+// the transcript carries usable sequence numbers (tails fetched from the
+// store: positive and increasing), else its index (synthetic transcripts
+// that start at the beginning).
+func absPos(transcript []store.Message, i int) int {
+	if seqUsable(transcript) {
+		return transcript[i].Seq
+	}
+	return i
+}
+
+func seqUsable(transcript []store.Message) bool {
+	n := len(transcript)
+	return n > 0 && transcript[0].Seq > 0 && transcript[n-1].Seq-transcript[0].Seq == n-1
+}
+
+// alignForward returns the first index >= from holding a user message
+// (a turn boundary), or len(transcript) when there is none.
+func alignForward(transcript []store.Message, from int) int {
+	for i := from; i < len(transcript); i++ {
+		if transcript[i].Role == "user" {
+			return i
+		}
+	}
+	return len(transcript)
+}
+
+// historyWindowStart returns the index in transcript where the model's
+// verbatim history window begins (see selectHistoryWindow).
+//
+// The start is quantized on ABSOLUTE positions (message Seq): the target
+// position lastUser-budget is rounded down to a multiple of windowStep, so
+// between steps the earlier history only GROWS at its end and the prompt
+// prefix — and the inference server's KV/prompt cache — stays valid from
+// one turn to the next (RNF-2.2/2.4). Using absolute positions keeps the
+// steps identical no matter how long a tail of the transcript was fetched.
+// The earlier-history budget does NOT shrink as the current turn grows:
+// that would drop the oldest messages on every tool iteration and change
+// the prefix mid-turn; the current turn's growth is bounded by
+// agent.max_iterations and the tool-output caps instead.
+func historyWindowStart(transcript []store.Message, budget int) int {
 	lastUser := -1
 	for i := len(transcript) - 1; i >= 0; i-- {
 		if transcript[i].Role == "user" {
@@ -430,49 +557,33 @@ func selectHistoryWindow(transcript []store.Message, budget int) []store.Message
 		}
 	}
 	if lastUser < 0 {
-		start := len(transcript) - olderBudget
+		start := len(transcript) - budget
 		if start < 0 {
 			start = 0
 		}
-		tail := transcript[start:]
-		i := 0
-		for i < len(tail) && tail[i].Role == "tool" {
-			i++
+		for start < len(transcript) && transcript[start].Role == "tool" {
+			start++
 		}
-		return tail[i:]
+		return start
 	}
 
-	// The budget covers the whole window: the current turn spends it first
-	// (it is never cut), earlier turns get what is left.
-	olderBudget -= len(transcript) - lastUser
-	if olderBudget < 0 {
-		olderBudget = 0
-	}
-	olderStart := lastUser - olderBudget
-	if olderStart < 0 {
-		olderStart = 0
-	}
-	older := transcript[olderStart:lastUser]
-	// Align the older part to a turn boundary.
-	cut := len(older)
-	for i, m := range older {
-		if m.Role == "user" {
-			cut = i
-			break
+	step := windowStep(budget)
+	target := absPos(transcript, lastUser) - budget
+	if target <= absPos(transcript, 0) {
+		// Everything before the current turn fits: keep the whole tail,
+		// minus an orphaned tool prefix if it starts mid-turn.
+		i := 0
+		for i < lastUser && transcript[i].Role == "tool" {
+			i++
 		}
+		return i
 	}
-	if olderStart == 0 && len(older) > 0 && older[0].Role != "user" {
-		// The transcript itself starts mid-turn (no earlier user message
-		// exists to align to): keep it, minus an orphaned tool prefix.
-		cut = 0
-		for cut < len(older) && older[cut].Role == "tool" {
-			cut++
-		}
+	target = (target / step) * step
+	from := 0
+	for from < lastUser && absPos(transcript, from) < target {
+		from++
 	}
-	window := make([]store.Message, 0, len(older)-cut+len(transcript)-lastUser)
-	window = append(window, older[cut:]...)
-	window = append(window, transcript[lastUser:]...)
-	return window
+	return alignForward(transcript, from)
 }
 
 // toLLMMessage converts a persisted store.Message into the llm.Message shape

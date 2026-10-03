@@ -106,6 +106,14 @@ type BenchResult struct {
 	// size and is left off (and unmeasured) in this benchmark.
 	ModelSwitches int
 
+	// BaselineUncachedTokens / V1UncachedTokens sum, per arm, the prompt
+	// tokens after the prefix shared with the previous turn's request: the
+	// part a prefix-caching server (llama.cpp, Ollama, Anthropic/OpenAI
+	// prompt caching) must re-process. UncachedReductionPct compares them.
+	BaselineUncachedTokens int
+	V1UncachedTokens       int
+	UncachedReductionPct   float64
+
 	// CostReductionPct is (baseline - v1) / baseline * 100.
 	CostReductionPct float64
 	// ThresholdPct is the threshold this run was judged against.
@@ -157,24 +165,33 @@ func (r *BenchRunner) RunScenario(ctx context.Context, config BenchConfig) (Benc
 	if baselineTokens > 0 {
 		reduction = float64(baselineTokens-v1Tokens) / float64(baselineTokens) * 100
 	}
+	baselineUncached := sumInts(baseline.perTurnUncached)
+	v1Uncached := sumInts(v1.perTurnUncached)
+	var uncachedReduction float64
+	if baselineUncached > 0 {
+		uncachedReduction = float64(baselineUncached-v1Uncached) / float64(baselineUncached) * 100
+	}
 
 	return BenchResult{
-		Scenario:             scenario,
-		TotalTurns:           config.NumTurns,
-		BaselinePromptTokens: baselineTokens,
-		V1PromptTokens:       v1Tokens,
-		TotalTokens:          baselineTokens,
-		PromptTokens:         baselineTokens,
-		CompletionTokens:     0,
-		TotalLatencyMs:       0,
-		AvgLatencyMs:         0,
-		RetrievalCalls:       v1.retrievalInjections,
-		CompactionCycles:     v1.compactionViews,
-		AnchorsCreated:       v1.anchorsSeeded,
-		ModelSwitches:        0,
-		CostReductionPct:     reduction,
-		ThresholdPct:         threshold,
-		MeetsThreshold:       reduction >= threshold,
+		Scenario:               scenario,
+		TotalTurns:             config.NumTurns,
+		BaselinePromptTokens:   baselineTokens,
+		V1PromptTokens:         v1Tokens,
+		TotalTokens:            baselineTokens,
+		PromptTokens:           baselineTokens,
+		CompletionTokens:       0,
+		TotalLatencyMs:         0,
+		AvgLatencyMs:           0,
+		RetrievalCalls:         v1.retrievalInjections,
+		CompactionCycles:       v1.compactionViews,
+		AnchorsCreated:         v1.anchorsSeeded,
+		ModelSwitches:          0,
+		CostReductionPct:       reduction,
+		BaselineUncachedTokens: baselineUncached,
+		V1UncachedTokens:       v1Uncached,
+		UncachedReductionPct:   uncachedReduction,
+		ThresholdPct:           threshold,
+		MeetsThreshold:         reduction >= threshold,
 	}, nil
 }
 
@@ -191,6 +208,8 @@ func (res BenchResult) Summary() string {
   baseline:      %d prompt tokens (full history, avg %.1f/turn)
   v1:            %d prompt tokens (recent window + retrieval + compaction + anchoring, avg %.1f/turn)
   reduction:     %.1f%%  ->  %s (threshold %.1f%%)
+  re-processed:  baseline %d vs v1 %d tokens after the prefix shared with the
+                 previous turn (what a prefix-caching server recomputes)
   v1 injections: %d retrieval turns, %d compacted-view turns, %d anchors seeded
   note:          scripted completions are not modeled; latency requires a live
                  model (RNF-10.1) and is out of scope for this offline pass`,
@@ -199,6 +218,7 @@ func (res BenchResult) Summary() string {
 		res.BaselinePromptTokens, float64(res.BaselinePromptTokens)/float64(max(res.TotalTurns, 1)),
 		res.V1PromptTokens, float64(res.V1PromptTokens)/float64(max(res.TotalTurns, 1)),
 		res.CostReductionPct, verdict, res.ThresholdPct,
+		res.BaselineUncachedTokens, res.V1UncachedTokens,
 		res.RetrievalCalls, res.CompactionCycles, res.AnchorsCreated,
 	)
 }
@@ -244,8 +264,13 @@ var v1ArmSpec = armSpec{
 
 // armStats collects what one arm actually did, per turn.
 type armStats struct {
-	perTurnTokens       []int
-	perTurnMessages     []int
+	perTurnTokens   []int
+	perTurnMessages []int
+	// perTurnUncached is, per turn, the prompt tokens AFTER the longest
+	// message prefix shared with the previous turn's request — what a
+	// server with prefix (KV/prompt) caching must actually re-process
+	// (RNF-2.2/2.4). Turn 1 counts everything.
+	perTurnUncached     []int
 	retrievalInjections int
 	compactionViews     int
 	anchorsSeeded       int
@@ -272,6 +297,7 @@ type armStats struct {
 // the comparison stays fair.
 func (r *BenchRunner) runArm(ctx context.Context, turns []scenarioTurn, spec armSpec) (armStats, error) {
 	stats := armStats{}
+	var prevBuilt []llm.Message
 
 	dir, err := os.MkdirTemp("", "forge-bench-")
 	if err != nil {
@@ -372,6 +398,13 @@ func (r *BenchRunner) runArm(ctx context.Context, turns []scenarioTurn, spec arm
 		}
 		stats.perTurnTokens = append(stats.perTurnTokens, tokens)
 		stats.perTurnMessages = append(stats.perTurnMessages, len(built))
+		shared := sharedPrefix(prevBuilt, built)
+		uncached := 0
+		for _, msg := range built[shared:] {
+			uncached += tokensFor(msg.Content)
+		}
+		stats.perTurnUncached = append(stats.perTurnUncached, uncached)
+		prevBuilt = built
 
 		if spec.v1Flags && spec.wireV1Deps {
 			if hasPrefixedMessage(built, retrievalInjectionPrefix) {
@@ -449,6 +482,30 @@ func indexSessionForBench(ctx context.Context, st *store.Store, retriever *retri
 // not the absolute accuracy of the estimate.
 func tokensFor(text string) int {
 	return (len(text)+3)/4 + 4 // ceil(len/4) + 4
+}
+
+// sharedPrefix returns how many leading messages a and b have in common
+// (same role, content, tool call ID and tool calls).
+func sharedPrefix(a, b []llm.Message) int {
+	n := 0
+	for n < len(a) && n < len(b) {
+		x, y := a[n], b[n]
+		if x.Role != y.Role || x.Content != y.Content || x.ToolCallID != y.ToolCallID || len(x.ToolCalls) != len(y.ToolCalls) {
+			break
+		}
+		same := true
+		for i := range x.ToolCalls {
+			if x.ToolCalls[i].ID != y.ToolCalls[i].ID || x.ToolCalls[i].Function.Arguments != y.ToolCalls[i].Function.Arguments {
+				same = false
+				break
+			}
+		}
+		if !same {
+			break
+		}
+		n++
+	}
+	return n
 }
 
 // hasPrefixedMessage reports whether any built message starts with prefix.

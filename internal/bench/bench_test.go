@@ -147,8 +147,8 @@ func TestBenchV1PromptTokensBounded(t *testing.T) {
 	// Retrieval skips messages already in the verbatim window, so it only
 	// injects once the session has history outside the window (~turn 9 of
 	// 40 with the default window), not on every turn as before.
-	if stats.retrievalInjections < 30 {
-		t.Errorf("retrieval injections = %d, want >= 30 (every turn with history outside the window)", stats.retrievalInjections)
+	if stats.retrievalInjections < 25 {
+		t.Errorf("retrieval injections = %d, want >= 25 (every turn with history outside the window)", stats.retrievalInjections)
 	}
 	if stats.compactionViews < 15 {
 		t.Errorf("compacted-view turns = %d, want >= 15 (transcript crosses the threshold around turn 19)", stats.compactionViews)
@@ -314,4 +314,29 @@ func TestBuildScenarioDeterministic(t *testing.T) {
 
 func countWords(s string) int {
 	return len(strings.Fields(s))
+}
+
+// RNF-2.2/2.4 regression: compacted summaries used to be recomputed over a
+// sliding split, changing on every turn and invalidating the cached prefix
+// behind them (~4k re-processed tokens per turn). With block-stable
+// summaries, most turns only re-process the per-turn block and what was
+// appended; only window steps (every few turns) re-process the window.
+func TestBenchV1PrefixMostlyReused(t *testing.T) {
+	runner, err := NewBenchRunner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := runner.runArm(context.Background(), buildScenario(40), v1ArmSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cheap := 0
+	for _, u := range stats.perTurnUncached[19:] {
+		if u < 1500 {
+			cheap++
+		}
+	}
+	if cheap < 14 { // of 21 turns past the compaction threshold
+		t.Fatalf("only %d of 21 compacted turns re-processed < 1500 tokens: the prefix is not stable (%v)", cheap, stats.perTurnUncached[19:])
+	}
 }

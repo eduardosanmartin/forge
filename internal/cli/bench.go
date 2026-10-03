@@ -86,7 +86,7 @@ func newBenchLiveCommand() *cobra.Command {
 			fmt.Fprintf(w, "  generation:     %.1f tok/s\n", s.GenTokPerS)
 			fmt.Fprintf(w, "  median TTFT:    %.0f ms (tasks)\n", s.MedianTTFTMs)
 			fmt.Fprintf(w, "  prefill:        %.1f tok/s (4k: %.0f ms, 8k: %.0f ms)\n", s.PrefillTokPerS, s.Prefill4kMs, s.Prefill8kMs)
-			fmt.Fprintf(w, "  KV-cache reuse: TTFT %.1fx faster on a repeated ~4k prefix\n", s.KVCacheSpeedup)
+			fmt.Fprintf(w, "  KV-cache reuse: TTFT %.1fx faster on a repeated ~%d-token prefix\n", s.KVCacheSpeedup, res.KVCache.TargetTokens)
 			fmt.Fprintf(w, "  task set:       %.0f ms wall (%d tasks)\n", s.TasksWallMs, len(res.Tasks))
 			if outPath != "" {
 				fmt.Fprintf(w, "  saved:          %s\n", outPath)

@@ -25,9 +25,12 @@ type TurnMetrics struct {
 	TTFTMs            int64 // time-to-first-token (ms) for streaming; 0 when not streaming or no token
 	TotalTokens       int   // prompt + completion
 	PromptTokens      int
-	CompletionTokens  int
-	ToolCallCount     int
-	IterationCount    int
+	// CachedPromptTokens is the part of PromptTokens the provider served
+	// from its prompt cache (RNF-2.1/2.2), when it reports it.
+	CachedPromptTokens int
+	CompletionTokens   int
+	ToolCallCount      int
+	IterationCount     int
 }
 
 // DurationMs returns the total turn duration in milliseconds.

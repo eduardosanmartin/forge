@@ -78,10 +78,11 @@ func TestContextAssembler_Build_HistoryWindowRespected(t *testing.T) {
 			nonSystemCount++
 		}
 	}
-	// Should have at most 10 history messages + 1 user message = 11
-	// But we also have tool def messages as system messages
-	if nonSystemCount > 11 {
-		t.Errorf("too many non-system messages: %d (expected <= 11)", nonSystemCount)
+	// At most a 10-message earlier-history budget plus its step (5: the
+	// window start moves in steps so the prefix stays cacheable), the
+	// current turn (2 messages here) and the appended user message = 18.
+	if nonSystemCount > 18 {
+		t.Errorf("too many non-system messages: %d (expected <= 18)", nonSystemCount)
 	}
 }
 

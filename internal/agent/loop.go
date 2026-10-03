@@ -302,7 +302,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	iterationCount := 0
 	var totalLLMTimeMs int64
 	var firstTTFTMs int64
-	var totalPromptTokens, totalCompletionTokens, totalTokens int
+	var totalPromptTokens, totalCompletionTokens, totalTokens, totalCachedTokens int
 	var totalToolCallCount int
 
 	for {
@@ -463,6 +463,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 			totalPromptTokens += resp.Usage.PromptTokens
 			totalCompletionTokens += resp.Usage.CompletionTokens
 			totalTokens += resp.Usage.TotalTokens
+			totalCachedTokens += resp.Usage.CachedPromptTokens
 		}
 
 		// Check if response has tool calls
@@ -540,6 +541,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		result.Metrics.HarnessOverheadMs = result.Metrics.DurationMs() - totalLLMTimeMs
 		result.Metrics.TotalTokens = totalTokens
 		result.Metrics.PromptTokens = totalPromptTokens
+		result.Metrics.CachedPromptTokens = totalCachedTokens
 		result.Metrics.CompletionTokens = totalCompletionTokens
 		result.Metrics.ToolCallCount = totalToolCallCount
 		result.Metrics.IterationCount = iterationCount
@@ -554,6 +556,7 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 	result.Metrics.HarnessOverheadMs = result.Metrics.DurationMs() - totalLLMTimeMs
 	result.Metrics.TotalTokens = totalTokens
 	result.Metrics.PromptTokens = totalPromptTokens
+	result.Metrics.CachedPromptTokens = totalCachedTokens
 	result.Metrics.CompletionTokens = totalCompletionTokens
 	result.Metrics.ToolCallCount = totalToolCallCount
 	result.Metrics.IterationCount = iterationCount

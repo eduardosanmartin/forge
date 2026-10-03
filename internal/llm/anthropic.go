@@ -169,17 +169,21 @@ func (p *AnthropicProvider) buildAnthropicBody(req ChatRequest) map[string]any {
 		"model":      req.Model,
 		"max_tokens": maxTokens,
 	}
-	// System: concatenate all role="system" messages.
-	var systemParts []string
+	// System: one text block per role="system" message, in order. The
+	// FIRST one is forge's fixed system prompt (stable for the whole
+	// session), so it carries a prompt-cache breakpoint (RNF-2.2):
+	// Anthropic caches the prefix tools -> system up to that block. Later
+	// system blocks (anchors, retrieval, skills) can change between turns
+	// without invalidating it.
+	var systemBlocks []map[string]any
 	for _, m := range req.Messages {
-		if m.Role == "system" {
-			if m.Content != "" {
-				systemParts = append(systemParts, m.Content)
-			}
+		if m.Role == "system" && m.Content != "" {
+			systemBlocks = append(systemBlocks, map[string]any{"type": "text", "text": m.Content})
 		}
 	}
-	if len(systemParts) > 0 {
-		body["system"] = strings.Join(systemParts, "\n\n")
+	if len(systemBlocks) > 0 {
+		systemBlocks[0]["cache_control"] = anthropicEphemeral()
+		body["system"] = systemBlocks
 	}
 	// Messages: skip system, map user/assistant/tool.
 	var msgs []map[string]any
@@ -246,6 +250,14 @@ func (p *AnthropicProvider) buildAnthropicBody(req ChatRequest) map[string]any {
 			})
 		}
 	}
+	// Breakpoint on the last block of the last message: the next request
+	// of the same turn (tool-result continuation) extends this exact prefix,
+	// so it is read back from the cache instead of re-processed.
+	if n := len(msgs); n > 0 {
+		if blocks, ok := msgs[n-1]["content"].([]map[string]any); ok && len(blocks) > 0 {
+			blocks[len(blocks)-1]["cache_control"] = anthropicEphemeral()
+		}
+	}
 	body["messages"] = msgs
 	if len(req.Tools) > 0 {
 		var tools []map[string]any
@@ -256,6 +268,8 @@ func (p *AnthropicProvider) buildAnthropicBody(req ChatRequest) map[string]any {
 				"input_schema": t.Function.Parameters,
 			})
 		}
+		// Tool definitions are the first part of the cached prefix.
+		tools[len(tools)-1]["cache_control"] = anthropicEphemeral()
 		body["tools"] = tools
 	}
 	if req.Temperature != nil {
@@ -332,8 +346,24 @@ type anthropicContentBlock struct {
 }
 
 type anthropicUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+}
+
+// promptTokens is the full prompt size: with prompt caching, Anthropic's
+// input_tokens counts only the UNcached remainder, so the cached and
+// cache-written parts must be added back for metrics and budgets.
+func (u anthropicUsage) promptTokens() int {
+	return u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
+// anthropicEphemeral is the cache_control marker for a prompt-cache
+// breakpoint (5-minute ephemeral cache). At most 4 per request; forge uses
+// 3: tools, the fixed system prompt, and the last message.
+func anthropicEphemeral() map[string]any {
+	return map[string]any{"type": "ephemeral"}
 }
 
 func (p *AnthropicProvider) anthropicToChatResponse(ar anthropicResponse) ChatResponse {
@@ -380,9 +410,11 @@ func (p *AnthropicProvider) anthropicToChatResponse(ar anthropicResponse) ChatRe
 		}
 	}
 	usage := &Usage{
-		PromptTokens:     ar.Usage.InputTokens,
-		CompletionTokens: ar.Usage.OutputTokens,
-		TotalTokens:      ar.Usage.InputTokens + ar.Usage.OutputTokens,
+		PromptTokens:       ar.Usage.promptTokens(),
+		CompletionTokens:   ar.Usage.OutputTokens,
+		TotalTokens:        ar.Usage.promptTokens() + ar.Usage.OutputTokens,
+		CachedPromptTokens: ar.Usage.CacheReadInputTokens,
+		CacheWriteTokens:   ar.Usage.CacheCreationInputTokens,
 	}
 	return ChatResponse{
 		ID:    ar.ID,
@@ -477,6 +509,8 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-
 			finishReason string
 			// anthropicUsage stores input/output for eventual Usage.
 			inputTokens int
+			cacheRead   int
+			cacheWrite  int
 		)
 
 		// Helper to emit a chunk or abort on ctx cancellation (no leak).
@@ -529,7 +563,9 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-
 				}
 				messageID = payload.Message.ID
 				model = payload.Message.Model
-				inputTokens = payload.Message.Usage.InputTokens
+				inputTokens = payload.Message.Usage.promptTokens()
+				cacheRead = payload.Message.Usage.CacheReadInputTokens
+				cacheWrite = payload.Message.Usage.CacheCreationInputTokens
 				// Map model back if empty use request model.
 				if model == "" {
 					model = req.Model
@@ -677,9 +713,11 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req ChatRequest) (<-
 				}
 				if payload.Usage.OutputTokens != 0 {
 					usage = &Usage{
-						PromptTokens:     inputTokens,
-						CompletionTokens: payload.Usage.OutputTokens,
-						TotalTokens:      inputTokens + payload.Usage.OutputTokens,
+						PromptTokens:       inputTokens,
+						CompletionTokens:   payload.Usage.OutputTokens,
+						TotalTokens:        inputTokens + payload.Usage.OutputTokens,
+						CachedPromptTokens: cacheRead,
+						CacheWriteTokens:   cacheWrite,
 					}
 				}
 			case "message_stop":

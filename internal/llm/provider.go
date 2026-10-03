@@ -90,6 +90,13 @@ type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	// CachedPromptTokens is the part of PromptTokens served from the
+	// provider's prompt cache (RNF-2.2): Anthropic cache_read_input_tokens,
+	// OpenAI prompt_tokens_details.cached_tokens. 0 when not reported.
+	CachedPromptTokens int `json:"cached_prompt_tokens,omitempty"`
+	// CacheWriteTokens is the part of PromptTokens written to the cache on
+	// this call (Anthropic cache_creation_input_tokens).
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 // StreamChunk represents a single chunk in a streaming response.
@@ -179,4 +186,25 @@ type Provider interface {
 	ListModels() ([]string, error)
 	// Close releases any resources held by the provider.
 	Close() error
+}
+
+// UnmarshalJSON also accepts OpenAI's nested
+// usage.prompt_tokens_details.cached_tokens (OpenAI-compatible providers
+// report prompt-cache hits there) into CachedPromptTokens.
+func (u *Usage) UnmarshalJSON(b []byte) error {
+	type plain Usage
+	var aux struct {
+		plain
+		Details *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*u = Usage(aux.plain)
+	if u.CachedPromptTokens == 0 && aux.Details != nil {
+		u.CachedPromptTokens = aux.Details.CachedTokens
+	}
+	return nil
 }

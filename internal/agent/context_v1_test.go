@@ -364,14 +364,15 @@ func TestContextAssembler_Build_CompactionV1_AboveThresholdCompactsView(t *testi
 		t.Errorf("oldest turns should be covered by the summary: %s", summaryMsg.Content)
 	}
 
-	// ...plus the most recent turns verbatim: a 20-message budget, aligned
-	// to a whole-turn boundary (it must open on a user message), so 19 here
-	// — the last of them IS the current user message (Build no longer
-	// duplicates it with a second append).
-	if got := countNonSystemMessages(messages); got != 19 {
-		t.Errorf("non-system message count = %d, want 19 (turn-aligned verbatim window, current user message included once)", got)
+	// ...plus the most recent turns verbatim: a 20-message budget whose
+	// start moves in steps of 10 (prefix stays cacheable) and is aligned to
+	// a whole-turn boundary (it must open on a user message) — 24 earlier
+	// messages here, then the current user message (included once: Build
+	// no longer duplicates it with a second append).
+	if got := countNonSystemMessages(messages); got != 25 {
+		t.Errorf("non-system message count = %d, want 25 (stepped, turn-aligned verbatim window, current user message included once)", got)
 	}
-	tail := messages[len(messages)-19:]
+	tail := messages[len(messages)-25:]
 	if tail[0].Role != "user" {
 		t.Errorf("verbatim window opens with role %q, want a user message (turn boundary)", tail[0].Role)
 	}
@@ -420,8 +421,12 @@ func TestContextAssembler_Build_CompactionV1_AtOrBelowThresholdKeepsWindow(t *te
 	if _, ok := findSystemMessageByPrefix(messages, "COMPACTED HISTORY (v1):"); ok {
 		t.Error("no compaction expected at or below the threshold")
 	}
+	// Plain window: 20-message earlier-history budget whose start moves in
+	// steps of 10 on absolute positions (cacheable prefix) and is aligned to
+	// a user message — 19 earlier messages here — plus the current user
+	// message, included once.
 	if got := countNonSystemMessages(messages); got != 20 {
-		t.Errorf("non-system message count = %d, want 20 (plain window, current user message included once)", got)
+		t.Errorf("non-system message count = %d, want 20 (stepped plain window, current user message included once)", got)
 	}
 }
 

@@ -179,6 +179,13 @@ func (c *Compactor) createSummary(turns []Turn) string {
 }
 
 // GetSummaryModel returns the model used for summarization.
+// SummarizeBlock returns the deterministic summary of one block of turns.
+// It is a pure function of its input: the same block always yields the
+// same text, which keeps block summaries cacheable as a prompt prefix.
+func (c *Compactor) SummarizeBlock(turns []Turn) string {
+	return c.createSummary(turns)
+}
+
 func (c *Compactor) GetSummaryModel() string {
 	return c.summaryModel
 }
