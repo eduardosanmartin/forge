@@ -33,3 +33,17 @@ jobs:
         run: go build ./...
       - name: test
         run: go test -count=1 ./...
+
+  # N6: the daemon is heavily concurrent (transport fan-out, run engine,
+  # async embeddings, permission broker); -race needs cgo, so Linux only.
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test (race detector)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./...
