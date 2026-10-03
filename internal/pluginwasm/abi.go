@@ -17,28 +17,28 @@
 //
 //   - forge_abi_version() -> i32 or i64 : ABI version constant (must equal plugin.ABIVersion).
 //   - forge_tool_list() -> i64 (packed ptr:len) : JSON array of ToolExport objects
-//       e.g. [{"name":"my_plugin_greet","description":"Greets","permission":"fs.read"}]
+//     e.g. [{"name":"my_plugin_greet","description":"Greets","permission":"fs.read"}]
 //   - forge_tool_invoke(fn_ptr i32, fn_len i32, args_ptr i32, args_len i32) -> i64 (packed)
-//       : JSON result of the tool. Success payload is any JSON whose top-level
-//         is not {"error": "..."}; error envelope is exactly {"error":"message"}.
+//     : JSON result of the tool. Success payload is any JSON whose top-level
+//     is not {"error": "..."}; error envelope is exactly {"error":"message"}.
 //   - forge_alloc(size i32) -> i32 (ptr) : bump-allocate `size` bytes in plugin memory
-//       and return the base pointer. The host uses this to write argument buffers
-//       before calling forge_tool_invoke, and to allocate response buffers for
-//       host-import returns.
+//     and return the base pointer. The host uses this to write argument buffers
+//     before calling forge_tool_invoke, and to allocate response buffers for
+//     host-import returns.
 //
 // Host imports (module "forge_host"):
 //
 //   - log(level_ptr i32, level_len i32, msg_ptr i32, msg_len i32)
 //   - fs_read(path_ptr i32, path_len i32) -> i64 (packed JSON)
-//       Success JSON is the raw file bytes JSON-quoted or base64 envelope; for WU2 the
-//       greeter test uses plain UTF-8 bytes returned as JSON string via the same packed convention.
-//       Errors are returned as {"error":"..."} (capability or perms denied, or OS error).
-   //   - fs_write(path_ptr i32, path_len i32, data_ptr i32, data_len i32) -> i32 (errno: 0 success, 1 error)
-//       FROZEN (ABIVersion=1): errno-only by deliberate design. The host logs the
-//       denial/error detail (path, perms rule) via the plugin-scoped logger, so
-//       plugin authors read failure causes from logs. Any change to this convention
-//       requires ABIVersion bump + manifest schema review; ABIVersion=1 keeps the
-//       errno-only convention permanently.
+//     Success JSON is the raw file bytes JSON-quoted or base64 envelope; for WU2 the
+//     greeter test uses plain UTF-8 bytes returned as JSON string via the same packed convention.
+//     Errors are returned as {"error":"..."} (capability or perms denied, or OS error).
+//   - fs_write(path_ptr i32, path_len i32, data_ptr i32, data_len i32) -> i32 (errno: 0 success, 1 error)
+//     FROZEN (ABIVersion=1): errno-only by deliberate design. The host logs the
+//     denial/error detail (path, perms rule) via the plugin-scoped logger, so
+//     plugin authors read failure causes from logs. Any change to this convention
+//     requires ABIVersion bump + manifest schema review; ABIVersion=1 keeps the
+//     errno-only convention permanently.
 //   - shell_exec(cmd_ptr i32, cmd_len i32, args_json_ptr i32, args_json_len i32) -> i64 (packed JSON)
 //   - git_run(args_json_ptr i32, args_json_len i32) -> i64 (packed JSON)
 //   - net_fetch(url_ptr i32, url_len i32) -> i64 (packed JSON)

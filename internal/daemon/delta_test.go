@@ -26,15 +26,15 @@ func (p *streamingBridgeProvider) ChatStream(ctx context.Context, req llm.ChatRe
 		defer close(ch)
 		for _, c := range p.content {
 			ch <- llm.StreamChunk{
-				ID:    "bridge",
-				Model: req.Model,
+				ID:      "bridge",
+				Model:   req.Model,
 				Choices: []llm.StreamChoice{{Delta: llm.Message{Role: "assistant", Content: string(c)}}},
 			}
 		}
 		fr := "stop"
 		ch <- llm.StreamChunk{
-			ID:    "bridge",
-			Model: req.Model,
+			ID:      "bridge",
+			Model:   req.Model,
 			Choices: []llm.StreamChoice{{FinishReason: &fr, Delta: llm.Message{Role: "assistant"}}},
 		}
 	}()
@@ -146,5 +146,3 @@ func TestSessionManager_DeltaBridge_PublishesDeltas(t *testing.T) {
 		t.Fatalf("stored messages do not contain assembled hello: %+v", msgs)
 	}
 }
-
-

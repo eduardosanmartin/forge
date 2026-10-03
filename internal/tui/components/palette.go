@@ -18,11 +18,21 @@ type Palette struct {
 	Error      string
 }
 
-func (p Palette) TextStyle() lipgloss.Style   { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Text)) }
-func (p Palette) DimStyle() lipgloss.Style    { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Dim)) }
-func (p Palette) FaintStyle() lipgloss.Style  { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Faint)) }
-func (p Palette) AccentStyle() lipgloss.Style { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent)) }
-func (p Palette) ErrorStyle() lipgloss.Style  { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Error)) }
+func (p Palette) TextStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Text))
+}
+func (p Palette) DimStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Dim))
+}
+func (p Palette) FaintStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Faint))
+}
+func (p Palette) AccentStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent))
+}
+func (p Palette) ErrorStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Error))
+}
 func (p Palette) SuccessStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Success))
 }

@@ -817,8 +817,8 @@ func TestSessionManagerTurnSurvivesParentCancel(t *testing.T) {
 			ID:    "test-response",
 			Model: "test-model",
 			Choices: []llm.Choice{{
-				Index: 0,
-				Message: llm.Message{Role: "assistant", Content: "survived"},
+				Index:        0,
+				Message:      llm.Message{Role: "assistant", Content: "survived"},
 				FinishReason: "stop",
 			}},
 			Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
@@ -871,8 +871,8 @@ func TestSessionManagerTurnHaltStillCancels(t *testing.T) {
 			ID:    "test-response",
 			Model: "test-model",
 			Choices: []llm.Choice{{
-				Index: 0,
-				Message: llm.Message{Role: "assistant", Content: "should be halted"},
+				Index:        0,
+				Message:      llm.Message{Role: "assistant", Content: "should be halted"},
 				FinishReason: "stop",
 			}},
 		},

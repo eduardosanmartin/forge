@@ -25,17 +25,17 @@ import "charm.land/bubbles/v2/key"
 // message instead of a footer toast (see showError); esc closes it, same
 // priority tier as the rail/help/model panels.
 type KeyMap struct {
-	ToggleSidebar   key.Binding
-	CycleLayout     key.Binding
-	Quit            key.Binding
-	Help            key.Binding
-	Halt            key.Binding
-	GrabSession     key.Binding
-	ToggleMouse     key.Binding
-	ShowContext     key.Binding
-	ShowPlugins     key.Binding
-	ShowTurnStats   key.Binding
-	ShowRunPanel    key.Binding
+	ToggleSidebar key.Binding
+	CycleLayout   key.Binding
+	Quit          key.Binding
+	Help          key.Binding
+	Halt          key.Binding
+	GrabSession   key.Binding
+	ToggleMouse   key.Binding
+	ShowContext   key.Binding
+	ShowPlugins   key.Binding
+	ShowTurnStats key.Binding
+	ShowRunPanel  key.Binding
 }
 
 // DefaultKeyMap returns the global key bindings.

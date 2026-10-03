@@ -150,9 +150,9 @@ func TestLimits_SkillPerFileSemantics(t *testing.T) {
 	under := int(config.DefaultSkillFileMaxBytes - 10)
 	// Two files each under limit → should pass
 	src := writeSizedSkill(t, srcRoot, "twoskill", map[string]int{
-		"SKILL.md":            under,
-		"scripts/a.sh":        under,
-		"scripts/b.sh":        500,
+		"SKILL.md":     under,
+		"scripts/a.sh": under,
+		"scripts/b.sh": 500,
 	})
 	var out bytes.Buffer
 	if err := runSkillInstall(src, skillsRoot, false, false, NewScriptedPrompter(nil), &out); err != nil {

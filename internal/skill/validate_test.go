@@ -29,16 +29,16 @@ func TestValidateSkill(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		skill   func(dir string) Skill
-		dirName string
+		name       string
+		skill      func(dir string) Skill
+		dirName    string
 		withScript string
-		wantErr bool
-		errSub  string
+		wantErr    bool
+		errSub     string
 	}{
 		{
-			name: "valid local with script exists",
-			dirName: "my-skill",
+			name:       "valid local with script exists",
+			dirName:    "my-skill",
 			withScript: "scripts/check.sh",
 			skill: func(dir string) Skill {
 				return Skill{
@@ -49,7 +49,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "bad name uppercase",
+			name:    "bad name uppercase",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "My-Skill", Description: "desc", Source: SourceLocal, DirPath: dir}
@@ -57,7 +57,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "name",
 		},
 		{
-			name: "bad name too short",
+			name:    "bad name too short",
 			dirName: "x",
 			skill: func(dir string) Skill {
 				return Skill{Name: "a", Description: "desc", Source: SourceLocal, DirPath: dir}
@@ -65,7 +65,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "name",
 		},
 		{
-			name: "missing description",
+			name:    "missing description",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "", Source: SourceLocal, DirPath: dir}
@@ -73,7 +73,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "description",
 		},
 		{
-			name: "invalid source",
+			name:    "invalid source",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: "unknown", DirPath: dir}
@@ -81,7 +81,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "source",
 		},
 		{
-			name: "checksum on local",
+			name:    "checksum on local",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceLocal, Checksum: "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", DirPath: dir}
@@ -89,7 +89,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "checksum",
 		},
 		{
-			name: "external missing checksum",
+			name:    "external missing checksum",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceExternal, DirPath: dir}
@@ -97,7 +97,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "checksum",
 		},
 		{
-			name: "external bad checksum format",
+			name:    "external bad checksum format",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceExternal, Checksum: "sha256:zzzz", DirPath: dir}
@@ -105,7 +105,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "checksum",
 		},
 		{
-			name: "script missing on disk",
+			name:    "script missing on disk",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceLocal, Scripts: []string{"scripts/missing.sh"}, DirPath: dir}
@@ -113,7 +113,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "does not exist",
 		},
 		{
-			name: "script absolute path",
+			name:    "script absolute path",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceLocal, Scripts: []string{"/abs/path.sh"}, DirPath: dir}
@@ -121,7 +121,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "absolute",
 		},
 		{
-			name: "script with ..",
+			name:    "script with ..",
 			dirName: "my-skill",
 			skill: func(dir string) Skill {
 				return Skill{Name: "my-skill", Description: "desc", Source: SourceLocal, Scripts: []string{"../escape.sh"}, DirPath: dir}
@@ -129,7 +129,7 @@ func TestValidateSkill(t *testing.T) {
 			wantErr: true, errSub: "..",
 		},
 		{
-			name: "dir name mismatch",
+			name:    "dir name mismatch",
 			dirName: "real-dir",
 			skill: func(dir string) Skill {
 				return Skill{Name: "other-name", Description: "desc", Source: SourceLocal, DirPath: dir}

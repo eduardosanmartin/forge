@@ -16,15 +16,15 @@ import (
 // ShowMoreBelow indicates viewport is not at bottom (stick-to-bottom hint).
 // (Daemon version lives in the title bar; the footer keeps session state.)
 type FooterModel struct {
-	Palette       Palette
-	Width         int
-	Cwd           string
-	SessionID     string
-	DaemonAddr    string
-	Toast         string
-	DaemonErr     string
-	ShowSpinner   bool
-	SpinnerView   string
+	Palette     Palette
+	Width       int
+	Cwd         string
+	SessionID   string
+	DaemonAddr  string
+	Toast       string
+	DaemonErr   string
+	ShowSpinner bool
+	SpinnerView string
 	// WorkingStats is the live elapsed/token estimate for the in-flight
 	// turn ("8,5s · 612 tokens"), the same string already stamped onto
 	// the sent message's Working marker (item 4/12) — shown here too

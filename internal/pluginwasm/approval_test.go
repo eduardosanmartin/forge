@@ -180,7 +180,10 @@ func TestManager_AutoEnableLocal_Reload(t *testing.T) {
 	patchedWasm = bytesReplace(patchedWasm, []byte("greeter_greet"), []byte("myplugx_greet"))
 	manifestGreeter := "name = \"greeter\"\nversion = \"0.1.0\"\ndescription = \"a\"\nsource = \"local\"\nentrypoint = \"greeter.wasm\"\npermissions = [\"fs.read\"]\n\n[[tools]]\nname = \"greeter_greet\"\ndescription = \"t\"\npermission = \"fs.read\"\n"
 	manifestMyplugx := "name = \"myplugx\"\nversion = \"0.1.0\"\ndescription = \"b\"\nsource = \"local\"\nentrypoint = \"myplugx.wasm\"\npermissions = [\"fs.read\"]\n\n[[tools]]\nname = \"myplugx_greet\"\ndescription = \"t\"\npermission = \"fs.read\"\n"
-	for _, tc := range []struct{ name, manifest, entry string; wasm []byte }{
+	for _, tc := range []struct {
+		name, manifest, entry string
+		wasm                  []byte
+	}{
 		{"greeter", manifestGreeter, "greeter.wasm", wasmBytes},
 		{"myplugx", manifestMyplugx, "myplugx.wasm", patchedWasm},
 	} {

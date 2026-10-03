@@ -32,5 +32,3 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) (*daemon.JobCancel
 	}
 	return &result, nil
 }
-
-

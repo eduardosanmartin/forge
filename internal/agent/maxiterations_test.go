@@ -58,8 +58,8 @@ func TestAgentMaxIterationsAbortMessage(t *testing.T) {
 						Role:    "assistant",
 						Content: "retry",
 						ToolCalls: []llm.ToolCall{{
-							ID:   "c",
-							Type: "function",
+							ID:       "c",
+							Type:     "function",
 							Function: llm.ToolCallFunction{Name: "fs_read", Arguments: `{"path":"x"}`},
 						}},
 					},
@@ -88,5 +88,3 @@ func TestAgentMaxIterationsAbortMessage(t *testing.T) {
 		t.Fatalf("IterationCount want 3 (2 limit +1), got %d", res.Metrics.IterationCount)
 	}
 }
-
-

@@ -18,7 +18,7 @@ func TestSessionManager_WiresSpawnSubagentTool(t *testing.T) {
 	llmReg := newTestLLMRegistry()
 	tmp := t.TempDir()
 	policy := perms.PermissionsPolicy{
-		FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
+		FS:    perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
 		Shell: perms.ShellPermissions{Allow: []string{}},
 		Git:   perms.GitPermissions{Allow: []string{}},
 	}
@@ -46,9 +46,9 @@ func TestSessionManager_WiresSpawnSubagentTool(t *testing.T) {
 func TestSpawnSubagentTool_PermissionIsCustomAllowed(t *testing.T) {
 	tmp := t.TempDir()
 	policy := perms.PermissionsPolicy{
-		FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
-		Shell: perms.ShellPermissions{Allow: []string{}},
-		Git:   perms.GitPermissions{Allow: []string{}},
+		FS:     perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
+		Shell:  perms.ShellPermissions{Allow: []string{}},
+		Git:    perms.GitPermissions{Allow: []string{}},
 		Custom: perms.CustomPermissions{Deny: []string{}},
 	}
 	eng, _ := perms.New(policy, tmp, nil)
@@ -69,7 +69,7 @@ func TestSessionManager_SequentialMultiChildViaTool(t *testing.T) {
 	store := newTestStore()
 	tmp := t.TempDir()
 	policy := perms.PermissionsPolicy{
-		FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
+		FS:    perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}},
 		Shell: perms.ShellPermissions{Allow: []string{}},
 		Git:   perms.GitPermissions{Allow: []string{}},
 	}
@@ -112,7 +112,9 @@ func TestSessionManager_SequentialMultiChildViaTool(t *testing.T) {
 	}
 }
 
-func containsStr(s, sub string) bool { return len(s) >= len(sub) && (s == sub || len(s) > len(sub) && searchSub(s, sub)) }
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(s) > len(sub) && searchSub(s, sub))
+}
 func searchSub(s, sub string) bool {
 	for i := 0; i <= len(s)-len(sub); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -159,14 +161,14 @@ func (p *sequentialSpawnProvider) ChatStream(ctx context.Context, req llm.ChatRe
 	return nil, nil
 }
 func (p *sequentialSpawnProvider) ListModels() ([]string, error) { return []string{"test-model"}, nil }
-func (p *sequentialSpawnProvider) Close() error { return nil }
+func (p *sequentialSpawnProvider) Close() error                  { return nil }
 
 type sequentialLLMRegistry struct{ provider *sequentialSpawnProvider }
 
 func (r *sequentialLLMRegistry) GetDefault() (llm.Provider, string) { return r.provider, "test-model" }
 func (r *sequentialLLMRegistry) SetDefault(model string) error      { return nil }
-func (r *sequentialLLMRegistry) ListAll() []llm.ModelInfo          { return nil }
-func (r *sequentialLLMRegistry) Close() error                      { return nil }
+func (r *sequentialLLMRegistry) ListAll() []llm.ModelInfo           { return nil }
+func (r *sequentialLLMRegistry) Close() error                       { return nil }
 func (r *sequentialLLMRegistry) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	return r.provider.Chat(ctx, req)
 }

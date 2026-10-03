@@ -25,16 +25,36 @@ type Palette struct {
 
 // Style helpers — each returns a lipgloss Style using the token color.
 
-func (p Palette) BgStyle() lipgloss.Style         { return lipgloss.NewStyle().Background(lipgloss.Color(p.BG)) }
-func (p Palette) BGElevatedStyle() lipgloss.Style { return lipgloss.NewStyle().Background(lipgloss.Color(p.BGElevated)) }
-func (p Palette) BorderStyle() lipgloss.Style     { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Border)) }
-func (p Palette) TextStyle() lipgloss.Style       { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Text)) }
-func (p Palette) DimStyle() lipgloss.Style        { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Dim)) }
-func (p Palette) FaintStyle() lipgloss.Style      { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Faint)) }
-func (p Palette) AccentStyle() lipgloss.Style     { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent)) }
-func (p Palette) SuccessStyle() lipgloss.Style    { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Success)) }
-func (p Palette) WarningStyle() lipgloss.Style    { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Warning)) }
-func (p Palette) ErrorStyle() lipgloss.Style      { return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Error)) }
+func (p Palette) BgStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Background(lipgloss.Color(p.BG))
+}
+func (p Palette) BGElevatedStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Background(lipgloss.Color(p.BGElevated))
+}
+func (p Palette) BorderStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Border))
+}
+func (p Palette) TextStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Text))
+}
+func (p Palette) DimStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Dim))
+}
+func (p Palette) FaintStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Faint))
+}
+func (p Palette) AccentStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Accent))
+}
+func (p Palette) SuccessStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Success))
+}
+func (p Palette) WarningStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Warning))
+}
+func (p Palette) ErrorStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(p.Error))
+}
 
 // registry holds all known palettes. Adding a new palette is table-driven:
 // insert one entry into this map. The ember palette is the default.

@@ -1,9 +1,9 @@
 package components
 
 import (
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // InputModel wraps a textarea for the prompt input area.

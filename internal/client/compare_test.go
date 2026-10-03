@@ -99,5 +99,3 @@ func TestCompareSessionsViaClient_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrCodeSessionNotFound, got %v", err)
 	}
 }
-
-

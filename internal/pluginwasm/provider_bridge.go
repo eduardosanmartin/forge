@@ -11,21 +11,22 @@ import (
 // providerBridge implements llm.Provider over a provider-plugin (ABI v2, host-driven PULL).
 //
 // Design justification (wazero reentrancy):
-//   wazero forbids a host import invoked BY the guest from calling back into the same
-//   module's exports on the same call stack. Therefore the streaming bridge MUST be
-//   host-driven PULL: the host pulls chunks by invoking the plugin-EXPORTED function
-//   `forge_llm_next_chunk(req_id)` from the host's own goroutine (outside any host-import
-//   frame). The alternative — plugin-driven PUSH via a host import `llm_push_chunk` — would
-//   invert control and force the plugin to drive while the host is inside a host-function
-//   frame, violating the reentrancy constraint and requiring shared mutable state.
-//   Host-pull gives the host control over backpressure, timeouts, and ctx cancellation.
 //
-//   Cancellation: ctx cancellation stops pulling and calls `forge_llm_cancel(req_id)`
-//   (fire-and-forget with timeout). Per-call timeout PluginLLMCallTimeout bounds hung
-//   exports so the daemon never hangs forever (WU2 guard).
+//	wazero forbids a host import invoked BY the guest from calling back into the same
+//	module's exports on the same call stack. Therefore the streaming bridge MUST be
+//	host-driven PULL: the host pulls chunks by invoking the plugin-EXPORTED function
+//	`forge_llm_next_chunk(req_id)` from the host's own goroutine (outside any host-import
+//	frame). The alternative — plugin-driven PUSH via a host import `llm_push_chunk` — would
+//	invert control and force the plugin to drive while the host is inside a host-function
+//	frame, violating the reentrancy constraint and requiring shared mutable state.
+//	Host-pull gives the host control over backpressure, timeouts, and ctx cancellation.
 //
-//   Memory: guest exchange reuses v1 conventions (forge_alloc + packed ptr/len JSON).
-//   No second memory convention is invented.
+//	Cancellation: ctx cancellation stops pulling and calls `forge_llm_cancel(req_id)`
+//	(fire-and-forget with timeout). Per-call timeout PluginLLMCallTimeout bounds hung
+//	exports so the daemon never hangs forever (WU2 guard).
+//
+//	Memory: guest exchange reuses v1 conventions (forge_alloc + packed ptr/len JSON).
+//	No second memory convention is invented.
 type providerBridge struct {
 	wp   *wasmPlugin
 	name string // plugin manifest name, also used as model name

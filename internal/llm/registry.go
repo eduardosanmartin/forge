@@ -67,8 +67,8 @@ type Registry struct {
 	// by accident) declare the same role with different models.
 	roleProviders map[routing.ModelRole]string
 	allowedHosts  []string
-	logger          *slog.Logger
-	mu              sync.RWMutex
+	logger        *slog.Logger
+	mu            sync.RWMutex
 	// fallbackChain backs ChatWithFallback (RNF: failover on rate limit/
 	// transient outage). Parsed once at construction from
 	// config.Config.FallbackChain — malformed or unknown-provider entries

@@ -223,7 +223,9 @@ func TestJSONFlagMatrix(t *testing.T) {
 	// Explicit checks for the stable matrix mandated by RF-6.3.
 	mustHaveJSON := []struct {
 		label string
-		cmd   interface{ Flags() interface{ Lookup(string) interface{} } }
+		cmd   interface {
+			Flags() interface{ Lookup(string) interface{} }
+		}
 	}{
 		// We check via concrete cobra.Command below.
 	}

@@ -325,21 +325,21 @@ func (s *Store) CompareSessions(ctx context.Context, aID, bID string) (*SessionC
 			return nil, fmt.Errorf("compare: read messages: %w", err)
 		}
 		return &SessionCompare{
-			SessionA:       sess,
-			SessionB:       sess,
-			BranchAtSeqA:   branchAtSeq(sess.Metadata),
-			BranchAtSeqB:   branchAtSeq(sess.Metadata),
-			BranchParentA:  branchMetaString(sess.Metadata, "branch_parent"),
-			BranchParentB:  branchMetaString(sess.Metadata, "branch_parent"),
-			BranchRootA:    branchMetaString(sess.Metadata, "branch_root"),
-			BranchRootB:    branchMetaString(sess.Metadata, "branch_root"),
-			CountA:         len(msgs),
-			CountB:         len(msgs),
-			DivergentA:     nil,
-			DivergentB:     nil,
+			SessionA:        sess,
+			SessionB:        sess,
+			BranchAtSeqA:    branchAtSeq(sess.Metadata),
+			BranchAtSeqB:    branchAtSeq(sess.Metadata),
+			BranchParentA:   branchMetaString(sess.Metadata, "branch_parent"),
+			BranchParentB:   branchMetaString(sess.Metadata, "branch_parent"),
+			BranchRootA:     branchMetaString(sess.Metadata, "branch_root"),
+			BranchRootB:     branchMetaString(sess.Metadata, "branch_root"),
+			CountA:          len(msgs),
+			CountB:          len(msgs),
+			DivergentA:      nil,
+			DivergentB:      nil,
 			DivergentCountA: 0,
 			DivergentCountB: 0,
-			SameSession:    true,
+			SameSession:     true,
 		}, nil
 	}
 	aSess, err := s.GetSession(ctx, aID)
@@ -369,21 +369,21 @@ func (s *Store) CompareSessions(ctx context.Context, aID, bID string) (*SessionC
 		return nil, fmt.Errorf("compare: read B tail: %w", err)
 	}
 	return &SessionCompare{
-		SessionA:       aSess,
-		SessionB:       bSess,
-		BranchAtSeqA:   aAt,
-		BranchAtSeqB:   bAt,
-		BranchParentA:  branchMetaString(aSess.Metadata, "branch_parent"),
-		BranchParentB:  branchMetaString(bSess.Metadata, "branch_parent"),
-		BranchRootA:    branchMetaString(aSess.Metadata, "branch_root"),
-		BranchRootB:    branchMetaString(bSess.Metadata, "branch_root"),
-		CountA:         len(aAll),
-		CountB:         len(bAll),
-		DivergentA:     aDiv,
-		DivergentB:     bDiv,
+		SessionA:        aSess,
+		SessionB:        bSess,
+		BranchAtSeqA:    aAt,
+		BranchAtSeqB:    bAt,
+		BranchParentA:   branchMetaString(aSess.Metadata, "branch_parent"),
+		BranchParentB:   branchMetaString(bSess.Metadata, "branch_parent"),
+		BranchRootA:     branchMetaString(aSess.Metadata, "branch_root"),
+		BranchRootB:     branchMetaString(bSess.Metadata, "branch_root"),
+		CountA:          len(aAll),
+		CountB:          len(bAll),
+		DivergentA:      aDiv,
+		DivergentB:      bDiv,
 		DivergentCountA: len(aDiv),
 		DivergentCountB: len(bDiv),
-		SameSession:    false,
+		SameSession:     false,
 	}, nil
 }
 

@@ -32,7 +32,9 @@ func newMockSwitchableRegistry(defaultProvider, defaultModel string, catalog map
 	}
 }
 
-func (r *mockSwitchableRegistry) GetDefault() (llm.Provider, string) { return r.provider, r.defaultModel }
+func (r *mockSwitchableRegistry) GetDefault() (llm.Provider, string) {
+	return r.provider, r.defaultModel
+}
 func (r *mockSwitchableRegistry) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	return r.provider.Chat(ctx, req)
 }

@@ -85,7 +85,7 @@ type Runner struct {
 	// default and costs nothing (a single non-nil check per event site).
 	OnProgress func(ProgressEvent)
 	Clock      func() time.Time // nil = time.Now
-	StateDir     string           // dir for .forge/runs/<run_id> persistence; "" = no persistence
+	StateDir   string           // dir for .forge/runs/<run_id> persistence; "" = no persistence
 	// SessionID is the daemon session backing Executor's turns (see
 	// client.ManifestExecutor). Run persists it into RunState so a later
 	// Resume can hand the same session back to the executor and keep the

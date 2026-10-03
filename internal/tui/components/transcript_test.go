@@ -217,7 +217,7 @@ func TestBuildContentCodeBlockRealSyntaxColors(t *testing.T) {
 
 	keywordSGR := "38;2;217;119;87" // pal.Accent (see testPalette)
 	stringSGR := "38;2;138;166;114" // pal.Success
-	numberSGR := "38;2;217;162;87" // pal.Warning
+	numberSGR := "38;2;217;162;87"  // pal.Warning
 
 	for _, want := range []string{keywordSGR, stringSGR, numberSGR} {
 		if !strings.Contains(out, want) {

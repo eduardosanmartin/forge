@@ -304,6 +304,7 @@ func unwrapFenced(s string) string {
 	}
 	return s
 }
+
 var _ = fmt.Sprintf
 
 func TestUrlcheck_TestdataExists(t *testing.T) {

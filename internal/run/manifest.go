@@ -33,14 +33,14 @@ const (
 
 // Manifest is the run manifest (§7.1 minimal slice).
 type Manifest struct {
-	RunID  string `json:"run_id"`
-	Mode   string `json:"mode"`
-	Goal   string `json:"goal"`
-	Spec   string `json:"spec,omitempty"`
+	RunID   string `json:"run_id"`
+	Mode    string `json:"mode"`
+	Goal    string `json:"goal"`
+	Spec    string `json:"spec,omitempty"`
 	SpecRef string `json:"spec_ref,omitempty"`
 
-	Budget Budget    `json:"budget"`
-	Git    GitConfig `json:"git"`
+	Budget Budget     `json:"budget"`
+	Git    GitConfig  `json:"git"`
 	HITL   HITLConfig `json:"hitl"`
 
 	// Tasks is the decomposed SPEC. When empty the runner creates a single
@@ -51,7 +51,7 @@ type Manifest struct {
 
 // Budget bounds unattended execution (RNF-8).
 type Budget struct {
-	MaxWallClock      string  `json:"max_wall_clock,omitempty"`       // e.g. "30m", "6h", "" = unlimited
+	MaxWallClock      string  `json:"max_wall_clock,omitempty"` // e.g. "30m", "6h", "" = unlimited
 	MaxTokens         int     `json:"max_tokens,omitempty"`
 	MaxIterations     int     `json:"max_iterations,omitempty"`
 	MaxRetriesPerTask int     `json:"max_retries_per_task,omitempty"`
@@ -60,7 +60,7 @@ type Budget struct {
 
 // GitConfig mirrors §7.1 git isolation.
 type GitConfig struct {
-	Isolation     string `json:"isolation,omitempty"`      // worktree | branch | none
+	Isolation     string `json:"isolation,omitempty"` // worktree | branch | none
 	BaseBranch    string `json:"base_branch,omitempty"`
 	WorkBranch    string `json:"work_branch,omitempty"`
 	CommitPerTask bool   `json:"commit_per_task,omitempty"`
@@ -74,11 +74,11 @@ type HITLConfig struct {
 
 // Checkpoint is one HITL pause point.
 type Checkpoint struct {
-	ID       string   `json:"id"`
-	Trigger  string   `json:"trigger"` // after_spec_decomposition | before_task | after_task | before_merge | budget_threshold | before_editing
-	Required bool     `json:"required"`
-	Match    []string `json:"match,omitempty"`     // for before_editing
-	Threshold float64 `json:"threshold,omitempty"` // for budget_threshold (0,1)
+	ID        string   `json:"id"`
+	Trigger   string   `json:"trigger"` // after_spec_decomposition | before_task | after_task | before_merge | budget_threshold | before_editing
+	Required  bool     `json:"required"`
+	Match     []string `json:"match,omitempty"`     // for before_editing
+	Threshold float64  `json:"threshold,omitempty"` // for budget_threshold (0,1)
 }
 
 // Task is one atomic SPEC unit (RF-11.3).

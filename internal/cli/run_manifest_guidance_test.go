@@ -19,8 +19,8 @@ func TestPrintManifestProgress(t *testing.T) {
 		wantHas []string
 	}{
 		{
-			name: "task_start names the task and its position",
-			ev:   run.ProgressEvent{Phase: run.ProgressTaskStart, TaskID: "t2-cli", TaskIndex: 2, TotalTasks: 3},
+			name:    "task_start names the task and its position",
+			ev:      run.ProgressEvent{Phase: run.ProgressTaskStart, TaskID: "t2-cli", TaskIndex: 2, TotalTasks: 3},
 			wantHas: []string{"[2/3]", "t2-cli", "iniciando"},
 		},
 		{

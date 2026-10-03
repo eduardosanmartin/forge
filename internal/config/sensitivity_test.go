@@ -79,12 +79,12 @@ func TestSensitivityMissingDefaultsGeneral(t *testing.T) {
 
 func TestAutonomyCeilingEnforcement(t *testing.T) {
 	cases := []struct {
-		name       string
-		mode       string
-		sens       string
+		name        string
+		mode        string
+		sens        string
 		hasPreMerge bool
-		wantErr    bool
-		errSubstr  string
+		wantErr     bool
+		errSubstr   string
 	}{
 		{"general allows autonomous", "autonomous", "general", false, false, ""},
 		{"general allows checkpoint", "checkpoint", "general", false, false, ""},

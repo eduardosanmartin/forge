@@ -125,38 +125,38 @@ func TestManifestKindValidation(t *testing.T) {
 		ok      bool
 	}{
 		{
-			name: "provider without llm permission rejected",
-			toml: "name = \"mock_provider\"\nversion = \"0.1.0\"\ndescription = \"p\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"provider\"\npermissions = []\n",
+			name:    "provider without llm permission rejected",
+			toml:    "name = \"mock_provider\"\nversion = \"0.1.0\"\ndescription = \"p\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"provider\"\npermissions = []\n",
 			wantErr: "provider plugins must declare",
 		},
 		{
-			name: "llm permission on tool kind rejected",
-			toml: "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\npermissions = [\"llm\"]\n\n[[tools]]\nname = \"my_plugin_greet\"\ndescription = \"g\"\npermission = \"llm\"\n",
+			name:    "llm permission on tool kind rejected",
+			toml:    "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\npermissions = [\"llm\"]\n\n[[tools]]\nname = \"my_plugin_greet\"\ndescription = \"g\"\npermission = \"llm\"\n",
 			wantErr: "\"llm\" is only allowed",
 		},
 		{
-			name: "provider with tools rejected",
-			toml: "name = \"mock_provider\"\nversion = \"0.1.0\"\ndescription = \"p\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"provider\"\npermissions = [\"llm\"]\n\n[[tools]]\nname = \"mock_provider_tool\"\ndescription = \"t\"\npermission = \"llm\"\n",
+			name:    "provider with tools rejected",
+			toml:    "name = \"mock_provider\"\nversion = \"0.1.0\"\ndescription = \"p\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"provider\"\npermissions = [\"llm\"]\n\n[[tools]]\nname = \"mock_provider_tool\"\ndescription = \"t\"\npermission = \"llm\"\n",
 			wantErr: "must not declare",
 		},
 		{
 			name: "valid provider",
 			toml: "name = \"mock_provider\"\nversion = \"0.1.0\"\ndescription = \"mock provider\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"provider\"\npermissions = [\"llm\"]\n",
-			ok: true,
+			ok:   true,
 		},
 		{
 			name: "valid tool without kind (backward compat)",
 			toml: "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\npermissions = [\"fs.read\"]\n\n[[tools]]\nname = \"my_plugin_greet\"\ndescription = \"g\"\npermission = \"fs.read\"\n",
-			ok: true,
+			ok:   true,
 		},
 		{
 			name: "explicit tool kind",
 			toml: "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"tool\"\npermissions = [\"fs.read\"]\n\n[[tools]]\nname = \"my_plugin_greet\"\ndescription = \"g\"\npermission = \"fs.read\"\n",
-			ok: true,
+			ok:   true,
 		},
 		{
-			name: "invalid kind",
-			toml: "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"wizard\"\npermissions = [\"fs.read\"]\n",
+			name:    "invalid kind",
+			toml:    "name = \"my_plugin\"\nversion = \"0.1.0\"\ndescription = \"d\"\nsource = \"local\"\nentrypoint = \"plugin.wasm\"\nkind = \"wizard\"\npermissions = [\"fs.read\"]\n",
 			wantErr: "kind",
 		},
 	}

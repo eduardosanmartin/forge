@@ -33,11 +33,11 @@ type REPLOptions struct {
 
 // REPL is an interactive line-oriented client for one forge session.
 type REPL struct {
-	client       *Client
-	sessionID    string
-	out          io.Writer
-	in           io.Reader
-	v1Enabled    REPLOptions
+	client    *Client
+	sessionID string
+	out       io.Writer
+	in        io.Reader
+	v1Enabled REPLOptions
 	// scanner reads lines from `in`. A struct field (not a Run-local var) so
 	// a command handler like cmdProvider can block for one more line of
 	// input (a menu selection) without restructuring the main loop.

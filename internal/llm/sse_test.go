@@ -83,8 +83,8 @@ func TestSSEParser_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "missing data field produces no event",
-			raw:  "event: ping\n\n",
+			name:   "missing data field produces no event",
+			raw:    "event: ping\n\n",
 			expect: []SSEEvent{},
 		},
 		{
@@ -126,8 +126,8 @@ func TestSSEParser_TableDriven(t *testing.T) {
 			},
 		},
 		{
-			name: "blank lines with no pending data emit nothing",
-			raw:  "\n\n\n",
+			name:   "blank lines with no pending data emit nothing",
+			raw:    "\n\n\n",
 			expect: []SSEEvent{},
 		},
 		{

@@ -16,12 +16,12 @@ func TestPluginWizard_GeneratesValidManifest(t *testing.T) {
 	pluginsRoot := filepath.Join(root, "forge-plugins")
 	// Scripted inputs: name, version, description, 5 perms bools (all false -> defaults fs.read), entrypoint, source
 	values := []string{
-		"my_plugin",       // name
-		"0.1.0",           // version
-		"Test plugin",     // description
+		"my_plugin",             // name
+		"0.1.0",                 // version
+		"Test plugin",           // description
 		"n", "n", "n", "n", "n", // 5 perms (all false)
-		"",                // entrypoint -> default
-		"local",           // source
+		"",      // entrypoint -> default
+		"local", // source
 	}
 	p := NewScriptedPrompter(values)
 	var out bytes.Buffer
@@ -61,12 +61,12 @@ func TestPluginWizard_InvalidNameReprompt(t *testing.T) {
 	pluginsRoot := filepath.Join(root, "forge-plugins")
 	// First name invalid (uppercase / dot), second valid
 	values := []string{
-		"Bad-Name!",        // invalid
-		"good_name",        // valid retried
-		"0.1.0",            // version
-		"desc",             // description
+		"Bad-Name!", // invalid
+		"good_name", // valid retried
+		"0.1.0",     // version
+		"desc",      // description
 		"n", "n", "n", "n", "n",
-		"",                 // entrypoint
+		"", // entrypoint
 		"local",
 	}
 	p := NewScriptedPrompter(values)
@@ -168,7 +168,7 @@ func TestSkillWizard_InvalidNameReprompt(t *testing.T) {
 	root := t.TempDir()
 	skillsRoot := filepath.Join(root, ".forge", "skills")
 	values := []string{
-		"Bad Name!", // invalid
+		"Bad Name!",  // invalid
 		"good-skill", // valid
 		"desc",
 		"",

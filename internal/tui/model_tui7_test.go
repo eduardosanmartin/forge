@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/eduardosanmartin/forge/internal/daemon"
 	"github.com/eduardosanmartin/forge/internal/tui/components"
@@ -847,7 +847,8 @@ func TestWorkingMarker_ErrorKeepsElapsed(t *testing.T) {
 	}
 }
 
-func TestWorkingMarker_HaltKeepsElapsed(t *testing.T) {	m := newTestModel()
+func TestWorkingMarker_HaltKeepsElapsed(t *testing.T) {
+	m := newTestModel()
 	m.entries = []components.Entry{{Role: "user", Content: "hi", Local: true, Meta: workingMarker}}
 	m.spinner = true
 	m.SetSize(80, 24)

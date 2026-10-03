@@ -26,8 +26,10 @@ func (p *modelCapturingProvider) Chat(_ context.Context, req llm.ChatRequest) (l
 func (p *modelCapturingProvider) ChatStream(_ context.Context, _ llm.ChatRequest) (<-chan llm.StreamChunk, error) {
 	return nil, llm.ErrStreamingNotSupported
 }
-func (p *modelCapturingProvider) ListModels() ([]string, error) { return []string{"default-model"}, nil }
-func (p *modelCapturingProvider) Close() error                  { return nil }
+func (p *modelCapturingProvider) ListModels() ([]string, error) {
+	return []string{"default-model"}, nil
+}
+func (p *modelCapturingProvider) Close() error { return nil }
 
 // routedTestLLMRegistry is a minimal LLMRegistryInterface + routerProvider
 // implementation: its GetRouter() lets ExecuteTurnWithModelHint resolve a
@@ -39,12 +41,14 @@ type routedTestLLMRegistry struct {
 	router   *routing.ModelRouter
 }
 
-func (r *routedTestLLMRegistry) GetDefault() (llm.Provider, string)     { return r.provider, "default-model" }
+func (r *routedTestLLMRegistry) GetDefault() (llm.Provider, string) {
+	return r.provider, "default-model"
+}
 func (r *routedTestLLMRegistry) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
 	return r.provider.Chat(ctx, req)
 }
-func (r *routedTestLLMRegistry) Close() error                        { return nil }
-func (r *routedTestLLMRegistry) GetRouter() *routing.ModelRouter     { return r.router }
+func (r *routedTestLLMRegistry) Close() error                    { return nil }
+func (r *routedTestLLMRegistry) GetRouter() *routing.ModelRouter { return r.router }
 
 func newRoutedTestLLMRegistry() *routedTestLLMRegistry {
 	router := routing.NewModelRouter(map[routing.ModelRole]string{

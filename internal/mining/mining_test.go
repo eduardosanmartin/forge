@@ -61,10 +61,10 @@ func TestMine_JoinsSimilar(t *testing.T) {
 
 func TestMine_MinClusterSizeFiltering(t *testing.T) {
 	tests := []struct {
-		name       string
-		trajs      []Trajectory
-		opts       Options
-		wantCount  int
+		name      string
+		trajs     []Trajectory
+		opts      Options
+		wantCount int
 	}{
 		{
 			name: "size 2 filters singleton",

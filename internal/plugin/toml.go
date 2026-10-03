@@ -61,7 +61,7 @@ func parseTOML(data []byte) (Manifest, error) {
 	}
 
 	topFields := make(map[string]fieldVal)
-	var tools []map[string]fieldVal // one entry per [[tools]]
+	var tools []map[string]fieldVal     // one entry per [[tools]]
 	var currentTool map[string]fieldVal // nil until first [[tools]]
 	inTools := false
 
@@ -95,7 +95,7 @@ func parseTOML(data []byte) (Manifest, error) {
 			// Header must be exactly "[[tools]]" possibly with surrounding whitespace and trailing comment.
 			// Any other bracket form is error.
 			// Use comment-stripping that respects strings (strings unlikely in header but handle).
-				stripped := stripTrailingComment(rawLine)
+			stripped := stripTrailingComment(rawLine)
 			// stripped is trimmed?
 			h := strings.TrimSpace(stripped)
 			if h == "[[tools]]" {
@@ -669,5 +669,3 @@ func parseArrayOfStrings(val string, line int) ([]string, error) {
 	// Validate no inline tables etc inside array already caught via non-string check.
 	return out, nil
 }
-
-

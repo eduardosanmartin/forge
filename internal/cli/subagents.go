@@ -54,8 +54,8 @@ type subagentEntry struct {
 }
 
 type subagentsListResult struct {
-	Subagents []subagentEntry `json:"subagents"`
-	Count     int             `json:"count"`
+	Subagents []subagentEntry     `json:"subagents"`
+	Count     int                 `json:"count"`
 	Parents   map[string][]string `json:"parents,omitempty"` // parent -> children ids
 }
 

@@ -615,4 +615,3 @@ func runPluginRemove(name, pluginsRoot string, yes bool, prompter Prompter, out 
 func isApprovalError(err error) bool {
 	return strings.Contains(err.Error(), "requires explicit approval")
 }
-

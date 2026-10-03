@@ -144,7 +144,7 @@ func TestSpawnChild_BoundedContextAndBranchIsolation(t *testing.T) {
 			storeImpl := newBranchMockStore()
 			llmReg := newMockLLMRegistry(&llm.ChatResponse{
 				Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "child done"}}},
-				Usage: &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
+				Usage:   &llm.Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15},
 			})
 			permsEng := newTestPermsEngine(t)
 			toolsReg := tools.NewDefaultRegistry(permsEng, "", newTestLogger())
@@ -258,7 +258,7 @@ func TestSpawnChild_SequentialMultiChild(t *testing.T) {
 	storeImpl := newBranchMockStore()
 	llmReg := newMockLLMRegistry(&llm.ChatResponse{
 		Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "done"}}},
-		Usage: &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+		Usage:   &llm.Usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
 	})
 	permsEng := newTestPermsEngine(t)
 	toolsReg := tools.NewDefaultRegistry(permsEng, "", newTestLogger())

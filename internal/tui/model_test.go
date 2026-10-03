@@ -130,12 +130,12 @@ func TestSlashCommandParsingValidInvalid(t *testing.T) {
 	m.SetSaveFn(fs.fn)
 
 	cases := []struct {
-		name       string
-		input      string
-		wantLayout string
-		wantPal    string
-		wantToast  string
-		wantHelp   bool
+		name          string
+		input         string
+		wantLayout    string
+		wantPal       string
+		wantToast     string
+		wantHelp      bool
 		shouldPersist bool
 		// wantNoToast asserts the toast is empty instead of checking
 		// wantToast — used for the rail-toggle cases: the footer's Layout

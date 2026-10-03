@@ -43,9 +43,9 @@ func TestParseSkillFile_Acceptance(t *testing.T) {
 				"---\n" +
 				"Body\n",
 			want: Skill{
-				Name:        "my-skill",
-				Description: "A minimal skill",
-				Source:      SourceLocal,
+				Name:         "my-skill",
+				Description:  "A minimal skill",
+				Source:       SourceLocal,
 				Instructions: "Body\n",
 			},
 		},
@@ -59,9 +59,9 @@ func TestParseSkillFile_Acceptance(t *testing.T) {
 				"---\n" +
 				"Hello\n",
 			want: Skill{
-				Name:        "my-skill",
-				Description: "A minimal skill without quotes",
-				Source:      SourceLocal,
+				Name:         "my-skill",
+				Description:  "A minimal skill without quotes",
+				Source:       SourceLocal,
 				Instructions: "Hello\n",
 			},
 		},
@@ -134,42 +134,42 @@ func TestParseSkillFile_Rejections(t *testing.T) {
 			wantSub: "unexpected UTF-8 BOM",
 		},
 		{
-			name: "unknown key",
+			name:    "unknown key",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\nunknown: bar\n---\n",
 			wantSub: "unknown field",
 		},
 		{
-			name: "nested mapping",
+			name:    "nested mapping",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\nmetadata:\n  author: x\n---\n",
 			wantSub: "unknown field",
 		},
 		{
-			name: "block scalar pipe",
+			name:    "block scalar pipe",
 			content: "---\nname: foo\ndescription: |\n  block\nsource: local\n---\n",
 			wantSub: "block scalars are not supported",
 		},
 		{
-			name: "tab indentation",
+			name:    "tab indentation",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\n\tcategory: review\n---\n",
 			wantSub: "tabs are not allowed",
 		},
 		{
-			name: "bad checksum format on local not relevant to parse but checksum field present with invalid format still parsed",
+			name:    "bad checksum format on local not relevant to parse but checksum field present with invalid format still parsed",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\nchecksum: \"sha256:zzzz\"\n---\n",
 			wantSub: "", // parsing succeeds, validation will fail later; so no parse error expected
 		},
 		{
-			name: "checksum on local passes parse but validate will fail",
+			name:    "checksum on local passes parse but validate will fail",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\nchecksum: \"sha256:abc\"\n---\n",
 			wantSub: "",
 		},
 		{
-			name: "anchor",
+			name:    "anchor",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\nactivation_keywords: &anchor [\"a\"]\n---\n",
 			wantSub: "anchors and aliases are not supported",
 		},
 		{
-			name: "missing closing fence",
+			name:    "missing closing fence",
 			content: "---\nname: foo\ndescription: \"desc\"\nsource: local\n",
 			wantSub: "missing closing frontmatter fence",
 		},

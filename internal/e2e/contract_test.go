@@ -54,16 +54,16 @@ var (
 // these exact strings or the daemon rejects the call).
 func TestContract_RPCMethodNamesUnique(t *testing.T) {
 	methods := map[string]string{
-		"plugin.list":    daemon.MethodPluginList,
-		"plugin.enable":  daemon.MethodPluginEnable,
-		"plugin.disable": daemon.MethodPluginDisable,
-		"plugin.reload":  daemon.MethodPluginReload,
-		"skill.list":     daemon.MethodSkillList,
-		"skill.enable":   daemon.MethodSkillEnable,
-		"skill.disable":  daemon.MethodSkillDisable,
-		"skill.reload":   daemon.MethodSkillReload,
-		"session.mark_success":   daemon.MethodSessionMarkSuccess,
-		"session.get_messages":   daemon.MethodGetMessages,
+		"plugin.list":                daemon.MethodPluginList,
+		"plugin.enable":              daemon.MethodPluginEnable,
+		"plugin.disable":             daemon.MethodPluginDisable,
+		"plugin.reload":              daemon.MethodPluginReload,
+		"skill.list":                 daemon.MethodSkillList,
+		"skill.enable":               daemon.MethodSkillEnable,
+		"skill.disable":              daemon.MethodSkillDisable,
+		"skill.reload":               daemon.MethodSkillReload,
+		"session.mark_success":       daemon.MethodSessionMarkSuccess,
+		"session.get_messages":       daemon.MethodGetMessages,
 		"session.get_messages_since": daemon.MethodGetMessagesSince,
 	}
 	for want, got := range methods {
@@ -122,11 +122,11 @@ func TestContract_RPCMethodNamesUnique(t *testing.T) {
 // map to distinct JSON-RPC error codes (daemon handler branches on them).
 func TestContract_ErrorCodesUnique(t *testing.T) {
 	codes := map[string]int{
-		"ErrCodeNotLoaded":       daemon.ErrCodeNotLoaded,
-		"ErrCodeAlreadyEnabled":  daemon.ErrCodeAlreadyEnabled,
-		"ErrCodeNotEnabled":      daemon.ErrCodeNotEnabled,
+		"ErrCodeNotLoaded":        daemon.ErrCodeNotLoaded,
+		"ErrCodeAlreadyEnabled":   daemon.ErrCodeAlreadyEnabled,
+		"ErrCodeNotEnabled":       daemon.ErrCodeNotEnabled,
 		"ErrCodeApprovalRequired": daemon.ErrCodeApprovalRequired,
-		"ErrCodeAlreadyExists":   daemon.ErrCodeAlreadyExists,
+		"ErrCodeAlreadyExists":    daemon.ErrCodeAlreadyExists,
 	}
 	seen := make(map[int]string)
 	for name, c := range codes {

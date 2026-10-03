@@ -127,8 +127,8 @@ func TestWizardSmart_ExistingDir_ChooseNewName(t *testing.T) {
 	}
 
 	p := NewScriptedPrompter([]string{
-		"2",  // "elegir otro nombre"
-		"",   // new name left blank -> cancels
+		"2", // "elegir otro nombre"
+		"",  // new name left blank -> cancels
 	})
 	var out bytes.Buffer
 	err := runWizardSmart(context.Background(), p, &out, "taken")

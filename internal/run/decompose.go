@@ -105,4 +105,3 @@ func ParseDecomposedTasks(raw string) ([]Task, error) {
 	}
 	return nil, fmt.Errorf("could not parse a task list from the decomposition response: %w", lastErr)
 }
-

@@ -32,10 +32,10 @@ type Handler struct {
 // are independently constructed subsystems.
 func NewHandler(mgr *SessionManager, logger *slog.Logger, pluginMgr *pluginwasm.Manager, skillMgr *skill.Manager) *Handler {
 	return &Handler{
-		mgr:          mgr,
-		logger:       logger,
-		pluginMgr:    pluginMgr,
-		skillMgr:     skillMgr,
+		mgr:       mgr,
+		logger:    logger,
+		pluginMgr: pluginMgr,
+		skillMgr:  skillMgr,
 		bootstrapMgr: bootstrap.NewManager(mgr.bootstrapProposer(),
 			bootstrap.WithClarifier(mgr.bootstrapClarifier()),
 			bootstrap.WithDecomposer(mgr.manifestDecomposer())),

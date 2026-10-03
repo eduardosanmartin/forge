@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -93,13 +93,13 @@ type Model struct {
 	input    components.InputModel
 
 	// UI state.
-	toast       string
-	daemonAddr  string
-	daemonVers  string
-	daemonErr   string
-	spinner     bool
-	cwd         string
-	keyMap      KeyMap
+	toast      string
+	daemonAddr string
+	daemonVers string
+	daemonErr  string
+	spinner    bool
+	cwd        string
+	keyMap     KeyMap
 
 	// TUI-2: live streaming and daemon control.
 	clock        Clock
@@ -124,8 +124,8 @@ type Model struct {
 	// (event, turn result, message fetch) or turn send. The ghost-turn
 	// watchdog compares against it.
 	lastDaemonMsg time.Time
-	helpVisible  bool
-	helpViewport viewport.Model
+	helpVisible   bool
+	helpViewport  viewport.Model
 	// slash suggestions
 	suggestions        []slashSuggestion
 	suggestionIdx      int
@@ -258,11 +258,26 @@ type TUIClient interface {
 }
 
 // Messages for async daemon responses.
-type statusMsg struct{ res *daemon.StatusResult; err error }
-type listSessionsMsg struct{ res *daemon.ListSessionsResult; err error }
-type createSessionMsg struct{ res *daemon.SessionResult; err error }
-type executeTurnMsg struct{ res *daemon.ExecuteTurnResult; err error }
-type messagesSinceMsg struct{ res *daemon.GetMessagesResult; err error }
+type statusMsg struct {
+	res *daemon.StatusResult
+	err error
+}
+type listSessionsMsg struct {
+	res *daemon.ListSessionsResult
+	err error
+}
+type createSessionMsg struct {
+	res *daemon.SessionResult
+	err error
+}
+type executeTurnMsg struct {
+	res *daemon.ExecuteTurnResult
+	err error
+}
+type messagesSinceMsg struct {
+	res *daemon.GetMessagesResult
+	err error
+}
 
 // TUI-2 daemon control result messages.
 type haltResultMsg struct{ err error }
@@ -273,8 +288,14 @@ type switchModelResultMsg struct {
 	err   error
 }
 type markSuccessResultMsg struct{ err error }
-type pluginListMsg struct{ res *daemon.PluginListResult; err error }
-type skillListMsg struct{ res *daemon.SkillListResult; err error }
+type pluginListMsg struct {
+	res *daemon.PluginListResult
+	err error
+}
+type skillListMsg struct {
+	res *daemon.SkillListResult
+	err error
+}
 
 // Run panel messages (Fase 4). runStatusTickMsg carries the run_id it was
 // scheduled for so a stale in-flight tick from a previously tracked run
@@ -381,27 +402,27 @@ func cwd() string {
 }
 
 // Accessors for tests.
-func (m Model) Layout() string                  { return m.layout }
-func (m Model) ShowSidebar() bool               { return m.showSidebar }
-func (m Model) PaletteName() string             { return m.paletteName }
-func (m Model) SessionID() string               { return m.sessionID }
-func (m Model) Toast() string                   { return m.toast }
-func (m Model) IsMessagePanelVisible() bool     { return m.msgPanelVisible }
-func (m Model) MessagePanelText() string        { return m.msgPanelText }
-func (m Model) MessagePanelKind() string        { return string(m.msgPanelKind) }
-func (m Model) Entries() []components.Entry     { return m.entries }
-func (m Model) TotalTokens() int                { return m.totalTokens }
-func (m Model) MarkedIDs() map[string]bool      { return m.markedIDs }
-func (m Model) IsSpinner() bool                 { return m.spinner }
+func (m Model) Layout() string                              { return m.layout }
+func (m Model) ShowSidebar() bool                           { return m.showSidebar }
+func (m Model) PaletteName() string                         { return m.paletteName }
+func (m Model) SessionID() string                           { return m.sessionID }
+func (m Model) Toast() string                               { return m.toast }
+func (m Model) IsMessagePanelVisible() bool                 { return m.msgPanelVisible }
+func (m Model) MessagePanelText() string                    { return m.msgPanelText }
+func (m Model) MessagePanelKind() string                    { return string(m.msgPanelKind) }
+func (m Model) Entries() []components.Entry                 { return m.entries }
+func (m Model) TotalTokens() int                            { return m.totalTokens }
+func (m Model) MarkedIDs() map[string]bool                  { return m.markedIDs }
+func (m Model) IsSpinner() bool                             { return m.spinner }
 func (m Model) EventsCh() <-chan daemon.JSONRPCNotification { return m.eventsCh }
-func (m Model) CurrentModel() string            { return m.currentModel }
-func (m Model) IsHelpVisible() bool             { return m.helpVisible }
-func (m Model) IsSuggestionsVisible() bool      { return m.suggestionsVisible }
-func (m Model) SuggestionIndex() int            { return m.suggestionIdx }
-func (m Model) SuggestionsList() []slashSuggestion { return m.suggestions }
-func (m Model) SpinnerFrame() string            { return m.spinnerModel.View() }
-func (m Model) RebuildCount() int               { return m.rebuildCount }
-func (m Model) IsSessionFocus() bool            { return m.sessionFocus || m.sessionsDropdownVisible }
+func (m Model) CurrentModel() string                        { return m.currentModel }
+func (m Model) IsHelpVisible() bool                         { return m.helpVisible }
+func (m Model) IsSuggestionsVisible() bool                  { return m.suggestionsVisible }
+func (m Model) SuggestionIndex() int                        { return m.suggestionIdx }
+func (m Model) SuggestionsList() []slashSuggestion          { return m.suggestions }
+func (m Model) SpinnerFrame() string                        { return m.spinnerModel.View() }
+func (m Model) RebuildCount() int                           { return m.rebuildCount }
+func (m Model) IsSessionFocus() bool                        { return m.sessionFocus || m.sessionsDropdownVisible }
 func (m Model) SessionFocusIdx() int {
 	if m.sessionsDropdownVisible {
 		return m.sessionsDropdownIdx
@@ -425,9 +446,9 @@ func (m Model) ModelPanelList() []string {
 	}
 	return out
 }
-func (m Model) ModelPanelIdx() int              { return m.modelPanelIdx }
-func (m Model) TurnCount() int                  { return m.turnCount }
-func (m Model) LastError() string               { return m.lastError }
+func (m Model) ModelPanelIdx() int                 { return m.modelPanelIdx }
+func (m Model) TurnCount() int                     { return m.turnCount }
+func (m Model) LastError() string                  { return m.lastError }
 func (m Model) Plugins() []daemon.PluginInfoResult { return m.plugins }
 func (m Model) Skills() []daemon.SkillInfoResult   { return m.skills }
 func (m Model) AvgLatencyMs() int64 {
@@ -933,7 +954,9 @@ func (m Model) cmdSubscribeEvents() tea.Cmd {
 	}
 }
 
-type eventsSubscribedMsg struct{ ch <-chan daemon.JSONRPCNotification }
+type eventsSubscribedMsg struct {
+	ch <-chan daemon.JSONRPCNotification
+}
 
 // deltaRebuildMsg coalesces burst deltas to a single rebuild at ~14fps.
 type deltaRebuildMsg struct{}
@@ -1096,16 +1119,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.latencyCount++
 				}
 			}
-		// Turn ended in error: keep the elapsed on the pending message
-		// (no token count is known); without a clock just clear the marker.
-		meta := ""
-		if !m.turnStart.IsZero() && m.clock != nil {
-			meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
-		}
-		if m.finalizeWorkingMarkers(meta) {
-			m.rebuildTranscript()
-		}
-		// RF-2.6 failure semantics: if a streaming preview is in-flight,
+			// Turn ended in error: keep the elapsed on the pending message
+			// (no token count is known); without a clock just clear the marker.
+			meta := ""
+			if !m.turnStart.IsZero() && m.clock != nil {
+				meta = m.turnStampPrefix() + formatWorkingElapsed(m.clock.Now().Sub(m.turnStart))
+			}
+			if m.finalizeWorkingMarkers(meta) {
+				m.rebuildTranscript()
+			}
+			// RF-2.6 failure semantics: if a streaming preview is in-flight,
 			// keep the partial text visible but mark it as interrupted — do NOT
 			// silently delete what the user was reading. This preserves the
 			// live preview as evidence of the failure point.
@@ -1177,49 +1200,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					fresh = append(fresh, mr)
 				}
 			}
-		newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
-		// Turn summary on the FINAL assistant entry: "model · elapsed ·
-		// N tokens" in dim (e.g. "qwen2.5-coder:1.5b · 29.4s · 1,4k
-		// tokens"). Intermediate entries keep their per-call meta; the
-		// last reply carries the canonical turn totals.
-		turnTokens := 0
-		if msg.res.Usage != nil {
-			turnTokens = msg.res.Usage.TotalTokens
-		} else {
-			for _, mr := range msg.res.Messages {
-				if mr.Usage != nil {
-					turnTokens += mr.Usage.TotalTokens
+			newEntries := components.EntriesFromMessages(fresh, msg.res.ToolTrace)
+			// Turn summary on the FINAL assistant entry: "model · elapsed ·
+			// N tokens" in dim (e.g. "qwen2.5-coder:1.5b · 29.4s · 1,4k
+			// tokens"). Intermediate entries keep their per-call meta; the
+			// last reply carries the canonical turn totals.
+			turnTokens := 0
+			if msg.res.Usage != nil {
+				turnTokens = msg.res.Usage.TotalTokens
+			} else {
+				for _, mr := range msg.res.Messages {
+					if mr.Usage != nil {
+						turnTokens += mr.Usage.TotalTokens
+					}
 				}
 			}
-		}
-		summaryParts := []string{}
-		// Timestamp prefix: when the turn FINISHED (send time + elapsed),
-		// not when it was sent — using send time here made this line show
-		// the exact same timestamp as the user message right above it (both
-		// stamped from m.turnStart) even when minutes had passed generating
-		// the reply, which read as if the two happened simultaneously.
-		if !m.turnStart.IsZero() {
-			summaryParts = append(summaryParts, m.turnStart.Add(turnElapsed).Format("02/01 15:04"))
-		}
-		if m.currentModel != "" {
-			summaryParts = append(summaryParts, m.currentModel)
-		}
-		if elapsedStr != "" {
-			summaryParts = append(summaryParts, elapsedStr)
-		}
-		if turnTokens > 0 {
-			summaryParts = append(summaryParts, formatTokensAbbrev(turnTokens)+" tokens")
-		}
-		if len(summaryParts) > 0 {
-			summary := strings.Join(summaryParts, " · ")
-			for i := len(newEntries) - 1; i >= 0; i-- {
-				if newEntries[i].Role == "assistant" && !newEntries[i].IsTool {
-					newEntries[i].Meta = summary
-					newEntries[i].Summary = true
-					break
+			summaryParts := []string{}
+			// Timestamp prefix: when the turn FINISHED (send time + elapsed),
+			// not when it was sent — using send time here made this line show
+			// the exact same timestamp as the user message right above it (both
+			// stamped from m.turnStart) even when minutes had passed generating
+			// the reply, which read as if the two happened simultaneously.
+			if !m.turnStart.IsZero() {
+				summaryParts = append(summaryParts, m.turnStart.Add(turnElapsed).Format("02/01 15:04"))
+			}
+			if m.currentModel != "" {
+				summaryParts = append(summaryParts, m.currentModel)
+			}
+			if elapsedStr != "" {
+				summaryParts = append(summaryParts, elapsedStr)
+			}
+			if turnTokens > 0 {
+				summaryParts = append(summaryParts, formatTokensAbbrev(turnTokens)+" tokens")
+			}
+			if len(summaryParts) > 0 {
+				summary := strings.Join(summaryParts, " · ")
+				for i := len(newEntries) - 1; i >= 0; i-- {
+					if newEntries[i].Role == "assistant" && !newEntries[i].IsTool {
+						newEntries[i].Meta = summary
+						newEntries[i].Summary = true
+						break
+					}
 				}
 			}
-		}
 			// Sidecar persistence for elapsed survival (TUI-7): persist per-turn duration keyed by sessionID:seq
 			// Documented sidecar .forge/tui-state.json survives reloads; corrupt file ignored.
 			if durationMs >= 0 && m.sessionID != "" {
@@ -1647,12 +1670,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if len(m.sessions) > 0 && idx >= 0 && idx < len(m.sessions) {
 					sel := m.sessions[idx]
-				m.sessionID = sel.ID
-				m.lastSeq = 0
-				m.entries = nil
-				m.pendingUserText = ""
-				m.resetRunPanelForSessionSwitch()
-				m.rebuildTranscriptForceBottom()
+					m.sessionID = sel.ID
+					m.lastSeq = 0
+					m.entries = nil
+					m.pendingUserText = ""
+					m.resetRunPanelForSessionSwitch()
+					m.rebuildTranscriptForceBottom()
 					m.toast = fmt.Sprintf("session → %s", sel.ID[:8])
 					m.suggestionsVisible = false
 					m.sessionsDropdownVisible = false
@@ -1787,7 +1810,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if strings.TrimSpace(cur) == sel.Command || cur == sel.Command+" " {
 						m.dismissSuggestions()
 						m.relayout() // suggestion box rows leave the input area
-						break // fall through to global enter handling (send)
+						break        // fall through to global enter handling (send)
 					}
 					// Real bug found live driving the TUI through a PTY
 					// harness (hojaDeRuta-qa-autonomo-tui.md Fase 3): once
@@ -1971,40 +1994,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.entries[idx].Meta = m.entries[idx].Meta + " · stream interrupted"
 					}
 				}
-			// turnStart set before the echo entry (not after, as before) so
-			// the echo's Meta can carry the send timestamp immediately —
-			// reported live: it previously only appeared once the turn
-			// finished, well after the message was actually sent.
-			if m.clock == nil {
-				m.clock = realClock{}
-			}
-			m.turnStart = m.clock.Now()
-			// Normal turn: optimistic local echo, clear input, spinner, execute.
-			// The daemon-confirmed copy replaces this echo in executeTurnMsg.
-			// The echo carries the Working marker so the pending message is
-			// visibly marked for the whole turn (finalized on turn end).
-			m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: m.turnStampPrefix() + workingMarker})
-			m.pendingUserText = text
-			m.lastWorkingElapsed = ""
-			// Message history recall (item 20): record every sent message
-			// (skip an exact consecutive repeat, same nicety as shell
-			// history) and stop browsing — the next "up" starts a fresh
-			// walk from the newest entry.
-			if len(m.sentHistory) == 0 || m.sentHistory[len(m.sentHistory)-1] != text {
-				m.sentHistory = append(m.sentHistory, text)
-			}
-			m.historyIdx = -1
+				// turnStart set before the echo entry (not after, as before) so
+				// the echo's Meta can carry the send timestamp immediately —
+				// reported live: it previously only appeared once the turn
+				// finished, well after the message was actually sent.
+				if m.clock == nil {
+					m.clock = realClock{}
+				}
+				m.turnStart = m.clock.Now()
+				// Normal turn: optimistic local echo, clear input, spinner, execute.
+				// The daemon-confirmed copy replaces this echo in executeTurnMsg.
+				// The echo carries the Working marker so the pending message is
+				// visibly marked for the whole turn (finalized on turn end).
+				m.entries = append(m.entries, components.Entry{Role: "user", Content: text, Local: true, Meta: m.turnStampPrefix() + workingMarker})
+				m.pendingUserText = text
+				m.lastWorkingElapsed = ""
+				// Message history recall (item 20): record every sent message
+				// (skip an exact consecutive repeat, same nicety as shell
+				// history) and stop browsing — the next "up" starts a fresh
+				// walk from the newest entry.
+				if len(m.sentHistory) == 0 || m.sentHistory[len(m.sentHistory)-1] != text {
+					m.sentHistory = append(m.sentHistory, text)
+				}
+				m.historyIdx = -1
 				m.rebuildTranscriptForceBottom()
 				m.input.Reset()
 				m.suggestionsVisible = false
 				m.spinner = true
-			m.touchDaemon()
-			m.toast = ""
-			// Animated spinner: single driver. tickImmediate primes the
-			// first frame; bubbles re-arms itself per tick (tag-guarded),
-			// so no second re-arm here (that forked exponentially).
-			tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
-			return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate)
+				m.touchDaemon()
+				m.toast = ""
+				// Animated spinner: single driver. tickImmediate primes the
+				// first frame; bubbles re-arms itself per tick (tag-guarded),
+				// so no second re-arm here (that forked exponentially).
+				tickImmediate := func() tea.Msg { return m.spinnerModel.Tick() }
+				return m, tea.Batch(m.cmdExecuteTurn(text), tickImmediate)
 			}
 		}
 		// Message history recall (item 20): up/down move within the
@@ -2889,7 +2912,7 @@ func (m Model) renderSuggestions() string {
 		desc := s.Description
 		line := cmdStr + "  " + styleDim.Render(desc)
 		if i == m.suggestionIdx {
-			line = styleSel.Render("▶ " + cmdStr) + " " + styleNorm.Render(desc)
+			line = styleSel.Render("▶ "+cmdStr) + " " + styleNorm.Render(desc)
 		} else {
 			line = styleNorm.Render("  "+cmdStr) + " " + styleDim.Render(desc)
 		}
@@ -3947,6 +3970,3 @@ func mergeSidecarDurations(entries []components.Entry, sidecar map[string]int64,
 	}
 	return entries
 }
-
-
-

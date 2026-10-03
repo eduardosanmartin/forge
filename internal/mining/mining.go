@@ -46,9 +46,9 @@ type Trajectory struct {
 
 // Options tunes mining.
 type Options struct {
-	MinClusterSize int     // default 2
-	Threshold      float32 // default 0.4
-	MaxInstructions int    // max lines in instructions (0 = unlimited)
+	MinClusterSize  int     // default 2
+	Threshold       float32 // default 0.4
+	MaxInstructions int     // max lines in instructions (0 = unlimited)
 }
 
 // Proposal is a distilled skill draft.
