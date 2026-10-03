@@ -44,6 +44,13 @@ func TestWizard_RegenAndCargoBuild(t *testing.T) {
 	} else {
 		t.Logf("cargo: %s (%s)", cargoPath, strings.TrimSpace(string(out)))
 	}
+	// The plugin builds for wasm32-unknown-unknown; without that target the
+	// failure is the environment's, not forge's (CI runners have cargo but
+	// not the target — caught by the first CI run, 2026-10-03).
+	if out, err := exec.Command("rustup", "target", "list", "--installed").Output(); err == nil &&
+		!strings.Contains(string(out), "wasm32-unknown-unknown") {
+		t.Skip("LOUD: rust target wasm32-unknown-unknown not installed — run `rustup target add wasm32-unknown-unknown` to exercise this test")
+	}
 
 	tmp := t.TempDir()
 	pluginsRoot := filepath.Join(tmp, "forge-plugins")

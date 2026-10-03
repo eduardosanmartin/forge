@@ -9,6 +9,8 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path"
+	"strings"
 )
 
 //go:embed static
@@ -22,5 +24,21 @@ func Handler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return http.FileServer(http.FS(sub)), nil
+	files := http.FileServer(http.FS(sub))
+	// Explicit content types: the default comes from the OS (on Windows the
+	// registry), which made .js "application/javascript" on one machine and
+	// "text/javascript" on another (caught by CI, 2026-10-03).
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ct, ok := contentTypes[strings.ToLower(path.Ext(r.URL.Path))]; ok {
+			w.Header().Set("Content-Type", ct)
+		}
+		files.ServeHTTP(w, r)
+	}), nil
+}
+
+var contentTypes = map[string]string{
+	".js":   "text/javascript; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".html": "text/html; charset=utf-8",
+	".svg":  "image/svg+xml",
 }

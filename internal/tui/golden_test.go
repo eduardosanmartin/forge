@@ -16,6 +16,9 @@ func seededModel(layout string, showSidebar bool) Model {
 	m.sessionID = "sess-test12345678"
 	m.daemonAddr = "127.0.0.1:8765"
 	m.daemonVers = "v0.0.0-dev"
+	// Fixed cwd: the footer shows it, and the real one differs per machine
+	// (the goldens used to embed the author's checkout path — caught by CI).
+	m.cwd = "/work/forge"
 	m.sessions = []daemon.SessionResult{
 		{ID: "sess-test12345678", MessageCount: 3},
 		{ID: "sess-other87654321", MessageCount: 1},

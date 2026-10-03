@@ -61,6 +61,9 @@ func (m *mockStoreForTransport) BranchSession(ctx context.Context, sourceID stri
 func (m *mockStoreForTransport) MergeBranch(ctx context.Context, sourceID, targetID string) (store.Session, error) {
 	return store.Session{ID: targetID, CreatedAt: 1, UpdatedAt: 1, Metadata: map[string]any{"merged_from": sourceID}}, nil
 }
+func (m *mockStoreForTransport) CompareSessions(ctx context.Context, aID, bID string) (*store.SessionCompare, error) {
+	return nil, nil
+}
 func (m *mockStoreForTransport) AppendMessage(ctx context.Context, msg *store.Message) (int, int64, error) {
 	return 0, 0, nil
 }

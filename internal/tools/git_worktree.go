@@ -477,6 +477,11 @@ func validateWorktreePath(ctx context.Context, workdir, target string) (string, 
 		}
 		absTarget = filepath.Clean(absTarget)
 	}
+	// Compare canonical forms: on Windows the same directory can be spelled
+	// with 8.3 short names (C:\Users\RUNNER~1\...) while git reports the long
+	// form, which made every in-repo path look "outside the repository".
+	absTarget = canonicalPath(absTarget)
+	repoRoot = canonicalPath(repoRoot)
 	if absTarget == repoRoot {
 		return "", "", fmt.Errorf("worktree path must not be the repository root itself")
 	}
@@ -559,4 +564,27 @@ func branchExists(ctx context.Context, workdir, branch string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// canonicalPath resolves symlinks and (on Windows) 8.3 short names in the
+// deepest existing ancestor of p, then re-appends the parts that don't
+// exist yet, so a path still to be created compares equal to git's long form.
+func canonicalPath(p string) string {
+	p = filepath.Clean(p)
+	var rest []string
+	cur := p
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, rest[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p
+		}
+		rest = append(rest, filepath.Base(cur))
+		cur = parent
+	}
 }
