@@ -350,31 +350,42 @@ func (t *Transport) dispatchNotification(notif *JSONRPCNotification) {
 		return
 	}
 
+	// Routing (N5, review 2026-10-03 — subscriptions used to be compared
+	// against the notification METHOD, so a subscribed client received
+	// none of its own session's events):
+	//   - global methods (emergency halt, permission prompts) and events
+	//     carrying no session_id go to every client;
+	//   - a client with no subscriptions receives everything (today's CLI,
+	//     TUI and GUI never subscribe);
+	//   - a subscribed client receives session events only for the sessions
+	//     it subscribed to.
+	sessionID := notificationSessionID(notif)
+	global := notif.Method == MethodEmergencyHalt || notif.Method == MethodPermissionRequestEvent ||
+		notif.Method == MethodPermissionResolvedEvent || sessionID == ""
+
 	t.connsMu.RLock()
 	defer t.connsMu.RUnlock()
-
 	for _, cc := range t.conns {
-		// Global notifications (empty sessionID) go to all clients
-		// Session-specific notifications go only to subscribed clients
-		global := notif.Method == MethodEmergencyHalt || notif.Method == MethodPermissionRequestEvent || notif.Method == MethodPermissionResolvedEvent
-		if global || len(cc.subscriptions) == 0 || cc.subscriptions[notif.Method] {
-			// For session-specific events, check subscription
-			if !global && len(cc.subscriptions) > 0 {
-				// Extract sessionID from notification params if possible
-				// For simplicity, broadcast to all subscribed clients for session events
-				select {
-				case cc.send <- data:
-				default:
-					// Client send buffer full, skip
-				}
-			} else {
-				select {
-				case cc.send <- data:
-				default:
-				}
-			}
+		if !global && len(cc.subscriptions) > 0 && !cc.subscriptions[sessionID] {
+			continue
+		}
+		select {
+		case cc.send <- data:
+		default:
+			// Client send buffer full, skip (best-effort delivery).
 		}
 	}
+}
+
+// notificationSessionID extracts params.session_id, or "".
+func notificationSessionID(notif *JSONRPCNotification) string {
+	var p struct {
+		SessionID string `json:"session_id"`
+	}
+	if len(notif.Params) == 0 || json.Unmarshal(notif.Params, &p) != nil {
+		return ""
+	}
+	return p.SessionID
 }
 
 // HasClients reports whether any client is connected (a permission "ask"
