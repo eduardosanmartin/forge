@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **90/96 cubiertos** (2026-10-03, tras Fases 1-5 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **91/96 cubiertos** (2026-10-03, tras Fases 1-6 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -58,7 +58,7 @@
 **RF-7. GUI web (opcional, desacoplada)**
 - [x] RF-7.1 Modo servidor exponiendo API para GUI web (`forge serve`, JSON-RPC 2.0 sobre WebSocket, `internal/daemon`)
 - [x] RF-7.2 GUI como cliente de la misma API que el CLI (`internal/webui`, sin lógica propia — consume `session.*` como el CLI/TUI)
-- [~] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (parcial: sin diffs de código ni vista de corridas `run.*`; existe: timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
+- [x] RF-7.3 Visualización de diffs, árbol de sesión, estado de agentes (2026-10-03: pestaña Runs con estado, checkpoints y diff por tarea vía `run.task_diff`; existe además: timeline de mensajes/tool-calls en vivo + `session.compare` para divergencia entre ramas)
 - [x] RF-7.4 Acceso remoto protegible con autenticación (token compartido: header Bearer para el CLI, cookie de sesión vía `POST /auth/login` para la GUI — `forge daemon set-password`)
 
 **RF-8. Desarrollo guiado por especificación**
