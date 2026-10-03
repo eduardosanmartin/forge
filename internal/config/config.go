@@ -369,6 +369,11 @@ type AgentConfig struct {
 	MaxIterations       int `json:"max_iterations"`
 	MaxTurnSeconds      int `json:"max_turn_seconds"`
 	MaxParallelChildren int `json:"max_parallel_children"`
+	// DisableSnapshots turns off the per-turn workspace snapshots behind
+	// `forge undo` (internal/snapshot). Snapshots are on by default: one
+	// shadow-git commit before a turn's first file-changing tool call
+	// (~150 ms on a mid-size repo after the first one).
+	DisableSnapshots bool `json:"disable_snapshots,omitempty"`
 }
 
 // Default agent caps (TUI-6, owner decision; timeout added retest-5).
@@ -605,9 +610,10 @@ type fileLimits struct {
 // merging can distinguish "field absent" from "field set to zero value".
 // Zero/negative values are treated as invalid and fall back to defaults.
 type fileAgent struct {
-	MaxIterations       *int `json:"max_iterations"`
-	MaxTurnSeconds      *int `json:"max_turn_seconds"`
-	MaxParallelChildren *int `json:"max_parallel_children"`
+	MaxIterations       *int  `json:"max_iterations"`
+	MaxTurnSeconds      *int  `json:"max_turn_seconds"`
+	MaxParallelChildren *int  `json:"max_parallel_children"`
+	DisableSnapshots    *bool `json:"disable_snapshots"`
 }
 
 // fileConfig mirrors Config with presence-tracking pointers so that merging
@@ -821,6 +827,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 		}
 	}
 	if fc.Agent != nil {
+		if fc.Agent.DisableSnapshots != nil {
+			dst.Agent.DisableSnapshots = *fc.Agent.DisableSnapshots
+		}
 		if fc.Agent.MaxIterations != nil {
 			v := *fc.Agent.MaxIterations
 			if v > 0 {

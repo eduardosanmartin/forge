@@ -33,6 +33,20 @@ type contextKey string
 
 const sessionIDKey contextKey = "forge.session_id"
 
+const turnIDKey contextKey = "forge.turn_id"
+
+// WithTurnID tags ctx with the agent turn it belongs to (the per-turn
+// snapshot hook snapshots once per turn).
+func WithTurnID(ctx context.Context, turnID string) context.Context {
+	return context.WithValue(ctx, turnIDKey, turnID)
+}
+
+// TurnIDFromContext returns the turn ID set by WithTurnID, or "".
+func TurnIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(turnIDKey).(string)
+	return v
+}
+
 // WithSessionID returns a context carrying the parent session ID for spawn tools.
 func WithSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, sessionIDKey, sessionID)

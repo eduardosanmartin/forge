@@ -297,6 +297,24 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Create tools registry (base five tools + the six v1 feature tools on
 	// their real dependencies)
 	toolsReg := tools.NewDefaultRegistryWithDeps(permsEng, workspaceRoot, app.Logger, retriever, compactor, anchorStore)
+	// F4: snapshot the workspace before each turn's first file-changing
+	// tool call, so `forge undo` can roll a turn back (shadow git repo
+	// under ~/.forge/snapshots; the project's own repo is never touched).
+	if !app.Config.Agent.DisableSnapshots {
+		if snaps, err := openSnapshots(workspaceRoot); err != nil {
+			app.Logger.Warn("snapshots disabled: cannot open store", "error", err)
+		} else {
+			toolsReg.SetBeforeMutate(func(ctx context.Context, tool string) {
+				turn := tools.TurnIDFromContext(ctx)
+				if turn == "" {
+					return // not inside an agent turn: nothing to group by
+				}
+				if _, err := snaps.Snapshot(ctx, tools.SessionIDFromContext(ctx), turn, "before "+tool+" in turn "+turn); err != nil {
+					app.Logger.Warn("snapshot failed (undo unavailable for this turn)", "error", err)
+				}
+			})
+		}
+	}
 
 	// Plugin manager: WASM runtime bridging tools into toolsReg; missing dir is NOT an error.
 	// AutoEnableLocal policy lives in the Manager: LoadAll and Reload auto-enable locals.

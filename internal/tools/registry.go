@@ -27,6 +27,7 @@ type Registry struct {
 	mu            sync.RWMutex
 	router        *routing.ModelRouter
 	ask           askState // permission "ask" resolution (ask.go)
+	beforeMutate  func(ctx context.Context, tool string)
 }
 
 // New creates a new Registry with the given permission engine and workspace root.
@@ -177,7 +178,11 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 		}, nil
 	}
 
-	// 4. Execute tool
+	// 4. Execute tool — tools that can change workspace files first give
+	// the snapshot hook (forge undo) a chance to record the prior state.
+	if r.beforeMutate != nil && mutatesWorkspace(name) {
+		r.beforeMutate(ctx, name)
+	}
 	result, err := tool.Execute(ctx, permsReq)
 	if err != nil {
 		return Result{Content: "ERROR: " + err.Error()}, nil
@@ -255,6 +260,24 @@ func NewDefaultRegistry(permsEngine *perms.Engine, workspaceRoot string, logger 
 
 // Unregister removes a tool by name. It is mutex-safe and idempotent: removing
 // a non-existent tool is a no-op. WU2's plugin manager calls this on Disable.
+// SetBeforeMutate registers a hook called right before a tool that can
+// change workspace files runs (after its permission check passed). Used
+// for per-turn snapshots (internal/snapshot, forge undo).
+func (r *Registry) SetBeforeMutate(fn func(ctx context.Context, tool string)) {
+	r.mu.Lock()
+	r.beforeMutate = fn
+	r.mu.Unlock()
+}
+
+// mutatesWorkspace reports whether a tool can change workspace files.
+func mutatesWorkspace(tool string) bool {
+	switch tool {
+	case "fs_write", "shell_exec", "git":
+		return true
+	}
+	return false
+}
+
 func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

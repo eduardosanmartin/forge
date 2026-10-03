@@ -64,3 +64,30 @@ func TestAskOnceSessionAndDeny(t *testing.T) {
 		t.Fatalf("another session must be asked again and honor deny: %q", res.Content)
 	}
 }
+
+// F4: the snapshot hook runs before file-changing tools only, and only
+// once the permission check allowed the call.
+func TestBeforeMutateHook(t *testing.T) {
+	dir := t.TempDir()
+	eng, err := perms.New(perms.PermissionsPolicy{FS: perms.FSPermissions{Read: []string{"./**"}, Write: []string{"./**"}}}, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewDefaultRegistry(eng, dir, nil)
+	var seen []string
+	r.SetBeforeMutate(func(ctx context.Context, tool string) { seen = append(seen, tool+"@"+TurnIDFromContext(ctx)) })
+	ctx := WithTurnID(context.Background(), "turn-7")
+	file := dir + "/a.txt"
+	if _, err := r.Execute(ctx, "fs_write", map[string]any{"path": file, "content": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Execute(ctx, "fs_read", map[string]any{"path": file}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Execute(ctx, "shell_exec", map[string]any{"command": "go"}); err != nil { // denied: no shell allow
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "fs_write@turn-7" {
+		t.Fatalf("hook calls = %v, want only the allowed fs_write", seen)
+	}
+}

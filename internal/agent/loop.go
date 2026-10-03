@@ -257,6 +257,9 @@ func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, us
 		defer cancel()
 	}
 
+	// Tag tool calls with this turn (per-turn snapshots, forge undo).
+	ctx = tools.WithTurnID(ctx, fmt.Sprintf("%s/%d", sessionID, startTime.UnixNano()))
+
 	// Check if session is halted via metadata
 	session, err := a.store.GetSession(ctx, sessionID)
 	if err != nil {
