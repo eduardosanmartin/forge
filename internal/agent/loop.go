@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/config"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/perms"
@@ -165,6 +166,9 @@ type Agent struct {
 	// default provider and whatever the routing flag resolves.
 	overrideProvider llm.Provider
 	overrideModel    string
+	// summaryBg precomputes LLM block summaries between turns (RF-3.3);
+	// every turn preempts it. Nil when no summary model is wired.
+	summaryBg *compaction.Background
 }
 
 // NewAgent creates a new Agent from configuration and dependencies.
@@ -215,6 +219,13 @@ func NewAgent(
 // context assembler. Intended to be called once at construction time.
 func (a *Agent) SetV1Deps(deps V1Deps) {
 	a.ctxAssembler.SetV1Deps(deps)
+	if deps.Summaries != nil {
+		base := deps.BackgroundCtx
+		if base == nil {
+			base = context.Background()
+		}
+		a.summaryBg = compaction.NewBackground(base, a.ctxAssembler.PrecomputeSummaries, a.logger)
+	}
 }
 
 // timeoutError reports a turn timeout with the actionable config pointer,
@@ -238,6 +249,12 @@ func (a *Agent) ExecuteTurn(ctx context.Context, sessionID string, userMessage s
 // ExecuteTurnWithOptions runs one turn with explicit per-turn options (additive).
 func (a *Agent) ExecuteTurnWithOptions(ctx context.Context, sessionID string, userMessage string, opts TurnOptions) (TurnResult, error) {
 	startTime := time.Now()
+	if a.summaryBg != nil {
+		// Local inference serves one request at a time: stop background
+		// summarization so this turn never queues behind it.
+		a.summaryBg.TurnStarted()
+		defer a.summaryBg.TurnFinished(sessionID)
+	}
 	result := TurnResult{
 		Metrics: TurnMetrics{
 			StartTime: startTime,

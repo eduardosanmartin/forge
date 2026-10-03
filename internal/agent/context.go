@@ -80,6 +80,13 @@ type V1Deps struct {
 	// RepoMap, when set, renders the workspace's repo map (F5) for the
 	// stable part of the prompt. Nil disables it.
 	RepoMap func() string
+	// Summaries, when set, renders compacted blocks from LLM summaries
+	// precomputed between turns by the small model (RF-3.3/RF-2.4); blocks
+	// without one fall back to the Compactor's deterministic summary.
+	Summaries *compaction.Hierarchy
+	// BackgroundCtx bounds the agent's between-turn summary work (the
+	// daemon's lifetime). Nil means context.Background().
+	BackgroundCtx context.Context
 }
 
 // SetV1Deps wires the optional v1 feature dependencies. Intended to be
@@ -412,23 +419,74 @@ func (c *ContextAssembler) compactedHistory(ctx context.Context, sessionID strin
 	if ws == 0 {
 		return nil, nil, false
 	}
-	step := windowStep(budget)
-	blockStart := 0
-	for blockStart < ws {
-		next := alignForward(transcript, blockStart+1)
-		// The next boundary: the first turn start at or after the next
-		// step multiple — the same rule historyWindowStart applies.
-		target := ((absPos(transcript, blockStart) / step) + 1) * step
-		for next < ws && absPos(transcript, next) < target {
-			next = alignForward(transcript, next+1)
-		}
-		if next > ws {
-			next = ws
-		}
-		summaries = append(summaries, c.v1Deps.Compactor.SummarizeBlock(toCompactionTurns(transcript[blockStart:next])))
-		blockStart = next
+	blocks := compactionBlocks(transcript, ws, windowStep(budget))
+	if c.v1Deps.Summaries != nil {
+		return c.v1Deps.Summaries.View(ctx, sessionID, blocks), transcript[ws:], true
+	}
+	for _, b := range blocks {
+		summaries = append(summaries, c.v1Deps.Compactor.SummarizeBlock(b.Turns))
 	}
 	return summaries, transcript[ws:], true
+}
+
+// compactionBlocks cuts transcript[:limit] into blocks: each ends at the
+// first turn start at or after the next windowStep multiple of its own
+// start (the same rule historyWindowStart applies), so boundaries depend
+// only on the messages before them and never move as the session grows.
+// The last block is clamped at limit.
+func compactionBlocks(transcript []store.Message, limit, step int) []compaction.Block {
+	var blocks []compaction.Block
+	blockStart := 0
+	for blockStart < limit {
+		next := alignForward(transcript, blockStart+1)
+		target := ((absPos(transcript, blockStart) / step) + 1) * step
+		for next < limit && absPos(transcript, next) < target {
+			next = alignForward(transcript, next+1)
+		}
+		if next > limit {
+			next = limit
+		}
+		span := transcript[blockStart:next]
+		blocks = append(blocks, compaction.Block{
+			StartSeq: span[0].Seq,
+			EndSeq:   span[len(span)-1].Seq,
+			Turns:    toCompactionTurns(span),
+		})
+		blockStart = next
+	}
+	return blocks
+}
+
+// precomputeMinMessages is how long a session must be before summaries
+// are precomputed: half the compaction threshold, so the first blocks are
+// ready when compaction kicks in, and short sessions cost nothing.
+const precomputeMinMessages = compactionThreshold / 2
+
+// PrecomputeSummaries generates the missing LLM summaries of every closed
+// block of a compaction-enabled session, including blocks still inside
+// the verbatim window, so they are ready before the window moves past
+// them. A block is closed once a later turn has started past its
+// boundary. No-op without Summaries wired or with compaction off.
+func (c *ContextAssembler) PrecomputeSummaries(ctx context.Context, sessionID string) error {
+	if c.v1Deps.Summaries == nil {
+		return nil
+	}
+	session, err := c.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if on, _ := session.Metadata["v1_compaction"].(bool); !on {
+		return nil
+	}
+	transcript, err := c.store.GetMessagesSince(ctx, sessionID, 0)
+	if err != nil || len(transcript) < precomputeMinMessages {
+		return err
+	}
+	blocks := compactionBlocks(transcript, len(transcript), windowStep(c.maxHistoryTurns*2))
+	if len(blocks) > 0 && blocks[len(blocks)-1].EndSeq == transcript[len(transcript)-1].Seq {
+		blocks = blocks[:len(blocks)-1] // still open: more turns may join it
+	}
+	return c.v1Deps.Summaries.Precompute(ctx, sessionID, blocks)
 }
 
 func toCompactionTurns(msgs []store.Message) []compaction.Turn {

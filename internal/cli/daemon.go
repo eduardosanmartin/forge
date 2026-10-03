@@ -306,6 +306,16 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 		SkillsLazyLoad: app.Config.Skills.LazyLoad,
 		SkillsEnabled:  app.Config.Skills.Enabled,
 	}
+	// RF-3.3/RF-2.4: LLM block summaries, only when a small model is
+	// declared for the "cheap" role — the generation model is never used
+	// for background work. Generated between turns, never during one.
+	bgCtx, stopBg := context.WithCancel(ctx)
+	defer stopBg()
+	if summaries, model := llmSummaries(ctx, st.DB(), llmReg, compactor); summaries != nil {
+		v1Deps.Summaries = summaries
+		v1Deps.BackgroundCtx = bgCtx
+		app.Logger.Info("compaction: LLM block summaries enabled", "model", model)
+	}
 
 	// Create tools registry (base five tools + the six v1 feature tools on
 	// their real dependencies)
@@ -383,6 +393,7 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Handle shutdown signals
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
+	context.AfterFunc(ctx, stopBg) // no background summaries during shutdown
 
 	// F6: external MCP servers (approved ones, allowed tools only), started
 	// in the background so they never delay the daemon's cold start.

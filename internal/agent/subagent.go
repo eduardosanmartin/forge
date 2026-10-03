@@ -179,6 +179,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parentSessionID string, spec Chi
 		maxParallelChildren: a.maxParallelChildren,
 		overrideProvider:    overrideProvider,
 		overrideModel:       spec.Model,
+		summaryBg:           a.summaryBg,
 	}
 	// Preserve V1 deps wired on the parent assembler.
 	childResult, execErr := childAgent.ExecuteTurn(ctx, branched.ID, spec.Task)
