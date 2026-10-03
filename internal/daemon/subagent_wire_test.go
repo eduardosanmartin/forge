@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/agent"
@@ -76,7 +77,7 @@ func TestSessionManager_SequentialMultiChildViaTool(t *testing.T) {
 	eng, _ := perms.New(policy, tmp, logger)
 	toolsReg := tools.NewDefaultRegistry(eng, tmp, logger)
 	cfg := config.Defaults()
-	callNum := 0
+	var callNum atomic.Int64 // children run from parallel tool calls
 	provider := &sequentialSpawnProvider{callNum: &callNum}
 	llmReg := &sequentialLLMRegistry{provider: provider}
 	emergency := NewEmergencyState(logger)
@@ -125,11 +126,11 @@ func searchSub(s, sub string) bool {
 }
 
 type sequentialSpawnProvider struct {
-	callNum *int
+	callNum *atomic.Int64
 }
 
 func (p *sequentialSpawnProvider) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
-	*p.callNum++
+	n := p.callNum.Add(1)
 	lastUser := ""
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
@@ -143,7 +144,7 @@ func (p *sequentialSpawnProvider) Chat(ctx context.Context, req llm.ChatRequest)
 	if lastUser == "task B" {
 		return llm.ChatResponse{Choices: []llm.Choice{{Message: llm.Message{Role: "assistant", Content: "result B"}}}}, nil
 	}
-	if *p.callNum == 1 {
+	if n == 1 {
 		return llm.ChatResponse{
 			Choices: []llm.Choice{{Message: llm.Message{
 				Role:    "assistant",
