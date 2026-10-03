@@ -216,6 +216,9 @@ func (m *SessionManager) newDaemonManifestRunner(mani *run.Manifest, stateDir, s
 		RunGit:     m.gitRunner(),
 	}
 	if mani.Mode != run.ModeDryRun {
+		r.Verify = m.manifestVerifier(sessionID)
+	}
+	if mani.Mode != run.ModeDryRun {
 		r.Executor = m.manifestExecutor(sessionID)
 	}
 	r.OnCheckpoint = func(cp run.Checkpoint, _ *run.RunState) (bool, error) {
@@ -832,4 +835,29 @@ func unfence(content string) string {
 		return content
 	}
 	return content[i+len(open) : j]
+}
+
+// manifestVerifier checks a task's descriptive done criteria (RNF-8.3) with
+// one more turn in the run's own session — the model that did the work,
+// with its tools, asked to inspect the actual state and answer with a JSON
+// verdict (run.BuildVerificationPrompt / run.ParseVerdict).
+func (m *SessionManager) manifestVerifier(sessionID string) run.Verifier {
+	return func(ctx context.Context, task run.Task) (bool, string, error) {
+		msgs, err := m.ExecuteTurnWithModelHint(ctx, sessionID, run.BuildVerificationPrompt(task), task.ModelHint)
+		if err != nil {
+			return false, "", fmt.Errorf("verification turn: %w", err)
+		}
+		var final string
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "assistant" {
+				final = msgs[i].Content
+				break
+			}
+		}
+		v, err := run.ParseVerdict(final)
+		if err != nil {
+			return false, "", err
+		}
+		return v.Met, v.Evidence, nil
+	}
 }

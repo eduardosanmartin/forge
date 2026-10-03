@@ -74,8 +74,10 @@ func TestRunnerCompletesAllTasks(t *testing.T) {
 	if rep.Status != StatusCompleted || len(rep.CompletedTasks) != 2 {
 		t.Fatalf("report %+v", rep)
 	}
-	if rep.ValidationState != "all_tasks_passed" {
-		t.Fatalf("validation %q", rep.ValidationState)
+	// testManifest's tasks declare no done criteria: they complete, but the
+	// report must not claim they were verified (RNF-8.3).
+	if rep.ValidationState != "passed_with_unverified_tasks" || len(rep.UnverifiedTasks) != 2 {
+		t.Fatalf("validation %q unverified %v", rep.ValidationState, rep.UnverifiedTasks)
 	}
 }
 

@@ -106,6 +106,9 @@ type Runner struct {
 	// (see GitRunner, gitIsolation). Required whenever the manifest asks
 	// for isolation; nil makes such a run fail before any task starts.
 	RunGit GitRunner
+	// Verify checks descriptive (non-"cmd:") done criteria after a task
+	// (RNF-8.3). Nil leaves them unverified — the report lists those tasks.
+	Verify Verifier
 	// Decompose, when true, calls Decomposer to populate Manifest.Tasks
 	// before the task loop starts (only when the manifest declares no
 	// explicit tasks — an already-authored task list is never overwritten).
@@ -117,6 +120,10 @@ type Runner struct {
 
 	budget BudgetState
 	state  RunState
+	// unverified lists tasks that completed without positive verification
+	// of their done criteria (RNF-8.3), for the final report.
+	unverified []string
+
 	// auditLog is non-nil only when sensitivity requires a tamper-evident
 	// trail (RNF-4.10); persistState appends to it when set. Opened and
 	// closed within execute, so it never outlives one Run/Resume call.
@@ -199,6 +206,10 @@ type Report struct {
 	TaskCommits map[string]string `json:"task_commits,omitempty"`
 	MergeCommit string            `json:"merge_commit,omitempty"`
 	GitNotes    []string          `json:"git_notes,omitempty"`
+	// UnverifiedTasks completed without positive verification of their
+	// done criteria (RNF-8.3): none declared, or descriptive with no
+	// verifier wired.
+	UnverifiedTasks []string `json:"unverified_tasks,omitempty"`
 }
 
 const (
@@ -379,6 +390,23 @@ func (r *Runner) checkDoneCriteria(ctx context.Context, task Task) error {
 	trimmed := strings.TrimSpace(task.DoneCriteria)
 	cmdLine, ok := strings.CutPrefix(trimmed, doneCriteriaCmdPrefix)
 	if !ok {
+		// Descriptive criteria (RNF-8.3): never just trusted when a
+		// verifier is wired; recorded as unverified otherwise.
+		if trimmed == "" {
+			r.unverified = append(r.unverified, task.ID+" (no done criteria declared)")
+			return nil
+		}
+		if r.Verify == nil {
+			r.unverified = append(r.unverified, task.ID+" (descriptive criteria, no verifier wired)")
+			return nil
+		}
+		met, evidence, err := r.Verify(ctx, task)
+		if err != nil {
+			return fmt.Errorf("task %s: verifying done_criteria %q: %w", task.ID, trimmed, err)
+		}
+		if !met {
+			return fmt.Errorf("task %s: done_criteria %q not met — verifier evidence: %s", task.ID, trimmed, evidence)
+		}
 		return nil
 	}
 	fields := strings.Fields(cmdLine)
@@ -961,6 +989,10 @@ func (r *Runner) execute(ctx context.Context, resuming bool) (*Report, error) {
 		TaskCommits:       r.state.TaskCommits,
 		MergeCommit:       r.state.MergeCommit,
 		GitNotes:          gitNotes,
+		UnverifiedTasks:   r.unverified,
+	}
+	if len(r.unverified) > 0 {
+		rep.ValidationState = "passed_with_unverified_tasks"
 	}
 	if r.StateDir != "" {
 		_ = r.persistReport(rep)

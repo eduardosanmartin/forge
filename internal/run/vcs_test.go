@@ -203,3 +203,47 @@ func TestRunnerPersistsManifestAndStatesAreListable(t *testing.T) {
 		t.Fatalf("ListStates = %+v, %v", states, err)
 	}
 }
+
+// RNF-8.3 regression: a descriptive done_criteria used to pass unchecked.
+func TestRunnerDescriptiveCriteriaAreVerified(t *testing.T) {
+	m := testManifest(ModeCheckpoint)
+	m.Budget.MaxRetriesPerTask = 0
+	m.Tasks = []Task{{ID: "t1", Goal: "add a README section", DoneCriteria: "README has an Install section"}}
+	verdicts := 0
+	r := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), RunGit: nopGit,
+		Verify: func(_ context.Context, task Task) (bool, string, error) {
+			verdicts++
+			return false, "README.md has no Install heading", nil
+		},
+		OnCheckpoint: func(cp Checkpoint, _ *RunState) (bool, error) { return cp.ID != "implicit-retries-exhausted", nil }}
+	_, err := r.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "paused") || verdicts != 1 {
+		t.Fatalf("an unmet descriptive criterion must fail the task like a failed check (verdicts=%d, err=%v)", verdicts, err)
+	}
+
+	r2 := &Runner{Manifest: m, Config: config.Defaults(), Executor: okExecutor(1, 1), RunGit: nopGit, OnCheckpoint: approveAll,
+		Verify: func(_ context.Context, task Task) (bool, string, error) { return true, "found ## Install", nil }}
+	rep, err := r2.Run(context.Background())
+	if err != nil || rep.ValidationState != "all_tasks_passed" || len(rep.UnverifiedTasks) != 0 {
+		t.Fatalf("verified run: rep=%+v err=%v", rep, err)
+	}
+}
+
+func TestParseVerdict(t *testing.T) {
+	cases := map[string]bool{
+		`{"met": true, "evidence": "tests pass"}`:                    true,
+		"Sure.\n```json\n{\"met\": false, \"evidence\": \"x\"}\n```": false,
+		`I checked it. {"met": true, "evidence": "ok"} Done.`:        true,
+	}
+	for raw, want := range cases {
+		v, err := ParseVerdict(raw)
+		if err != nil || v.Met != want {
+			t.Errorf("ParseVerdict(%q) = %+v, %v; want met=%v", raw, v, err, want)
+		}
+	}
+	for _, bad := range []string{"looks good to me", `{"evidence": "no met field"}`, ""} {
+		if _, err := ParseVerdict(bad); err == nil {
+			t.Errorf("ParseVerdict(%q) must fail: an unreadable verdict never counts as met", bad)
+		}
+	}
+}
