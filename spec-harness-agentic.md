@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **78/96 cubiertos** tras auditoría del código (2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **80/96 cubiertos** (2026-10-03, tras Fase 1 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -110,10 +110,10 @@
 - [x] RNF-3.3 Tests de integración sobre el contrato de la API interna
 
 **RNF-4. Seguridad**
-- [~] RNF-4.1 Permisos deny-by-default para shell/fs/git (+ custom write floor) (parcial: `done_criteria` se ejecuta sin pasar por permisos; `workdir` no confinado; comandos con ruta)
+- [x] RNF-4.1 Permisos deny-by-default para shell/fs/git (+ custom write floor + shell floor: `done_criteria` vía shell_exec, `workdir` confinado, ejecutables del workspace solo por ruta exacta, git floor también vía shell — 2026-10-03)
 - [x] RNF-4.2 Plugins con privilegios mínimos y permisos declarados
 - [x] RNF-4.3 Datos no salen del entorno local sin acción explícita
-- [~] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM (parcial: no cubre claves JSON entre comillas, `*_API_KEY=`, cuerpo PEM, `AIza…`)
+- [x] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM (2026-10-03: claves JSON/YAML entre comillas, `*_API_KEY=`, bloque PEM completo, `AIza…`, Slack, JWT)
 - [x] RNF-4.5 Contenido no confiable tratado como datos, nunca instrucciones
 - [x] RNF-4.6 Procedencia verificada (checksum/firma) para plugins/skills externos
 - [x] RNF-4.7 Aislamiento de SO para shell del core (seccomp/Landlock en Linux; matiz macOS aceptado por spec)
