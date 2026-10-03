@@ -539,6 +539,15 @@ func startTestDaemon(t *testing.T, script ...llm.ChatResponse) *daemonStack {
 		t.Fatalf("connect client: %v", err)
 	}
 	t.Cleanup(func() { _ = cl.Close() })
+	// Connect returns after the handshake, possibly before the server has
+	// registered the connection; a Broadcast in that gap reaches no one.
+	deadline := time.Now().Add(5 * time.Second)
+	for !tx.HasClients() {
+		if time.Now().After(deadline) {
+			t.Fatal("server never registered the client connection")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	return &daemonStack{
 		client:    cl,

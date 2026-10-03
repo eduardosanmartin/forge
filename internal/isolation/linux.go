@@ -341,6 +341,9 @@ func baselineSyscallGroups() [][]string {
 			// Base file I/O and memory: everything read-heavy tools need,
 			// including the Go runtime's own mmap/futex/epoll usage.
 			"read", "write", "readv", "writev",
+			// Positional I/O: glibc's ld.so reads ELF headers with pread64,
+			// so without it every dynamic binary fails to start (EPERM).
+			"pread64", "pwrite64", "preadv", "pwritev", "preadv2", "pwritev2",
 			"open", "openat", "openat2", "close", "creat",
 			"stat", "fstat", "lstat", "newfstatat", "statx",
 			"lseek", "mmap", "munmap", "mprotect", "brk", "msync",
