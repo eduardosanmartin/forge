@@ -209,3 +209,31 @@ func TestContextAssembler_VolatileBlockAfterEarlierHistory(t *testing.T) {
 		t.Fatalf("order: earlier history at %d, skill at %d, request at %d — want history < skill < request", lastOldIdx, skillIdx, requestIdx)
 	}
 }
+
+// F5: the repo map sits in the stable prefix, before any history.
+func TestContextAssembler_RepoMapInStablePrefix(t *testing.T) {
+	transcript := longToolTurn(2, 0, "where is Open?")
+	newestFirst := make([]store.Message, len(transcript))
+	for i, m := range transcript {
+		newestFirst[len(transcript)-1-i] = m
+	}
+	st := &contextMockStore{session: &store.Session{ID: "s", Metadata: map[string]any{}}, messages: newestFirst}
+	asm := NewContextAssembler(tools.New(nil, "", nil), st, 8)
+	asm.SetV1Deps(V1Deps{RepoMap: func() string { return "REPO MAP (test)" }})
+	msgs, err := asm.Build(context.Background(), "s", "where is Open?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapIdx, firstHistory := -1, -1
+	for i, m := range msgs {
+		if m.Content == "REPO MAP (test)" {
+			mapIdx = i
+		}
+		if firstHistory < 0 && m.Role == "user" {
+			firstHistory = i
+		}
+	}
+	if mapIdx < 0 || mapIdx > firstHistory {
+		t.Fatalf("repo map at %d, first history message at %d: want the map before history", mapIdx, firstHistory)
+	}
+}

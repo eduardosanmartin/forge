@@ -24,6 +24,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/mcpbridge"
 	"github.com/eduardosanmartin/forge/internal/perms"
 	"github.com/eduardosanmartin/forge/internal/pluginwasm"
+	"github.com/eduardosanmartin/forge/internal/repomap"
 	"github.com/eduardosanmartin/forge/internal/retrieval"
 	"github.com/eduardosanmartin/forge/internal/skill"
 	"github.com/eduardosanmartin/forge/internal/store"
@@ -302,6 +303,12 @@ func runServe(ctx context.Context, app *App, addr string, approveExternal bool) 
 	// Create tools registry (base five tools + the six v1 feature tools on
 	// their real dependencies)
 	toolsReg := tools.NewDefaultRegistryWithDeps(permsEng, workspaceRoot, app.Logger, retriever, compactor, anchorStore)
+	// F5: repo map + code_symbols (opt-in, agent.repo_map_tokens).
+	if n := app.Config.Agent.RepoMapTokens; n > 0 {
+		ix := repomap.New(workspaceRoot)
+		v1Deps.RepoMap = func() string { return ix.Render(n) }
+		toolsReg.Register(tools.NewCodeSymbolsTool(ix))
+	}
 	// F4: snapshot the workspace before each turn's first file-changing
 	// tool call, so `forge undo` can roll a turn back (shadow git repo
 	// under ~/.forge/snapshots; the project's own repo is never touched).

@@ -402,6 +402,12 @@ type AgentConfig struct {
 	// shadow-git commit before a turn's first file-changing tool call
 	// (~150 ms on a mid-size repo after the first one).
 	DisableSnapshots bool `json:"disable_snapshots,omitempty"`
+	// RepoMapTokens > 0 adds a repo map (top-level symbol signatures by
+	// file, internal/repomap) of about that many tokens to the stable part
+	// of every prompt, plus the code_symbols tool. 0 (default) = off; ~1000
+	// is a reasonable size. Off by default until its net effect (fewer
+	// exploration iterations vs. a bigger prompt) is measured live.
+	RepoMapTokens int `json:"repo_map_tokens,omitempty"`
 }
 
 // Default agent caps (TUI-6, owner decision; timeout added retest-5).
@@ -644,6 +650,7 @@ type fileAgent struct {
 	MaxTurnSeconds      *int  `json:"max_turn_seconds"`
 	MaxParallelChildren *int  `json:"max_parallel_children"`
 	DisableSnapshots    *bool `json:"disable_snapshots"`
+	RepoMapTokens       *int  `json:"repo_map_tokens"`
 }
 
 // fileConfig mirrors Config with presence-tracking pointers so that merging
@@ -872,6 +879,9 @@ func mergeInto(dst *Config, fc *fileConfig) {
 	if fc.Agent != nil {
 		if fc.Agent.DisableSnapshots != nil {
 			dst.Agent.DisableSnapshots = *fc.Agent.DisableSnapshots
+		}
+		if fc.Agent.RepoMapTokens != nil && *fc.Agent.RepoMapTokens >= 0 {
+			dst.Agent.RepoMapTokens = *fc.Agent.RepoMapTokens
 		}
 		if fc.Agent.MaxIterations != nil {
 			v := *fc.Agent.MaxIterations

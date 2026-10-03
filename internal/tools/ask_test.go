@@ -2,10 +2,13 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/perms"
+	"github.com/eduardosanmartin/forge/internal/repomap"
 )
 
 func askRegistry(t *testing.T) *Registry {
@@ -89,5 +92,25 @@ func TestBeforeMutateHook(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0] != "fs_write@turn-7" {
 		t.Fatalf("hook calls = %v, want only the allowed fs_write", seen)
+	}
+}
+
+func TestCodeSymbolsTool(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\n// Open opens.\nfunc Open(p string) error { return nil }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, _ := perms.New(perms.PermissionsPolicy{FS: perms.FSPermissions{Read: []string{"./**"}}}, dir, nil)
+	r := New(eng, dir, nil)
+	r.Register(NewCodeSymbolsTool(repomap.New(dir)))
+	wd, _ := os.Getwd()
+	defer os.Chdir(wd)
+	_ = os.Chdir(dir) // fs.read paths resolve against the process cwd
+	res, err := r.Execute(context.Background(), "code_symbols", map[string]any{"query": "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content, "a.go:4  func  func Open(p string) error") {
+		t.Fatalf("got %q", res.Content)
 	}
 }

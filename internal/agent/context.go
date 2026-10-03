@@ -77,6 +77,9 @@ type V1Deps struct {
 	// SkillsEnabled is the project's skills.enabled config list, used only
 	// when SkillsLazyLoad is false.
 	SkillsEnabled []string
+	// RepoMap, when set, renders the workspace's repo map (F5) for the
+	// stable part of the prompt. Nil disables it.
+	RepoMap func() string
 }
 
 // SetV1Deps wires the optional v1 feature dependencies. Intended to be
@@ -296,6 +299,14 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 			for _, sk := range c.v1Deps.Skills.ActiveManual(c.v1Deps.SkillsEnabled) {
 				messages = append(messages, skillMessage(sk))
 			}
+		}
+	}
+
+	// Repo map (F5): stable across turns unless declarations change, so it
+	// belongs in the cached prefix, before any history.
+	if c.v1Deps.RepoMap != nil {
+		if m := c.v1Deps.RepoMap(); m != "" {
+			messages = append(messages, llm.Message{Role: "system", Content: m})
 		}
 	}
 
