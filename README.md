@@ -7,13 +7,33 @@ permission policy. The product thesis, architecture, and versioned roadmap are
 specified in `spec-harness-agentic.md` (v0.8); this repository implements the
 v0 MVP defined there.
 
-## Status: MVP v0
+## Status
 
-Scope (spec §6): agent + native tools over a workspace, one OpenAI-compatible
-provider adapter (Ollama), persistent SQLite sessions, full CLI, basic git +
-shell tooling, and the security floor (deny-by-default permissions, network
-allowlist, emergency halt). v1+ capabilities — retrieval, compaction,
-subagents, OS isolation beyond Linux — are out of scope.
+v0 is complete and most of the v1 surface is in place: **92 of 97**
+requirements covered (the checklist at the top of `spec-harness-agentic.md`
+is the source of truth, including what is partial and why). CI runs
+gofmt/vet/build/test on Linux, Windows and macOS, plus a race-detector job on
+Linux.
+
+Beyond the v0 core (agent + native tools, Ollama/OpenAI-compatible providers,
+SQLite sessions, CLI, security floor), forge now ships:
+
+- **Context efficiency:** cache-friendly context assembly, block-stable
+  compaction, incremental retrieval, repo map (`code_symbols` tool), memory
+  anchors, routing between models.
+- **Runs (RF-11):** multi-task runs with branch isolation, one commit per
+  task, `done_criteria` checks, checkpoints before merge, recovery after a
+  daemon restart, and a workspace lock while an isolated run holds it.
+- **Extensibility:** WASM plugins (wazero), skills with mining from
+  successful sessions, MCP client and server, subagents.
+- **Interfaces:** CLI, terminal TUI, embedded web GUI, remote access with
+  token + TLS.
+- **Safety extras:** interactive permission prompts, per-turn file
+  snapshots with `forge undo`, prompt-injection heuristics on tool output.
+
+Still open: hierarchical LLM compaction (RF-3.3), routing of compaction and
+retrieval to the small model (RF-2.4), semantic skill loading (RF-4.2), and
+live benchmark runs on the second reference hardware profile (RNF-10.2/10.3).
 
 ## Quickstart
 
@@ -156,9 +176,9 @@ External MCP servers extend the agent's tools without writing a plugin:
 - **RNF-4.5** Tool results are untrusted data, wrapped in fencing markers so
   content can never steer the harness as instructions.
 - **RNF-4.7** On Linux, shell commands run through an OS-isolation wrapper
-  (Landlock + seccomp via forge re-exec); `require_isolation` refuses shell
-  execution when unavailable. Windows/macOS v0 are permissions-only (documented
-  spec §6 nuance).
+  (Landlock + seccomp via forge re-exec), exercised by the Linux CI job;
+  `require_isolation` refuses shell execution when unavailable. Windows/macOS
+  are permissions-only (documented spec §6 nuance).
 - **RNF-4.8** Emergency halt from any client cancels in-flight turns
   immediately; halted sessions persist state and reject turns until resumed.
 - **RNF-4.9** Network egress allowlist is on by default in every mode.
@@ -170,6 +190,7 @@ go build ./...            # compile everything
 go vet ./...
 gofmt -l .                # must print nothing
 go test -count=1 ./...    # default suite: no live model required
+go test -race ./...       # needs cgo (a C compiler); CI runs it on Linux
 ```
 
 End-to-end verification lives in `internal/e2e`:
@@ -207,6 +228,14 @@ Layout:
 | `internal/llm` | OpenAI-compatible provider adapter + hot-swap registry |
 | `internal/store` | SQLite sessions/messages with migrations |
 | `internal/isolation` | Linux Landlock/seccomp wrapper capability |
+| `internal/run` | multi-task run engine (RF-11): branches, verification, recovery |
+| `internal/retrieval`, `internal/embedding`, `internal/compaction` | context retrieval, embeddings, history compaction |
+| `internal/repomap` | workspace symbol index behind `code_symbols` |
+| `internal/mcpbridge` | MCP client: external servers' tools as forge tools (`forge mcp serve` exposes forge itself) |
+| `internal/plugin`, `internal/pluginwasm`, `internal/skill` | plugins (WASM) and skills |
+| `internal/snapshot` | per-turn file snapshots for `forge undo` |
+| `internal/tui` | terminal UI |
+| `internal/bench`, `internal/benchlive`, `internal/perf` | offline/live benchmarks and performance tests |
 | `internal/e2e` | offline + live end-to-end suites |
 
 ## Roadmap
