@@ -35,10 +35,12 @@ type Transport struct {
 
 	// RF-7.4/RNF-4.11: remote-access auth + TLS. Empty/empty means both are
 	// disabled, which is only permitted for a loopback bind — see Start.
-	authTokenHash string
-	sessions      *sessionStore
-	tlsCertFile   string
-	tlsKeyFile    string
+	authTokenHash  string
+	verifiedDigest atomic.Value // *[32]byte: SHA-256 of the last token that fully verified (see verify)
+	sessions       *sessionStore
+	logins         *loginLimiter
+	tlsCertFile    string
+	tlsKeyFile     string
 }
 
 // SetAuth configures the shared token (as SHA-256 hex, see HashToken) every
@@ -79,6 +81,31 @@ func isLoopbackAddr(addr string) bool {
 	return ip.IsLoopback()
 }
 
+// loopbackHostGuard rejects requests whose Host header isn't a loopback
+// name. A loopback-bound daemon with no auth (the default) is otherwise
+// reachable from any web page through DNS rebinding: evil.example resolves
+// to 127.0.0.1, so the browser sends Origin and Host both "evil.example" —
+// they match, the WebSocket origin check passes, and the page drives the
+// agent's shell/fs tools. A rebinding page can't forge the Host header, so
+// pinning it to localhost/127.0.0.1/[::1] closes that hole. Not applied to
+// non-loopback binds, which already require auth + TLS.
+func loopbackHostGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		host = strings.Trim(host, "[]")
+		if !strings.EqualFold(host, "localhost") {
+			if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+				http.Error(w, "forbidden host", http.StatusForbidden)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // ClientConn represents a connected client with its session subscriptions.
 type ClientConn struct {
 	conn          *websocket.Conn
@@ -103,6 +130,7 @@ func NewTransport(addr string, handler *Handler, logger *slog.Logger) *Transport
 		logger:    logger,
 		conns:     make(map[*websocket.Conn]*ClientConn),
 		broadcast: make(chan *JSONRPCNotification, 256),
+		logins:    newLoginLimiter(),
 	}
 }
 
@@ -126,6 +154,8 @@ func (t *Transport) Start(ctx context.Context) error {
 			return fmt.Errorf("refusing to bind %q (not loopback) without: %s", t.addr, strings.Join(missing, ", "))
 		}
 	}
+
+	loopbackBind := isLoopbackAddr(t.addr)
 
 	rawListener, err := net.Listen("tcp", t.addr)
 	if err != nil {
@@ -167,8 +197,12 @@ func (t *Transport) Start(ctx context.Context) error {
 		t.logger.Warn("webui: embedded assets unavailable, GUI route disabled", "error", err)
 	}
 
+	var root http.Handler = mux
+	if loopbackBind {
+		root = loopbackHostGuard(mux)
+	}
 	t.server = &http.Server{
-		Handler:           mux,
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

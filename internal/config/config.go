@@ -103,7 +103,8 @@ type DaemonConfig struct {
 	// Setting this lets a project pin a stable local port instead of getting
 	// a new one on every restart.
 	Addr string `json:"addr,omitempty"`
-	// AuthTokenHash is SHA-256(token) as lowercase hex. The raw token is
+	// AuthTokenHash is the salted PBKDF2 hash written by set-password
+	// (daemon.HashPassword); a legacy SHA-256 hex digest is still accepted. The raw token is
 	// never persisted — `forge daemon set-password` writes only this hash.
 	// Empty means auth is disabled (only valid for a loopback bind).
 	AuthTokenHash string `json:"auth_token_hash,omitempty"`

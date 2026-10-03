@@ -29,11 +29,11 @@ func newDaemonCommand() *cobra.Command {
 }
 
 func newSetPasswordCommand() *cobra.Command {
-	var clear bool
+	var clear, generate bool
 	cmd := &cobra.Command{
 		Use:   "set-password",
 		Short: "Set (or clear) the daemon's remote-access auth token (RF-7.4)",
-		Long: "Hashes (SHA-256) a shared token/password and writes it to ~/.forge/config.json\n" +
+		Long: "Hashes (salted PBKDF2-SHA256) a shared token/password and writes it to ~/.forge/config.json\n" +
 			"as daemon.auth_token_hash — the raw token itself is never stored. This is\n" +
 			"required, together with TLS (--tls-cert/--tls-key or --tls-self-signed), before\n" +
 			"`forge serve --addr` can bind beyond loopback (RNF-4.11's safety floor); a\n" +
@@ -41,7 +41,9 @@ func newSetPasswordCommand() *cobra.Command {
 			"Reads the password from stdin. Prefer piping it in so it never touches shell\n" +
 			"history or a process listing:\n" +
 			"  printf '%s' 'my password' | forge daemon set-password\n" +
-			"Typing it interactively works too, but it will echo to the terminal.\n\n" +
+			"Typing it interactively works too, but it will echo to the terminal.\n" +
+			"--generate skips stdin and creates a random 256-bit token instead (printed once —\n" +
+			"copy it then; it can't be recovered from the stored hash).\n\n" +
 			"The CLI (forge run/chat/...) sends this same token back as a Bearer header via\n" +
 			"the FORGE_DAEMON_TOKEN environment variable when talking to a remote daemon;\n" +
 			"a local/loopback daemon needs neither the token configured nor set.",
@@ -59,16 +61,29 @@ func newSetPasswordCommand() *cobra.Command {
 				return nil
 			}
 
-			token, err := readPasswordLine(cmd.InOrStdin())
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(token) == "" {
-				return &UsageError{Err: fmt.Errorf("password must not be empty")}
+			var token string
+			if generate {
+				if token, err = daemon.GenerateToken(); err != nil {
+					return fmt.Errorf("generate token: %w", err)
+				}
+			} else {
+				if token, err = readPasswordLine(cmd.InOrStdin()); err != nil {
+					return err
+				}
+				if strings.TrimSpace(token) == "" {
+					return &UsageError{Err: fmt.Errorf("password must not be empty")}
+				}
 			}
 
-			if err := setDaemonAuthTokenHash(path, daemon.HashToken(token)); err != nil {
+			hash, err := daemon.HashPassword(token)
+			if err != nil {
+				return fmt.Errorf("hash token: %w", err)
+			}
+			if err := setDaemonAuthTokenHash(path, hash); err != nil {
 				return fmt.Errorf("update config: %w", err)
+			}
+			if generate {
+				fmt.Fprintf(cmd.OutOrStdout(), "Generated token (shown once, copy it now): %s\n", token)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Daemon auth token set in %s (the raw token was not stored).\n", path)
 			fmt.Fprintln(cmd.OutOrStdout(), "Export FORGE_DAEMON_TOKEN with this same value on any machine that runs the forge CLI against this daemon remotely.")
@@ -76,6 +91,7 @@ func newSetPasswordCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&clear, "clear", false, "remove the configured token instead of setting one")
+	cmd.Flags().BoolVar(&generate, "generate", false, "generate a random token instead of reading a password from stdin")
 	return cmd
 }
 
