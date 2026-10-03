@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **83/96 cubiertos** (2026-10-03, tras Fases 1-2 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **90/96 cubiertos** (2026-10-03, tras Fases 1-5 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -85,7 +85,7 @@
 - [x] RF-11.5 Agotar reintentos = checkpoint HITL implícito
 - [x] RF-11.6 Continuar solo con criterio de "hecho" cumplido
 - [x] RF-11.7 Checkpoint HITL: detener, resumir, esperar input humano
-- [~] RF-11.8 Log/auditoría reanudable (parcial: el daemon no redescubre corridas pausadas al reiniciar; existe: `RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
+- [x] RF-11.8 Log/auditoría reanudable (2026-10-03: el daemon redescubre corridas interrumpidas/pausadas al reiniciar y las reanuda por run_id; existe: `RunState` persiste en `.forge/runs/`; `forge run --manifest ... --resume` reanuda desde el último estado consistente, salta tareas ya completadas y preserva la sesión/ventana de wall-clock original)
 - [x] RF-11.9 Niveles de autonomía configurables
 - [x] RF-11.10 Reporte final de corrida
 
@@ -99,9 +99,9 @@
 
 **RNF-2. Eficiencia de contexto/tokens**
 - [x] RNF-2.1 Medición y reporte de tokens por turno/sesión/proveedor (TurnMetrics)
-- [~] RNF-2.2 Orden estable para maximizar prompt-caching (parcial: la ventana deslizante desplaza el prefijo cada turno; Anthropic sin `cache_control`)
+- [x] RNF-2.2 Orden estable para maximizar prompt-caching (2026-10-03: material por turno después del historial, ventana por pasos, compactación por bloques estables, `cache_control` en Anthropic; medido offline: tokens re-procesados 102,7k → 42,0k en 40 turnos)
 - [x] RNF-2.3 Reducción ≥40% vs naive en sesiones >20 turnos (bench)
-- [~] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión) (parcial: mismo motivo que RNF-2.2)
+- [x] RNF-2.4 Reutilización KV-cache local (prefijo estable por sesión) (2026-10-03: ídem RNF-2.2; banco en vivo Perfil A: mismo prefijo de ~2k tokens, TTFT 164,9 s → 0,42 s)
 - [x] RNF-2.5 Techo de contexto objetivo 4-8k tokens (2026-10-03: `fs_read` paginado a 16 KB, shell cabeza 4 KB + cola 8 KB, turno actual completo + historia en el resto del presupuesto; validación en vivo pendiente de RNF-10)
 
 **RNF-3. Modularidad y mantenibilidad**
@@ -137,10 +137,10 @@
 - [x] RNF-7.2 Configuración por proyecto versionable junto al código
 
 **RNF-8. Autonomía segura (ligado a RF-11)**
-- [ ] RNF-8.1 Worktree/branch aislado en modo autónomo (el runner solo valida que el manifest lo declare; no crea worktree ni rama)
+- [x] RNF-8.1 Worktree/branch aislado en modo autónomo (2026-10-03: `git.isolation: branch` real — rama propia, árbol limpio, merge solo tras checkpoint `before_merge` aprobado; `worktree` se rechaza explícitamente hasta que las tools soporten otra raíz)
 - [x] RNF-8.2 Piso de seguridad no configurable (git floor, budget walls)
-- [~] RNF-8.3 Criterio de "tarea completada" con verificación positiva (parcial: un `done_criteria` sin `cmd:` se aprueba sin verificar)
-- [ ] RNF-8.4 Commits atómicos y reversibles por tarea (commit por tarea es un no-op en `internal/run/runner.go`)
+- [x] RNF-8.3 Criterio de "tarea completada" con verificación positiva (2026-10-03: `cmd:` vía shell con permisos; criterios descriptivos verificados por un turno con veredicto JSON; tareas sin verificación positiva quedan listadas en el reporte)
+- [x] RNF-8.4 Commits atómicos y reversibles por tarea (2026-10-03: un commit por tarea tras su criterio de hecho; merge `--no-ff`)
 
 **RNF-9. Clasificación de sensibilidad (techo de autonomía)**
 - [x] RNF-9.1 Clasificación única en config versionada (`general`/`regulado`/`datos-sensibles`)
@@ -149,9 +149,9 @@
 - [x] RNF-9.4 Cambio de clasificación requiere acción humana explícita y registrada
 
 **RNF-10. Validación empírica de rendimiento**
-- [ ] RNF-10.1 Banco de pruebas repetible (parcial: bench offline de tokens existe; faltan tokens/s, TTFT y prefill sobre modelo real)
-- [ ] RNF-10.2 Corrida sobre los dos perfiles de hardware de referencia, métricas separadas
-- [ ] RNF-10.3 Objetivos cuantitativos de RNF-1/RNF-2 validados contra el banco en vivo
+- [x] RNF-10.1 Banco de pruebas repetible (2026-10-03: `forge bench live` — tokens/s, TTFT, prefill por tamaño, reuso de KV-cache y tiempo de pared; línea base en `docs/bench/`)
+- [ ] RNF-10.2 Corrida sobre los dos perfiles de hardware de referencia, métricas separadas (parcial: Perfil A medido 2026-10-03; falta Perfil B en su máquina)
+- [ ] RNF-10.3 Objetivos cuantitativos de RNF-1/RNF-2 validados contra el banco en vivo (parcial: el banco existe; la reducción ≥40% sigue medida offline, y el Perfil A muestra que 4-8k tokens de contexto frío son minutos de prefill en CPU)
 
 ---
 
