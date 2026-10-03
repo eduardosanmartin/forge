@@ -9,6 +9,7 @@ import (
 	"github.com/eduardosanmartin/forge/internal/compaction"
 	"github.com/eduardosanmartin/forge/internal/llm"
 	"github.com/eduardosanmartin/forge/internal/routing"
+	"github.com/eduardosanmartin/forge/internal/tools"
 )
 
 // summaryMaxTokens bounds one summary completion (prompts ask for at most
@@ -31,7 +32,9 @@ func llmSummaries(ctx context.Context, db *sql.DB, reg *llm.Registry, compactor 
 		slog.Default().Warn("compaction: summary table unavailable, LLM summaries disabled", "error", err)
 		return nil, ""
 	}
-	return compaction.NewHierarchy(compaction.NewSQLSummaryCache(db), summarizeWith(provider, model), model, 4, compactor.SummarizeBlock), model
+	h := compaction.NewHierarchy(compaction.NewSQLSummaryCache(db), summarizeWith(provider, model), model, 4, compactor.SummarizeBlock)
+	h.SetFilter(tools.DetectInjection) // summaries enter the prompt as system messages
+	return h, model
 }
 
 // summarizeWith returns a SummarizeFunc over one provider and model.

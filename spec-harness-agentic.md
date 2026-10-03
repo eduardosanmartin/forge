@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **92/97 cubiertos** (2026-10-03, tras Fases 1-7 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **93/97 cubiertos** (2026-10-03, tras Fases 1-7 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -25,14 +25,14 @@
 - [x] RF-2.1 Proveedores OpenAI-compatibles (Ollama, llama.cpp, vLLM, LM Studio)
 - [x] RF-2.2 Adaptadores propios: Anthropic y Gemini
 - [x] RF-2.3 Cambio de proveedor/modelo sin reiniciar sesión
-- [~] RF-2.4 Ruteo por costo/complejidad (`model_roles`) (parcial: solo enruta el paso de generación; compactación y retrieval no usan modelo chico)
+- [~] RF-2.4 Ruteo por costo/complejidad (`model_roles`) (parcial: enruta la generación y, desde 2026-10-03, los resúmenes de compactación al rol `cheap`; la clasificación de intención y las queries de retrieval aún no usan modelo chico)
 - [x] RF-2.5 Ruteo por tipo de paso (`ModelForStepSelector`)
 - [x] RF-2.6 Streaming opt-in (default OFF, TTFT, falla vinculante)
 
 **RF-3. Gestión de contexto y memoria**
 - [x] RF-3.1 Memoria persistente entre sesiones (anchors)
 - [x] RF-3.2 Recuperación selectiva de contexto (retrieval) (2026-10-03: índice por sesión, incremental, sin repetir lo que ya está en la ventana)
-- [~] RF-3.3 Compactación jerárquica progresiva (parcial: truncado determinista por mensaje, sin jerarquía ni tope)
+- [x] RF-3.3 Compactación jerárquica progresiva (2026-10-03: árbol fijo de resúmenes LLM del rol `cheap` — uno por bloque, uno por cada 4 — persistidos en SQLite e inmutables, generados entre turnos y cancelados al empezar un turno; los anchors van aparte y nunca se compactan. En vivo, 40 turnos con qwen2.5-coder:1.5b en Perfil A: vista compactada ~2.582 → ~300 tokens, prompt completo ~4.912 → ~2.630 (−46%), 26 resúmenes en 6 min 52 s en segundo plano. Límite medido: el modelo 1.5B confunde a veces "sugerido" con "hecho", por eso la vista se rotula como aproximada)
 - [x] RF-3.4 Inspección/edición manual de memoria (`forge memory`)
 - [x] RF-3.5 Anclaje explícito (tools + write floor RNF-4.12)
 

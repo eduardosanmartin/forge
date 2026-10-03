@@ -320,10 +320,16 @@ func (c *ContextAssembler) BuildWithQuery(ctx context.Context, sessionID string,
 	// One system message per summarized block: a new block appends a
 	// message instead of rewriting a shared one, so earlier blocks keep
 	// matching the cached prefix.
+	// LLM summaries from a small model blur "suggested" into "done"
+	// (measured live with a 1.5B model), so they are labeled as approximate.
+	partNote := ""
+	if c.v1Deps.Summaries != nil {
+		partNote = " (approximate: verify details against the files before relying on them)"
+	}
 	for i, sum := range summaries {
 		messages = append(messages, llm.Message{
 			Role:    "system",
-			Content: fmt.Sprintf("COMPACTED HISTORY (v1): [part %d]\n%s", i+1, sum),
+			Content: fmt.Sprintf("COMPACTED HISTORY (v1): [part %d]%s\n%s", i+1, partNote, sum),
 		})
 	}
 	for _, msg := range earlier {

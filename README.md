@@ -31,9 +31,9 @@ SQLite sessions, CLI, security floor), forge now ships:
 - **Safety extras:** interactive permission prompts, per-turn file
   snapshots with `forge undo`, prompt-injection heuristics on tool output.
 
-Still open: hierarchical LLM compaction (RF-3.3), routing of compaction and
-retrieval to the small model (RF-2.4), semantic skill loading (RF-4.2), and
-live benchmark runs on the second reference hardware profile (RNF-10.2/10.3).
+Still open: routing of retrieval to the small model (RF-2.4), semantic skill
+loading (RF-4.2), and live benchmark runs on the second reference hardware
+profile (RNF-10.2/10.3).
 
 ## Quickstart
 
@@ -138,6 +138,33 @@ allows it.
   store cap is deferred (not enforced). Enforcement is install-time only — the
   managers do not re-check sizes on load; oversized artifacts are rejected at
   the policy boundary before bytes are written.
+
+### History compaction with a small model (RF-3.3)
+
+Sessions with compaction on (`--compaction`) show older history as summaries
+instead of verbatim turns. Declaring a small model for the `cheap` role makes
+those summaries LLM-written instead of truncated excerpts:
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "kind": "openai-compatible",
+      "base_url": "http://127.0.0.1:11434/v1",
+      "models": ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"],
+      "model_roles": { "generation": "qwen2.5-coder:7b", "cheap": "qwen2.5-coder:1.5b" }
+    }
+  }
+}
+```
+
+Summaries form a fixed tree (one per block of turns, then one per four
+summaries, and so on) stored in SQLite: once written they never change, so
+they stay a cacheable prompt prefix, and the compacted view grows only
+logarithmically with the session. They are generated between turns and the
+work stops the moment a turn starts, so a turn never waits behind it. Without
+a `cheap` role the deterministic summaries are used and nothing runs in the
+background.
 
 ### MCP servers
 
