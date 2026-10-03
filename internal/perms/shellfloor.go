@@ -2,6 +2,7 @@ package perms
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -26,7 +27,7 @@ func (e *Engine) shellFloor(req Request) (Decision, bool) {
 		return Decision{Allowed: false, Rule: "workdir-outside-workspace"}, true
 	}
 
-	if strings.ContainsAny(req.Command, `/\`) {
+	if strings.ContainsAny(req.Command, programPathSeps) {
 		base := req.Workdir
 		if base == "" {
 			base = e.workspaceRoot
@@ -57,6 +58,18 @@ func (e *Engine) shellFloor(req Request) (Decision, bool) {
 		}
 	}
 	return Decision{}, false
+}
+
+// programPathSeps are the characters that make a command a path to a
+// program rather than a name looked up in PATH: "/" everywhere, and "\"
+// only on Windows (on Unix "\" is an ordinary filename character).
+var programPathSeps = defaultProgramPathSeps()
+
+func defaultProgramPathSeps() string {
+	if runtime.GOOS == "windows" {
+		return `/\`
+	}
+	return "/"
 }
 
 // workdirInside reports whether dir (relative paths resolve against the

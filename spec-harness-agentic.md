@@ -13,7 +13,7 @@
 >
 > Convenciones: `- [x]` cubierto · `- [ ]` pendiente · las anotaciones entre paréntesis precisan estados parciales o decisiones de alcance.
 >
-> Última actualización: 2026-10-03 — **92/97 cubiertos** (2026-10-03, tras Fases 1-7 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
+> Última actualización: 2026-10-03 — **91/97 cubiertos** (2026-10-03, tras Fases 1-7 de `hojaDeRuta-mejoras-revision.md`; base: auditoría del código 2026-10-02): 2 ítems marcados antes como cubiertos no estaban implementados (RNF-8.1, RNF-8.4) y 13 quedan como parciales (`- [~]`). Plan de cierre: `hojaDeRuta-mejoras-revision.md`. Convención añadida: `- [~]` parcial.
 
 **RF-1. Núcleo de ejecución**
 - [x] RF-1.1 Agente conversacional con tool-calling sobre workspace
@@ -117,7 +117,7 @@
 - [x] RNF-4.4 Secrets redactados antes de logs/store/contexto LLM (2026-10-03: claves JSON/YAML entre comillas, `*_API_KEY=`, bloque PEM completo, `AIza…`, Slack, JWT)
 - [x] RNF-4.5 Contenido no confiable tratado como datos, nunca instrucciones
 - [x] RNF-4.6 Procedencia verificada (checksum/firma) para plugins/skills externos
-- [x] RNF-4.7 Aislamiento de SO para shell del core (seccomp/Landlock en Linux; matiz macOS aceptado por spec)
+- [~] RNF-4.7 Aislamiento de SO para shell del core (parcial, 2026-10-03: el primer CI en Linux mostró que la política seccomp no se arma — `invalid default_action value 327681` — y que `/bin/true` vía el aislamiento sale con 126; nunca se había ejecutado en Linux. Pendiente de depurar en un entorno Linux. Windows/macOS: solo modelo de permisos, como acepta la spec)
 - [x] RNF-4.8 Parada de emergencia desde cualquier cliente
 - [x] RNF-4.9 Allowlist de red explícita por defecto en adaptadores
 - [x] RNF-4.10 Log/auditoría a prueba de manipulación (hash-chain append-only en `.forge/runs/<run_id>/audit.jsonl`, activo con sensibilidad `regulado`/`datos-sensibles`; `forge run --manifest ... --verify-audit` verifica la cadena)

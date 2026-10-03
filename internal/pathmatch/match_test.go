@@ -225,3 +225,26 @@ func TestMatchTable(t *testing.T) {
 		})
 	}
 }
+
+// CI regression (ubuntu/macos, 2026-10-03): POSIX absolute patterns never
+// matched — the pattern's leading "/" was stripped but the path's wasn't,
+// so the documented absolute-pattern escape hatch for fs permissions was
+// dead on Linux/macOS (drive-letter patterns worked, hiding it on Windows).
+func TestPosixAbsolutePatternMatchesAbsolutePath(t *testing.T) {
+	cases := []struct {
+		pattern, path string
+		want          bool
+	}{
+		{"/tmp/x/secrets/**", "/tmp/x/secrets/vault.txt", true},
+		{"/tmp/x/secrets/*.txt", "/tmp/x/secrets/vault.txt", true},
+		{"/tmp/x/secrets/**", "/tmp/x/other/vault.txt", false},
+		{"/etc/hosts", "/etc/hosts", true},
+		// A relative pattern must still not match an absolute path.
+		{"tmp/**", "/tmp/a", false},
+	}
+	for _, c := range cases {
+		if got := Match(c.pattern, c.path); got != c.want {
+			t.Errorf("Match(%q, %q) = %v, want %v", c.pattern, c.path, got, c.want)
+		}
+	}
+}

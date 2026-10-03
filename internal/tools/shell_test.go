@@ -6,24 +6,33 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
 
+// script returns the command+args that run a one-liner on this platform:
+// PowerShell on Windows, sh elsewhere. These tests used to be PowerShell-
+// only and failed on every non-Windows runner (first CI run, 2026-10-03).
+func script(windows, unix string) (string, []string) {
+	if runtime.GOOS == "windows" {
+		return "powershell", []string{"-NoProfile", "-Command", windows}
+	}
+	return "sh", []string{"-c", unix}
+}
+
+func shellReq(windows, unix string) perms.Request {
+	cmd, args := script(windows, unix)
+	return perms.Request{Kind: perms.KindShell, Command: cmd, Args: args}
+}
+
 // TestShellExecTool_Basic tests basic shell_exec functionality.
 func TestShellExecTool_Basic(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	// Use PowerShell to output a string
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "Write-Output 'hello world'"},
-	}
-
-	result, err := tool.Execute(context.Background(), req)
+	result, err := tool.Execute(context.Background(), shellReq("Write-Output 'hello world'", "echo 'hello world'"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,14 +51,7 @@ func TestShellExecTool_Basic(t *testing.T) {
 func TestShellExecTool_Args(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	// Use PowerShell for string formatting
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "'a-b'"},
-	}
-
-	result, err := tool.Execute(context.Background(), req)
+	result, err := tool.Execute(context.Background(), shellReq("'a-b'", "echo a-b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +65,9 @@ func TestShellExecTool_Args(t *testing.T) {
 func TestShellExecTool_Timeout(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	// Use ping to create a long-running command (10 pings ~ 9 seconds)
-	req := perms.Request{
-		Kind:       perms.KindShell,
-		Command:    "cmd",
-		Args:       []string{"/c", "ping", "-n", "10", "127.0.0.1"},
-		TimeoutSec: 1,
-	}
+	// A command that runs ~10 s, cut at 1 s.
+	req := shellReq("Start-Sleep -Seconds 10", "sleep 10")
+	req.TimeoutSec = 1
 
 	result, err := tool.Execute(context.Background(), req)
 	if err != nil {
@@ -92,14 +90,7 @@ func TestShellExecTool_Timeout(t *testing.T) {
 func TestShellExecTool_NonZeroExit(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	// PowerShell exit 1 returns exit code 1
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "exit 1"},
-	}
-
-	result, err := tool.Execute(context.Background(), req)
+	result, err := tool.Execute(context.Background(), shellReq("exit 1", "exit 1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,16 +101,11 @@ func TestShellExecTool_NonZeroExit(t *testing.T) {
 	}
 }
 
-// TestShellExecTool_Truncation tests output truncation at 50KB.
+// TestShellExecTool_Truncation tests that small output is not truncated.
 func TestShellExecTool_Truncation(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "echo small output"},
-	}
-	result, err := tool.Execute(context.Background(), req)
+	result, err := tool.Execute(context.Background(), shellReq("echo small output", "echo small output"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,13 +120,11 @@ func TestShellExecTool_Truncation(t *testing.T) {
 func TestShellExecTool_LargeOutput(t *testing.T) {
 	tool := newShellExecTool(nil)
 
-	// Generate ~100KB output using PowerShell
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "1..5000 | ForEach-Object { 'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX' }"},
-	}
-	result, err := tool.Execute(context.Background(), req)
+	// ~330 KB of output.
+	line := strings.Repeat("X", 64)
+	result, err := tool.Execute(context.Background(), shellReq(
+		"1..5000 | ForEach-Object { '"+line+"' }",
+		"i=0; while [ $i -lt 5000 ]; do echo "+line+"; i=$((i+1)); done"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,13 +149,8 @@ func TestShellExecTool_Workdir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use PowerShell to read file
-	req := perms.Request{
-		Kind:    perms.KindShell,
-		Command: "powershell",
-		Args:    []string{"-NoProfile", "-Command", "Get-Content test.txt"},
-		Workdir: tmpDir,
-	}
+	req := shellReq("Get-Content test.txt", "cat test.txt")
+	req.Workdir = tmpDir
 
 	result, err := tool.Execute(context.Background(), req)
 	if err != nil {

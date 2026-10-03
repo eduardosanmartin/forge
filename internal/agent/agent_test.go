@@ -30,7 +30,9 @@ func testPermsPolicy() perms.PermissionsPolicy {
 // newTestPermsEngine creates a permissive perms engine for testing
 func newTestPermsEngine(t *testing.T) *perms.Engine {
 	t.Helper()
-	eng, err := perms.New(testPermsPolicy(), "C:\\", nil) // Use C:\ as workspace root on Windows
+	// A real absolute directory on every OS ("C:\\" isn't absolute on
+	// Linux/macOS — caught by the first CI run, 2026-10-03).
+	eng, err := perms.New(testPermsPolicy(), t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("create perms engine: %v", err)
 	}

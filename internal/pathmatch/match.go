@@ -107,7 +107,14 @@ func Match(pattern, path string) bool {
 	if !ok {
 		return false
 	}
-	pathSegs := strings.Split(strings.TrimPrefix(path, "./"), "/")
+	path = strings.TrimPrefix(path, "./")
+	// patternSegments drops a rooted pattern's leading "/"; drop the path's
+	// too, or POSIX absolute patterns could never match ("" != "tmp"). Only
+	// for rooted patterns: a relative pattern must not match an absolute path.
+	if strings.HasPrefix(pattern, "/") {
+		path = strings.TrimPrefix(path, "/")
+	}
+	pathSegs := strings.Split(path, "/")
 	for _, s := range pathSegs {
 		if s == ".." {
 			// Defensive: matcher never reasons across upward traversal;
