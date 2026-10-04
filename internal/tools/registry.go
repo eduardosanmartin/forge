@@ -166,12 +166,17 @@ func (r *Registry) Execute(ctx context.Context, name string, args map[string]any
 	// 3. Check permissions. An "ask" decision becomes allowed only with a
 	// live human approval (or an earlier approval for this session).
 	decision := r.permsEngine.Check(permsReq)
-	if decision.Ask {
+	asked := decision.Ask
+	if asked {
 		decision = r.resolveAsk(ctx, name, permsReq, decision)
 	}
 	if !decision.Allowed {
+		content := "DENIED: " + decision.Rule
+		if asked && r.hasAsker() {
+			content += askDeniedGuidance
+		}
 		return Result{
-			Content: "DENIED: " + decision.Rule,
+			Content: content,
 			Metadata: map[string]any{
 				"denied": true,
 				"rule":   decision.Rule,

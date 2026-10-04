@@ -64,8 +64,41 @@ func TestAskOnceSessionAndDeny(t *testing.T) {
 		t.Fatalf("allow_session must be remembered for the session: asked %d times", asked)
 	}
 	answer = AskDeny
-	if res := runGo(t, r, "s2"); !strings.Contains(res.Content, "denied by the user") {
+	if res := runGo(t, r, "s2"); !strings.Contains(res.Content, "not approved") {
 		t.Fatalf("another session must be asked again and honor deny: %q", res.Content)
+	}
+}
+
+// A "no" (or no answer) covers that one call. The model used to read
+// "DENIED ... (denied by the user)" as a standing ban and stop calling the
+// tool even when the user asked again (seen with nemotron-3.5-lightning,
+// 2026-10-04); the result now says the denial is scoped to the call, and
+// the next call asks again.
+func TestAskDenialIsScopedToTheCall(t *testing.T) {
+	r := askRegistry(t)
+	asked := 0
+	r.SetAsker(func(context.Context, AskRequest) AskDecision { asked++; return AskDeny })
+	res := runGo(t, r, "s1")
+	for _, want := range []string{"DENIED: ask:shell.exec:go", "this call only", "do not retry it in this turn", "asked again"} {
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("denial %q missing %q", res.Content, want)
+		}
+	}
+	if rule, _ := res.Metadata["rule"].(string); strings.Contains(rule, "retry") {
+		t.Errorf("audit rule should stay concise, got %q", rule)
+	}
+	runGo(t, r, "s1")
+	if asked != 2 {
+		t.Fatalf("a denial must not be remembered: asked %d times", asked)
+	}
+}
+
+// Without a client to answer, retrying later cannot help, so the result
+// does not invite it.
+func TestAskWithoutAskerDoesNotInviteRetry(t *testing.T) {
+	res := runGo(t, askRegistry(t), "s1")
+	if strings.Contains(res.Content, "asked again") {
+		t.Fatalf("no-client denial invites a retry: %q", res.Content)
 	}
 }
 

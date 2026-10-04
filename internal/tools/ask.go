@@ -81,7 +81,9 @@ func (r *Registry) resolveAsk(ctx context.Context, tool string, req perms.Reques
 		}
 		return perms.Decision{Allowed: true, Rule: d.Rule + " (approved for this session)"}
 	default:
-		return perms.Decision{Rule: d.Rule + " (denied by the user)"}
+		// AskDeny also covers a timeout or a turn cancelled while waiting,
+		// so the rule does not claim the user said no.
+		return perms.Decision{Rule: d.Rule + " (not approved: denied or unanswered)"}
 	}
 }
 
@@ -97,4 +99,19 @@ func summarizeRequest(req perms.Request) string {
 	default:
 		return fmt.Sprintf("%s %s%s", req.Kind, req.Path, req.Command)
 	}
+}
+
+// askDeniedGuidance follows a denied ask in the tool result. Without it the
+// model read "denied" as a standing ban and stopped calling the tool even
+// when the user later asked again; it also must not retry at once, which
+// would put the same question straight back in front of the user.
+const askDeniedGuidance = "\nThis applies to this call only: do not retry it in this turn. " +
+	"If the user asks for it again later, call the tool again: they will be asked again."
+
+// hasAsker reports whether a client can be asked, i.e. whether a later
+// attempt could be approved at all.
+func (r *Registry) hasAsker() bool {
+	r.ask.mu.Lock()
+	defer r.ask.mu.Unlock()
+	return r.ask.asker != nil
 }
