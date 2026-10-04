@@ -3,9 +3,12 @@
 package tools
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"reflect"
+	"strings"
 
 	"github.com/eduardosanmartin/forge/internal/perms"
 )
@@ -207,6 +210,9 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 				req.Args[i], _ = a.(string)
 			}
 		}
+		if err := commandLineInCommand(cmd, req.Args); err != nil {
+			return req, err
+		}
 		if timeout, ok := args["timeout_sec"].(float64); ok {
 			req.TimeoutSec = int(timeout)
 		}
@@ -244,4 +250,22 @@ func BuildPermsRequest(toolName string, args map[string]any) (perms.Request, err
 		return req, fmt.Errorf("unknown tool: %s", toolName)
 	}
 	return req, nil
+}
+
+// commandLineInCommand rejects a whole command line sent as "command"
+// ("go version"): models do this often, it can never match a permission
+// rule (the program would be "go version"), and exec would look for a
+// program by that name. The error spells out the corrected call so the
+// model can retry it. An existing executable whose path has spaces
+// ("C:\Program Files\Go\bin\go.exe") is legitimate and passes.
+func commandLineInCommand(cmd string, args []string) error {
+	if !strings.ContainsAny(cmd, " \t") {
+		return nil
+	}
+	if info, err := os.Stat(cmd); err == nil && !info.IsDir() {
+		return nil
+	}
+	fields := strings.Fields(cmd)
+	fixed, _ := json.Marshal(append(fields[1:], args...))
+	return fmt.Errorf(`shell_exec: "command" must be only the program, with each argument in "args" — call it as {"command": %q, "args": %s}`, fields[0], fixed)
 }

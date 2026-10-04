@@ -59,12 +59,12 @@ func (t *shellExecTool) JSONSchema() map[string]any {
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
-				"description": "Executable name or path to execute",
+				"description": "Program to run, ONLY its name or path, without arguments (e.g. \"go\", not \"go version\")",
 			},
 			"args": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"description": "Command arguments",
+				"description": "Arguments, one per item (e.g. [\"version\"] or [\"test\", \"./...\"])",
 			},
 			"timeout_sec": map[string]any{
 				"type":        "number",
