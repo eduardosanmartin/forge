@@ -9,7 +9,7 @@ v0 MVP defined there.
 
 ## Status
 
-v0 is complete and most of the v1 surface is in place: **92 of 97**
+v0 is complete and most of the v1 surface is in place: **97 of 102**
 requirements covered (the checklist at the top of `spec-harness-agentic.md`
 is the source of truth, including what is partial and why). CI runs
 gofmt/vet/build/test on Linux, Windows and macOS, plus a race-detector job on
