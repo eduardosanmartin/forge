@@ -115,9 +115,9 @@ func TestOffline_HaltsMidConversation(t *testing.T) {
 	time.Sleep(700 * time.Millisecond) // let the turn register and hit the LLM
 
 	// RNF-4.8 semantics: the emergency stop is issued from a SECOND client
-	// connection (any client must be able to halt), because a single daemon
-	// connection is serialized — its own in-flight turn blocks any further
-	// request sent over it.
+	// connection — any client must be able to halt, not only the one whose
+	// turn is running (that one can too: requests on a connection are
+	// handled concurrently since 2026-10-04).
 	halter, err := client.Connect(context.Background(), s.transport.Addr())
 	if err != nil {
 		t.Fatalf("halt client connect: %v", err)

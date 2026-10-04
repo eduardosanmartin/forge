@@ -22,8 +22,11 @@ import (
 
 // Transport handles WebSocket connections and JSON-RPC message dispatch.
 type Transport struct {
-	addr      string
-	handler   *Handler
+	addr    string
+	handler *Handler
+	// handle serves one request; handler.HandleRequest unless a test
+	// swaps it.
+	handle    func(ctx context.Context, req *JSONRPCRequest) *JSONRPCResponse
 	logger    *slog.Logger
 	server    *http.Server
 	listener  net.Listener
@@ -124,7 +127,7 @@ func (cc *ClientConn) closeDone() {
 
 // NewTransport creates a new Transport.
 func NewTransport(addr string, handler *Handler, logger *slog.Logger) *Transport {
-	return &Transport{
+	t := &Transport{
 		addr:      addr,
 		handler:   handler,
 		logger:    logger,
@@ -132,6 +135,10 @@ func NewTransport(addr string, handler *Handler, logger *slog.Logger) *Transport
 		broadcast: make(chan *JSONRPCNotification, 256),
 		logins:    newLoginLimiter(),
 	}
+	if handler != nil {
+		t.handle = handler.HandleRequest
+	}
+	return t
 }
 
 // Start starts the WebSocket server.
@@ -429,6 +436,7 @@ func (cc *ClientConn) readLoop(t *Transport) {
 	defer t.removeClient(cc.conn)
 	defer cc.closeDone()
 
+	inflight := make(chan struct{}, maxInflightPerConn)
 	for {
 		_, data, err := cc.conn.Read(cc.readCtx)
 		if err != nil {
@@ -446,18 +454,52 @@ func (cc *ClientConn) readLoop(t *Transport) {
 			continue
 		}
 
-		// Handle request bound to the CONNECTION lifetime: when the client
-		// goes away (drop, close, or transport stop), any in-flight work —
-		// above all a long agent turn — is cancelled instead of continuing
-		// as an invisible zombie holding the LLM provider busy.
-		resp := t.handler.HandleRequest(cc.readCtx, &req)
-		if resp != nil {
-			respData, _ := json.Marshal(resp)
-			select {
-			case cc.send <- respData:
-			default:
-			}
+		// Each request runs on its own goroutine, so a long one never
+		// blocks the ones after it on this connection: a turn waiting for
+		// a permission answer must still receive the permission.respond
+		// (and an emergency halt) its own client sends. Handled one at a
+		// time, the answer queued behind the turn until the ask timed out.
+		// The handler already serves many connections concurrently, so it
+		// is safe to call this way. In-flight requests per connection are
+		// capped; past the cap reading waits.
+		//
+		// Requests run under readCtx, which Stop cancels: a transport stop
+		// ends in-flight work, above all a long agent turn. A client that
+		// merely disconnects does not cancel its running turn (it never
+		// did: readCtx is only cancelled by Stop).
+		select {
+		case inflight <- struct{}{}:
+		case <-cc.readCtx.Done():
+			return
 		}
+		t.wg.Add(1)
+		go func(req JSONRPCRequest) {
+			defer t.wg.Done()
+			defer func() { <-inflight }()
+			if resp := t.handle(cc.readCtx, &req); resp != nil {
+				respData, _ := json.Marshal(resp)
+				t.reply(cc, respData)
+			}
+		}(req)
+	}
+}
+
+// maxInflightPerConn caps concurrently handled requests per connection.
+const maxInflightPerConn = 16
+
+// reply queues a response for the connection's writer. Stop closes cc.send
+// under connsMu after setting stopping, so checking stopping under the
+// read lock makes a late reply (from a request that outlived the
+// connection) a no-op instead of a send on a closed channel.
+func (t *Transport) reply(cc *ClientConn, data []byte) {
+	t.connsMu.RLock()
+	defer t.connsMu.RUnlock()
+	if t.stopping.Load() {
+		return
+	}
+	select {
+	case cc.send <- data:
+	default:
 	}
 }
 
